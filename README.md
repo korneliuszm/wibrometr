@@ -16,16 +16,24 @@ Czujnik pracuje przez SPI (tryb 3, 1 MHz), na wspólnej magistrali z TFT.
 | CS | A5 / GPIO8 |
 | INT | A4 / GPIO14 |
 | RST | A3 / GPIO15 |
-| PS0 (WAKE), PS1 | 3V (oba w stanie wysokim = SPI) |
+| PS0 (WAKE) | A2 / GPIO16 |
+| PS1 | 3V |
 | GND | GND |
 | Zasilanie modułu | 3V / 3,3 V, zgodnie z opisem wejścia Twojego GY-BNO085 |
 
 Linie SPI pracują na poziomie 3,3 V. Sprawdź oznaczenia na swoim wariancie
 GY; moduły mogą mieć różne regulatory i opisy pinów (MOSI bywa opisane
-jako AD0, SA0 lub DI). INT jest wymagany: sterownik czyta dane tylko przy
-INT w stanie niskim. RST pozwala zresetować czujnik przy każdej próbie
-połączenia. Piny INT/RST można zmienić w stałych `imuInt` / `imuRst`
-w `src/main.cpp`. Krótki przewód i wspólna masa.
+jako AD0, SA0 lub DI). INT, RST i PS0 są wymagane. PS0 nie może być
+na stałe podpięty do 3V: firmware trzyma go wysoko podczas resetu (tryb
+SPI), a przed każdym zapisem ściąga nisko (WAKE), żeby czujnik
+zgłosił gotowość przez INT — bez tego czujnik nie przyjmuje poleceń.
+Piny można zmienić w stałych `imuInt` / `imuRst` / `imuWake`
+w `src/main.cpp`.
+
+Gdy czujnik nie odpowiada, ekran pokazuje `BNO: BRAK INT` (brak reakcji
+INT po resecie — sprawdź INT, RST, zasilanie) albo `BNO: BRAK SPI`
+(INT działa, ale brak odpowiedzi — sprawdź PS0, PS1, SCK, MOSI, MISO, CS).
+Port szeregowy podaje szczegóły każdej próby. Krótki przewód i wspólna masa.
 
 ## Ekran i obsługa
 
