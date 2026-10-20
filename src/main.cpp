@@ -309,12 +309,13 @@ void drawSpectrum(uint32_t now, int channel) {
     canvas.setCursor(0, plotY);
     canvas.printf("%.0f", fftRange);
     label(18, plotY + plotH - 7, muted, "0");
-    // DC is removed, so bin 0 is skipped; one stem per bin up to Nyquist.
+    // DC is removed, so bin 0 is skipped; one line vertex per bin up to Nyquist.
+    int prevX = 0, prevY = 0;
     for (std::size_t k = 1; k <= fftSize / 2; ++k) {
       int x = plotX + k * (plotW - 1) / (fftSize / 2);
-      int h = lroundf(fminf(spectrum[k] / fftRange, 1.0f) * (plotH - 1));
-      if (h > 0)
-        canvas.drawFastVLine(x, plotY + plotH - 1 - h, h + 1, colors[channel]);
+      int y = plotY + plotH - 1 - lroundf(fminf(spectrum[k] / fftRange, 1.0f) * (plotH - 1));
+      if (k > 1) canvas.drawLine(prevX, prevY, x, y, colors[channel]);
+      prevX = x; prevY = y;
     }
     canvas.setCursor(plotX, 110);
     canvas.print("0");

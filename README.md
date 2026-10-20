@@ -61,7 +61,7 @@ rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
   częstotliwości raportów (do 250 Hz przy 500 Hz). Oś Hz skaluje się
   według zmierzonego tempa raportów, więc przy mniejszej częstotliwości
   pokazuje mniejszy zakres.
-- Oś pionowa: amplituda sinusoidy w m/s², skala sztywna 0–5 (stała
+- Oś pionowa: amplituda sinusoidy w m/s² rysowana jako linia, skala sztywna 0–5 (stała
   `fftRange`); większe prążki są obcinane. Wiersz statusu podaje
   częstotliwość i amplitudę największego prążka.
 - ZBIERANIE n/512: okno jeszcze się wypełnia (po starcie, wznowieniu
