@@ -9,6 +9,7 @@
 #include <cmath>
 #include "SignalHistory.h"
 #include "Spectrum.h"
+#include "StrokeCounter.h"
 #include "RestartableBNO08x.h"
 
 namespace {
@@ -35,9 +36,10 @@ Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(240, 135);
 SignalHistory<bins> history;
 RestartableBNO08x imu(imuRst);
-enum Screen { TimeScreen, FftX, FftY, FftZ, BatteryScreen, ScreenCount };
+enum Screen { TimeScreen, FftX, FftY, FftZ, StrokeScreen, BatteryScreen, ScreenCount };
 int screen = TimeScreen;
 SampleWindow<fftSize> window;
+StrokeCounter strokes; // Hand strokes along the sensor X axis; fed regardless of pause.
 float spectrum[fftSize / 2 + 1];
 // Feather 5483 carries a MAX17048 (newer) or LC709203F (older) fuel gauge.
 enum class Gauge { None, Max17048, Lc709203f };
@@ -213,7 +215,11 @@ void pollButton(uint32_t now) {
     if (pressed) buttonDown = now;
     else {
       uint32_t duration = now - buttonDown;
-      if (duration >= 3000) {
+      if (screen == StrokeScreen) {
+        // This screen: a tap clears the counter, a hold moves on.
+        if (duration >= 1000) screen = (screen + 1) % ScreenCount;
+        else { strokes.reset(); showNotice("LICZNIK SKASOWANY", now); }
+      } else if (duration >= 3000) {
         if (zeroed) {
           history.zero({});
           zeroed = false;
@@ -386,6 +392,34 @@ void pollBattery(uint32_t now) {
   }
   if (!batteryValid) { gauge = Gauge::None; gaugeProbeAt = now + gaugeRetryMs; }
 }
+void drawStrokes(uint32_t now) {
+  drawHeader(now, "RUCHY OSI X", colors[0]);
+  label(0, 13, fresh(now) ? ST77XX_GREEN : ST77XX_YELLOW, liveState(now));
+  canvas.setTextSize(5);
+  canvas.setTextColor(ST77XX_WHITE);
+  canvas.setCursor(0, 26);
+  canvas.printf("%lu", (unsigned long)strokes.count());
+  canvas.setTextSize(2);
+  canvas.setTextColor(strokes.perMinute() > 0 ? ST77XX_GREEN : muted);
+  canvas.setCursor(130, 30);
+  canvas.printf("%.0f/min", strokes.perMinute());
+  canvas.setTextSize(1);
+  label(130, 50, muted, "pelnych cykli tam i z powrotem");
+  label(0, 70, muted, "ruch w osi X czujnika");
+  // Filtered X against the detection threshold: +-env spans the bar.
+  const int barX = 2, barW = 236, mid = barX + barW / 2, barY = 88, barH = 14;
+  const float range = fmaxf(strokes.envelope(), 2.0f);
+  canvas.drawRect(barX, barY, barW, barH, muted);
+  const int tick = lroundf(strokes.threshold() / range * (barW / 2 - 2));
+  canvas.drawFastVLine(mid - tick, barY, barH, ST77XX_YELLOW);
+  canvas.drawFastVLine(mid + tick, barY, barH, ST77XX_YELLOW);
+  const int len = lroundf(fmaxf(-1.0f, fminf(1.0f, strokes.filtered() / range)) * (barW / 2 - 2));
+  if (len >= 0) canvas.fillRect(mid, barY + 2, len, barH - 4, colors[0]);
+  else canvas.fillRect(mid + len, barY + 2, -len, barH - 4, colors[0]);
+  canvas.setCursor(0, 108);
+  canvas.setTextColor(muted);
+  canvas.printf("prog %.1f m/s2   amplituda %.1f", strokes.threshold(), strokes.envelope());
+}
 void drawBattery(uint32_t now) {
   drawHeader(now, "AKUMULATOR", ST77XX_WHITE);
   if (gauge == Gauge::None || !batteryValid) {
@@ -427,14 +461,18 @@ void drawBattery(uint32_t now) {
 void draw(uint32_t now) {
   canvas.fillScreen(bg);
   if (screen == TimeScreen) drawTime(now);
+  else if (screen == StrokeScreen) drawStrokes(now);
   else if (screen == BatteryScreen) drawBattery(now);
   else drawSpectrum(now, screen - FftX);
-  if (buttonStable) {
+  if (buttonStable && screen == StrokeScreen) {
+    label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? "PUSC: NASTEPNY EKRAN" : "PUSC: SKASUJ LICZNIK");
+  } else if (buttonStable) {
     uint32_t held = now - buttonDown;
     label(0, 125, ST77XX_YELLOW, held >= 3000 ? (zeroed ? "PUSC: PELNY ODCZYT" : "PUSC: USTAW ZERO") :
           held >= 1000 ? "PUSC: PAUZA / 3s: ZERO" : "PUSC: NASTEPNY EKRAN");
   } else if (int32_t(noticeUntil - now) > 0)
     label(0, 125, ST77XX_YELLOW, notice);
+  else if (screen == StrokeScreen) label(0, 125, muted, "BOOT: kasuj / 1s: nastepny ekran");
   else label(0, 125, muted, "BOOT: ekran / 1s:pauza / 3s:zero");
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), 240, 135);
 }
@@ -486,6 +524,7 @@ void loop() {
         haveSample = true;
         ++sampleCount;
         workerState = "BRAK DANYCH";
+        strokes.add(e.value.x, e.us);
         if (!paused) {
           history.add(e.value);
           // A gap in reports would smear the spectrum: start a new window.
@@ -495,6 +534,7 @@ void loop() {
         }
       } else {
         history.discardPending();
+        strokes.breakSignal();
         haveSample = false;
         workerState = e.kind == Kind::Connecting ? "LACZENIE BNO085" :
                       e.kind == Kind::Reset ? "RESET CZUJNIKA" :

@@ -37,8 +37,9 @@ Port szeregowy podaje szczegóły każdej próby. Krótki przewód i wspólna ma
 
 ## Ekran i obsługa
 
-Pięć ekranów przełączanych krótkim naciśnięciem BOOT (numer w prawym górnym
-rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
+Sześć ekranów przełączanych krótkim naciśnięciem BOOT (numer w prawym górnym
+rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — licznik ruchów
+posuwistych osi X, 6 — akumulator. Na ekranie 5 BOOT działa inaczej (niżej).
 
 ### 1. Przebieg czasowy
 
@@ -73,7 +74,23 @@ rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
 - ZBIERANIE n/512: okno jeszcze się wypełnia (po starcie, wznowieniu
   pauzy lub przerwie w raportach dłuższej niż 100 ms).
 
-### 5. Akumulator
+### 5. Ruchy osi X (licznik)
+
+Licznik pełnych cykli „tam i z powrotem” wzdłuż osi X czujnika, np. przy
+ruchach posuwistych ręką trzymającą czujnik, oraz tempo w cyklach na minutę.
+- Z sygnału X usuwana jest wolna składowa (filtr ok. 1 s), więc grawitacja
+  i powolne przechylanie ręki nie wpływają na wynik.
+- Cykl liczy się, gdy przyspieszenie przejdzie poniżej `-próg`, a potem powyżej
+  `+próg`. Próg to 40% ostatniej amplitudy (minimum 0,5 m/s²), więc liczą się
+  zarówno delikatne, jak i mocne ruchy; szum czujnika nie liczy się wcale.
+- Pasek pokazuje bieżący przebieg X względem progu (żółte znaczniki).
+- Licznik działa niezależnie od pauzy na innych ekranach.
+- **BOOT na tym ekranie:** krótkie naciśnięcie kasuje licznik, przytrzymanie
+  ≥1 s przechodzi do następnego ekranu.
+- Licznik zlicza cykle w osi X czujnika, nie w osi ruchu ręki: trzymaj czujnik
+  tak, aby kierunek ruchu pokrywał się z osią X.
+
+### 6. Akumulator
 
 - Procent naładowania, napięcie ogniwa i pasek stanu z układu pomiaru
   na płytce (I2C, GPIO42/41). Odczyt co 2 s.

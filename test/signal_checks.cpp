@@ -58,3 +58,32 @@ constexpr bool windowClear() {
 }
 static_assert(windowOrderAndRate(), "FFT window must keep newest samples and measure rate");
 static_assert(windowClear(), "Cleared FFT window must not report a rate");
+
+#include "StrokeCounter.h"
+// 120 Hz samples, triangle wave of `periodSamples` per cycle around a gravity offset.
+constexpr uint32_t strokesInTriangle(int samples, int periodSamples, float amplitude) {
+  StrokeCounter counter;
+  for (int i = 0; i < samples; ++i) {
+    const int phase = i % periodSamples;
+    const int tri = phase < periodSamples / 2 ? phase : periodSamples - phase;
+    const float x = 5.0f + (tri * 2.0f / periodSamples - 0.5f) * 2 * amplitude;
+    counter.add(x, i * 8333u);
+  }
+  return counter.count();
+}
+static_assert(strokesInTriangle(600, 60, 3.0f) >= 8 && strokesInTriangle(600, 60, 3.0f) <= 10,
+              "2 Hz strokes for 5 s must count about 10 cycles on top of gravity");
+static_assert(strokesInTriangle(600, 240, 1.0f) >= 1 && strokesInTriangle(600, 240, 1.0f) <= 2,
+              "Slow gentle strokes must still be counted");
+static_assert(strokesInTriangle(600, 60, 0.2f) == 0, "Sensor noise must not count as strokes");
+constexpr bool resetClears() {
+  StrokeCounter counter;
+  for (int i = 0; i < 600; ++i) {
+    const int phase = i % 60;
+    counter.add(5.0f + (phase < 30 ? phase - 15 : 45 - phase) * 0.2f, i * 8333u);
+  }
+  const bool counted = counter.count() > 0;
+  counter.reset();
+  return counted && counter.count() == 0 && counter.perMinute() == 0;
+}
+static_assert(resetClears(), "Reset must clear the count and rate");
