@@ -129,6 +129,11 @@ void sensorTask(void *) {
         }
       }
       if (!ready || uint32_t(millis() - lastGood) > staleMs) {
+        const auto &st = RestartableBNO08x::stats;
+        Serial.printf("BNO085: reports stopped; INT=%d reads=%lu badHdr=%lu (%02X %02X %02X %02X) wrTimeouts=%lu\n",
+                      digitalRead(imuInt), (unsigned long)st.reads, (unsigned long)st.badHeaders,
+                      st.lastBad[0], st.lastBad[1], st.lastBad[2], st.lastBad[3],
+                      (unsigned long)st.writeTimeouts);
         ready = false;
         emit(Kind::Waiting);
         retryAt = millis() + retryMs;

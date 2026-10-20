@@ -3,6 +3,12 @@
 #include <SPI.h>
 #include <string.h>
 
+// Link statistics since the last beginSpi, for serial diagnostics.
+struct Bno08xLinkStats {
+  uint32_t reads = 0, badHeaders = 0, writeTimeouts = 0;
+  uint8_t lastBad[4] = {};
+};
+
 // BNO08x 1.2.5 SH2 close is not null-safe. With this pinned driver, _init
 // always enters sh2_open, which reserves the single SHTP instance even if
 // product-ID exchange fails. Release that instance only on later _init calls.
@@ -51,21 +57,28 @@ class RestartableBNO08x : public Adafruit_BNO08x {
     spi_->beginTransaction(settings());
     digitalWrite(cs_, LOW);
     for (int i = 0; i < 4; ++i) buffer[i] = spi_->transfer(0);
-    uint16_t size = packetSize(buffer);
-    for (uint16_t i = 4; i < size; ++i) {
-      const uint8_t b = spi_->transfer(0);
-      if (i < len) buffer[i] = b; // Oversized packets are drained and dropped.
+    const uint16_t size = packetSize(buffer);
+    // A floating MISO reads as 0xFF.. and would claim 32 kB: never clock past
+    // what the caller can hold, abort and let the next INT retry instead.
+    if (size < 4 || size > len) {
+      digitalWrite(cs_, HIGH);
+      spi_->endTransaction();
+      ++stats.badHeaders;
+      memcpy(stats.lastBad, buffer, 4);
+      return 0;
     }
+    for (uint16_t i = 4; i < size; ++i) buffer[i] = spi_->transfer(0);
     digitalWrite(cs_, HIGH);
     spi_->endTransaction();
-    return size >= 4 && size <= len ? size : 0;
+    ++stats.reads;
+    return size;
   }
   static int halWrite(sh2_Hal_t *, uint8_t *buffer, unsigned len) {
     if (len > SH2_HAL_MAX_TRANSFER_OUT) return SH2_ERR_BAD_PARAM;
     if (wake_ >= 0) digitalWrite(wake_, LOW);
     const bool ready = waitInt(200);
     if (wake_ >= 0) digitalWrite(wake_, HIGH);
-    if (!ready) return SH2_ERR_TIMEOUT;
+    if (!ready) { ++stats.writeTimeouts; return SH2_ERR_TIMEOUT; }
     uint8_t header[4] = {};
     spi_->beginTransaction(settings());
     digitalWrite(cs_, LOW);
@@ -76,10 +89,8 @@ class RestartableBNO08x : public Adafruit_BNO08x {
     }
     const uint16_t size = packetSize(header);
     const bool keep = !stashLen_ && size >= 4 && size <= sizeof(stash_);
-    for (uint16_t i = len; i < size; ++i) {
-      const uint8_t b = spi_->transfer(0);
-      if (keep) stash_[i] = b;
-    }
+    if (keep)
+      for (uint16_t i = len; i < size; ++i) stash_[i] = spi_->transfer(0);
     digitalWrite(cs_, HIGH);
     spi_->endTransaction();
     if (keep) stashLen_ = size;
@@ -89,12 +100,14 @@ class RestartableBNO08x : public Adafruit_BNO08x {
 
 public:
   using Adafruit_BNO08x::Adafruit_BNO08x;
+  static inline Bno08xLinkStats stats;
   // wakePin drives PS0: high through reset selects SPI, low requests INT.
   bool beginSpi(uint8_t csPin, uint8_t intPin, int8_t wakePin, SPIClass *spi = &SPI) {
     spi_ = spi;
     cs_ = csPin;
     int_ = intPin;
     wake_ = wakePin;
+    stats = Bno08xLinkStats{};
     pinMode(cs_, OUTPUT);
     digitalWrite(cs_, HIGH);
     pinMode(int_, INPUT_PULLUP);
