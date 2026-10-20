@@ -46,9 +46,9 @@ static_assert(elapsedBins(24, 0xFFFFFFF0u) == 1, "Millis rollover must preserve 
 #include "Spectrum.h"
 constexpr bool windowOrderAndRate() {
   SampleWindow<4> window;
-  for (int i = 1; i <= 6; ++i) window.add({float(i), 0, 0}, 1000 + i * 10);
+  for (int i = 1; i <= 6; ++i) window.add({float(i), 0, 0}, 1000000 + i * 10000);
   return window.full() && window.at(0).x == 3 && window.at(3).x == 6 &&
-         window.newestMs() == 1060 && window.rateHz() == 100.0f;
+         window.newestUs() == 1060000 && window.rateHz() == 100.0f;
 }
 constexpr bool windowClear() {
   SampleWindow<4> window;

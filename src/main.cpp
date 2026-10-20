@@ -41,7 +41,7 @@ bool batteryValid = false;
 float batteryVolts = 0, batteryPercent = 0, batteryRate = 0;
 uint32_t batteryAt = 0, gaugeProbeAt = 0;
 enum class Kind { Sample, Connecting, Waiting, Reset, NoInt, NoSpi };
-struct Event { Kind kind; uint32_t ms; Accel value; };
+struct Event { Kind kind; uint32_t ms; uint32_t us; Accel value; };
 QueueHandle_t events;
 std::atomic<uint32_t> dropped{0};
 bool paused = false, haveSample = false, zeroed = false;
@@ -55,18 +55,32 @@ const char *workerState = "SZUKAM BNO085";
 uint32_t noticeUntil = 0;
 const char *notice = "";
 
-void emit(Kind kind, Accel value = {}) {
-  Event event{kind, millis(), value};
+std::atomic<uint32_t> lastGoodMs{0};
+
+void emit(Kind kind, Accel value = {}, uint32_t us = 0) {
+  Event event{kind, millis(), us, value};
   if (xQueueSend(events, &event, 0) != pdTRUE) ++dropped;
+}
+
+// Called by SH2 once per report. The hub packs several reports into one SHTP
+// packet at high rates and the library's own handler keeps only the last, so
+// every report is forwarded here with the sensor's own timestamp.
+void onSensorEvent(void *, sh2_SensorEvent_t *event) {
+  sh2_SensorValue_t value{};
+  if (sh2_decodeSensorEvent(&value, event) != SH2_OK ||
+      value.sensorId != SH2_ACCELEROMETER) return;
+  Accel a{value.un.accelerometer.x, value.un.accelerometer.y, value.un.accelerometer.z};
+  if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z)) return;
+  lastGoodMs = millis();
+  emit(Kind::Sample, a, uint32_t(value.timestamp));
 }
 
 // Only this task owns the SH2 driver. The SPI bus is shared with the TFT;
 // Arduino-ESP32 transactions serialize both tasks. Library initialization can
 // block briefly; TFT and buttons continue to run on the Arduino loop task.
 void sensorTask(void *) {
-  sh2_SensorValue_t report{}; // SH2 retains this pointer: keep it alive for the task.
   bool ready = false;
-  uint32_t lastGood = 0, retryAt = 0;
+  uint32_t retryAt = 0;
   for (;;) {
     uint32_t now = millis();
     if (!ready) {
@@ -94,11 +108,11 @@ void sensorTask(void *) {
           Serial.println("BNO085: INT ok, no SPI reply: check PS0->A2, PS1 at 3V, SCK, MOSI (DI/AD0), MISO (SDA), CS->A5");
           emit(Kind::NoSpi);
         } else {
-          imu.getSensorEvent(&report); // Register the persistent callback target.
+          sh2_setSensorCallback(onSensorEvent, nullptr);
           if (imu.enableReport(SH2_ACCELEROMETER, reportUs)) {
             imu.wasReset();
             ready = true;
-            lastGood = millis();
+            lastGoodMs = millis();
             Serial.printf("BNO085 SPI: part %lu sw %u.%u.%u, accelerometer requested %lu Hz\n",
                           (unsigned long)imu.prodIds.entry[0].swPartNumber,
                           imu.prodIds.entry[0].swVersionMajor, imu.prodIds.entry[0].swVersionMinor,
@@ -115,21 +129,13 @@ void sensorTask(void *) {
       if (imu.wasReset()) {
         emit(Kind::Reset);
         ready = imu.enableReport(SH2_ACCELEROMETER, reportUs);
-        lastGood = millis();
+        lastGoodMs = millis();
       }
 
       // INT low means data is waiting; otherwise the SPI HAL would block and
       // hardware-reset the sensor after 500 ms.
-      if (ready && digitalRead(imuInt) == LOW && imu.getSensorEvent(&report) &&
-          report.sensorId == SH2_ACCELEROMETER) {
-        Accel a{report.un.accelerometer.x, report.un.accelerometer.y,
-                report.un.accelerometer.z};
-        if (std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z)) {
-          lastGood = millis();
-          emit(Kind::Sample, a);
-        }
-      }
-      if (!ready || uint32_t(millis() - lastGood) > staleMs) {
+      if (ready && digitalRead(imuInt) == LOW) sh2_service(); // Reports arrive in onSensorEvent.
+      if (!ready || uint32_t(millis() - lastGoodMs) > staleMs) {
         const auto &st = RestartableBNO08x::stats;
         Serial.printf("BNO085: reports stopped; INT=%d reads=%lu badHdr=%lu (%02X %02X %02X %02X) wrTimeouts=%lu lateInt=%lu\n",
                       digitalRead(imuInt), (unsigned long)st.reads, (unsigned long)st.badHeaders,
@@ -470,9 +476,9 @@ void loop() {
         if (!paused) {
           history.add(e.value);
           // A gap in reports would smear the spectrum: start a new window.
-          if (window.size() && uint32_t(e.ms - window.newestMs()) > fftGapMs)
+          if (window.size() && uint32_t(e.us - window.newestUs()) > fftGapMs * 1000)
             window.clear();
-          window.add(e.value, e.ms);
+          window.add(e.value, e.us);
         }
       } else {
         history.discardPending();

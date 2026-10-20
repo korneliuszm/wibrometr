@@ -60,7 +60,11 @@ rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
   na wykres). Rozdzielczość ok. 1 Hz, zakres 0 Hz – połowa faktycznej
   częstotliwości raportów (do 250 Hz przy 500 Hz). Oś Hz skaluje się
   według zmierzonego tempa raportów, więc przy mniejszej częstotliwości
-  pokazuje mniejszy zakres.
+  pokazuje mniejszy zakres. Czas próbek pochodzi z zegara czujnika
+  (znacznik czasu każdego raportu), a nie z chwili odbioru pakietu.
+  Czujnik pakuje wiele raportów w jeden pakiet SPI; firmware odbiera
+  każdy z nich własną funkcją zwrotną, bo biblioteka Adafruit zachowuje
+  tylko ostatni raport z pakietu.
 - Oś pionowa: amplituda sinusoidy w m/s² rysowana jako linia, skala sztywna 0–5 (stała
   `fftRange`); większe prążki są obcinane. Wiersz statusu podaje
   częstotliwość i amplitudę największego prążka.
