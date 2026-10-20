@@ -15,7 +15,7 @@ namespace {
 constexpr uint32_t binMs = 40, reportUs = 10000, staleMs = 1000;
 constexpr uint32_t retryMs = 3000;
 // BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
-constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3;
+constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3, imuWake = A2;
 constexpr int bins = 100;
 constexpr std::size_t fftSize = 256; // ~2.6 s at 100 Hz, ~0.4 Hz per bin.
 constexpr uint32_t fftGapMs = 100, batteryMs = 2000, gaugeRetryMs = 5000;
@@ -75,6 +75,8 @@ void sensorTask(void *) {
         // Diagnose before the driver: after RST the BNO085 boots and pulls INT
         // low to send its advertisement, in I2C and SPI mode alike.
         pinMode(imuInt, INPUT_PULLUP);
+        pinMode(imuWake, OUTPUT);
+        digitalWrite(imuWake, HIGH); // PS0 high at reset selects SPI mode.
         pinMode(imuRst, OUTPUT);
         digitalWrite(imuRst, LOW);
         delay(10);
@@ -87,9 +89,9 @@ void sensorTask(void *) {
         if (!intSeen) {
           Serial.println("BNO085: check INT->A4, RST->A3, 3V, GND");
           emit(Kind::NoInt);
-        // begin_SPI pulses RST again before opening SH2, so retries start clean.
-        } else if (!imu.begin_SPI(imuCs, imuInt, &SPI)) {
-          Serial.println("BNO085: INT ok, no SPI reply: check PS0+PS1 at 3V, SCK, MOSI (DI/AD0), MISO (SDA), CS->A5");
+        // beginSpi pulses RST again before opening SH2, so retries start clean.
+        } else if (!imu.beginSpi(imuCs, imuInt, imuWake, &SPI)) {
+          Serial.println("BNO085: INT ok, no SPI reply: check PS0->A2, PS1 at 3V, SCK, MOSI (DI/AD0), MISO (SDA), CS->A5");
           emit(Kind::NoSpi);
         } else {
           imu.getSensorEvent(&report); // Register the persistent callback target.
@@ -414,6 +416,8 @@ void setup() {
   digitalWrite(TFT_I2C_POWER, HIGH);
   pinMode(imuCs, OUTPUT);
   digitalWrite(imuCs, HIGH); // Keep BNO085 off the bus while the TFT starts.
+  pinMode(imuWake, OUTPUT);
+  digitalWrite(imuWake, HIGH);
   pinMode(TFT_BACKLITE, OUTPUT);
   digitalWrite(TFT_BACKLITE, HIGH);
   Wire.begin(SDA, SCL, 100000); // Fuel gauge only; the IMU is on SPI.
@@ -464,7 +468,7 @@ void loop() {
         workerState = e.kind == Kind::Connecting ? "LACZENIE BNO085" :
                       e.kind == Kind::Reset ? "RESET CZUJNIKA" :
                       e.kind == Kind::NoInt ? "BNO: BRAK INT (A4/A3)" :
-                      e.kind == Kind::NoSpi ? "BNO: BRAK SPI (PS0/PS1?)" :
+                      e.kind == Kind::NoSpi ? "BNO: BRAK SPI (PS0=A2?)" :
                       "BRAK BNO085 / RETRY";
       }
     }
