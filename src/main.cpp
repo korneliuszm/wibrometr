@@ -40,7 +40,7 @@ Adafruit_LC709203F lc;
 bool batteryValid = false;
 float batteryVolts = 0, batteryPercent = 0, batteryRate = 0;
 uint32_t batteryAt = 0, gaugeProbeAt = 0;
-enum class Kind { Sample, Connecting, Waiting, Reset };
+enum class Kind { Sample, Connecting, Waiting, Reset, NoInt, NoSpi };
 struct Event { Kind kind; uint32_t ms; Accel value; };
 QueueHandle_t events;
 std::atomic<uint32_t> dropped{0};
@@ -72,17 +72,40 @@ void sensorTask(void *) {
     if (!ready) {
       if (int32_t(now - retryAt) >= 0) {
         emit(Kind::Connecting);
-        // begin_SPI pulses RST before opening SH2, so each retry starts clean.
-        if (imu.begin_SPI(imuCs, imuInt, &SPI)) {
+        // Diagnose before the driver: after RST the BNO085 boots and pulls INT
+        // low to send its advertisement, in I2C and SPI mode alike.
+        pinMode(imuInt, INPUT_PULLUP);
+        pinMode(imuRst, OUTPUT);
+        digitalWrite(imuRst, LOW);
+        delay(10);
+        digitalWrite(imuRst, HIGH);
+        uint32_t start = millis();
+        while (digitalRead(imuInt) == HIGH && uint32_t(millis() - start) < 1000) delay(1);
+        const bool intSeen = digitalRead(imuInt) == LOW;
+        Serial.printf("BNO085: INT after reset %s (%lu ms)\n", intSeen ? "LOW" : "never LOW",
+                      (unsigned long)(millis() - start));
+        if (!intSeen) {
+          Serial.println("BNO085: check INT->A4, RST->A3, 3V, GND");
+          emit(Kind::NoInt);
+        // begin_SPI pulses RST again before opening SH2, so retries start clean.
+        } else if (!imu.begin_SPI(imuCs, imuInt, &SPI)) {
+          Serial.println("BNO085: INT ok, no SPI reply: check PS0+PS1 at 3V, SCK, MOSI (DI/AD0), MISO (SDA), CS->A5");
+          emit(Kind::NoSpi);
+        } else {
           imu.getSensorEvent(&report); // Register the persistent callback target.
           if (imu.enableReport(SH2_ACCELEROMETER, reportUs)) {
             imu.wasReset();
             ready = true;
             lastGood = millis();
-            Serial.println("BNO085 SPI: accelerometer requested 100 Hz");
+            Serial.printf("BNO085 SPI: part %lu sw %u.%u.%u, accelerometer requested 100 Hz\n",
+                          (unsigned long)imu.prodIds.entry[0].swPartNumber,
+                          imu.prodIds.entry[0].swVersionMajor, imu.prodIds.entry[0].swVersionMinor,
+                          imu.prodIds.entry[0].swVersionPatch);
+          } else {
+            Serial.println("BNO085: SPI ok, enabling accelerometer failed");
+            emit(Kind::Waiting);
           }
         }
-        if (!ready) emit(Kind::Waiting);
         retryAt = millis() + retryMs;
       }
     } else {
@@ -439,7 +462,10 @@ void loop() {
         history.discardPending();
         haveSample = false;
         workerState = e.kind == Kind::Connecting ? "LACZENIE BNO085" :
-                      e.kind == Kind::Reset ? "RESET CZUJNIKA" : "BRAK BNO085 / RETRY";
+                      e.kind == Kind::Reset ? "RESET CZUJNIKA" :
+                      e.kind == Kind::NoInt ? "BNO: BRAK INT (A4/A3)" :
+                      e.kind == Kind::NoSpi ? "BNO: BRAK SPI (PS0/PS1?)" :
+                      "BRAK BNO085 / RETRY";
       }
     }
   }
