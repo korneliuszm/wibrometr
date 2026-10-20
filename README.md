@@ -37,14 +37,17 @@ Port szeregowy podaje szczegóły każdej próby. Krótki przewód i wspólna ma
 
 ## Ekran i obsługa
 
-Pięć ekranów przełączanych krótkim naciśnięciem BOOT (numer w prawym górnym
-rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
+Sześć ekranów przełączanych krótkim naciśnięciem BOOT (numer w prawym górnym
+rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — licznik ruchów,
+6 — akumulator. Na ekranie 5 BOOT działa inaczej (niżej).
 
 ### 1. Przebieg czasowy
 
 - X czerwony, Y zielony, Z niebieski; jednostka m/s².
 - Ostatnie 4 s, skala stała ±20 m/s², nowe dane po prawej.
-- Odczyt żądany 100 Hz; ekran docelowo 25 Hz. Nagłówek podaje faktyczną
+- Odczyt żądany 150 Hz (stała `reportUs` = 6667 µs w `src/main.cpp`);
+  zmierzone maksimum tego czujnika w trybie SPI to ok. 180 Hz, więc 150 Hz
+  ma zapas. FFT sięga ok. 75 Hz. Ekran docelowo 25 Hz. Nagłówek podaje faktyczną
   liczbę otrzymanych raportów na sekundę, nie zmierzone pasmo czujnika.
 - Każdy przedział 40 ms pokazuje min/max oraz połączenie między próbkami.
   To obwiednia pików z odczytów, a nie prezentacja wszystkich punktów.
@@ -55,17 +58,49 @@ rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
 
 ### 2–4. FFT osi X, Y, Z
 
-- Widmo amplitudowe z ostatnich 256 próbek (ok. 2,6 s przy 100 Hz),
+- Widmo amplitudowe z ostatnich 512 próbek (ok. 3,4 s przy 150 Hz),
   okno Hanna, usunięta składowa stała (grawitacja i offset nie wpływają
-  na wykres). Rozdzielczość ok. 0,4 Hz, zakres 0 Hz – połowa faktycznej
-  częstotliwości raportów (ok. 50 Hz).
-- Oś pionowa: amplituda sinusoidy w m/s², skala automatyczna 1-2-5
-  (rośnie od razu, maleje po 2 s). Wiersz statusu podaje częstotliwość
-  i amplitudę największego prążka.
-- ZBIERANIE n/256: okno jeszcze się wypełnia (po starcie, wznowieniu
+  na wykres). Rozdzielczość ok. 0,3 Hz, zakres 0 Hz – połowa faktycznej
+  częstotliwości raportów (ok. 75 Hz przy 150 Hz). Oś Hz skaluje się
+  według zmierzonego tempa raportów, więc przy mniejszej częstotliwości
+  pokazuje mniejszy zakres. Czas próbek pochodzi z zegara czujnika
+  (znacznik czasu każdego raportu), a nie z chwili odbioru pakietu.
+  Czujnik pakuje wiele raportów w jeden pakiet SPI; firmware odbiera
+  każdy z nich własną funkcją zwrotną, bo biblioteka Adafruit zachowuje
+  tylko ostatni raport z pakietu.
+- Oś pionowa: amplituda sinusoidy w m/s² rysowana jako linia, skala sztywna 0–5 (stała
+  `fftRange`); większe prążki są obcinane. Wiersz statusu podaje
+  częstotliwość i amplitudę największego prążka.
+- ZBIERANIE n/512: okno jeszcze się wypełnia (po starcie, wznowieniu
   pauzy lub przerwie w raportach dłuższej niż 100 ms).
 
-### 5. Akumulator
+### 5. Licznik ruchów
+
+Licznik powtarzalnych ruchów posuwistych ręki trzymającej czujnik. Duża
+liczba to **pełne ruchy** (tam i z powrotem), obok tempo w ruchach na minutę.
+Dostrojony do 0,7–5 ruchów/s i skoku od kilku do kilkunastu cm.
+- Źródłem jest przyspieszenie liniowe z fuzji czujnika (bez grawitacji,
+  ok. 100 Hz), bo obrót dłoni przesuwa grawitację między osiami tak samo
+  mocno jak sam ruch. Gdy czujnik go nie udostępnia, ekran to pisze na
+  żółto i liczy ze zwykłego przyspieszenia (wyraźnie słabiej).
+- Kierunek ruchu wyznaczany jest automatycznie ze wszystkich trzech osi
+  (dominujący kierunek z ostatnich ok. 0,5 s) i śledzi obrót nadgarstka,
+  więc ułożenie czujnika w dłoni nie ma znaczenia. Ekran pokazuje bieżący
+  kierunek w osiach czujnika.
+- Przyspieszenie jest wygładzane i całkowane do sygnału zbliżonego do
+  prędkości: każde przesunięcie daje jeden wyraźny impuls; dwa impulsy
+  w przeciwne strony to jeden ruch.
+- Próg to 20% ostatniego szczytu (zanik w ok. 1 s, minimum 0,04 m/s), więc
+  liczą się zarówno delikatne, jak i mocne ruchy; drżenie dłoni nie liczy się.
+- Pasek pokazuje bieżący sygnał względem progu (żółte znaczniki).
+- Symulacja (6×30 s na scenariusz): stałe i zmienne tempo 0,7–5 ruchów/s,
+  dowolna oś, pauzy: 0% do −2% błędu; przy obrocie nadgarstka 20°/s: −2%.
+  Nie testowano na prawdziwym ruchu.
+- Licznik działa niezależnie od pauzy na innych ekranach.
+- **BOOT na tym ekranie:** krótkie naciśnięcie kasuje licznik, przytrzymanie
+  ≥1 s przechodzi do następnego ekranu.
+
+### 6. Akumulator
 
 - Procent naładowania, napięcie ogniwa i pasek stanu z układu pomiaru
   na płytce (I2C, GPIO42/41). Odczyt co 2 s.
@@ -128,7 +163,7 @@ podłączonej płytki dowolnym kompilatorem C++17:
 g++ -std=c++17 -Iinclude -fsyntax-only test/signal_checks.cpp
 ```
 
-1. Po starcie potwierdź odczyt około 100 Hz i poprawny wykres na TFT.
+1. Po starcie potwierdź odczyt ok. 150 Hz (nagłówek ekranu i `rate=` na porcie szeregowym) i poprawny wykres na TFT.
 2. Obracaj czujnik w spoczynku: składowa grawitacji powinna przechodzić
    między osiami. Pełne przyspieszenie statyczne ma moduł około 9,81 m/s².
 3. Sprawdź przełączanie ekranów, pauzę, zero i kasowanie offsetu; lekkie stuknięcie powinno
@@ -146,10 +181,11 @@ Ustawienie zera odejmuje stały wektor, a nie zmienną grawitację podczas
 obrotu ramienia ani przyspieszenia trajektorii. Magnes mocujący może
 zaburzać magnetometr; ta wersja nie korzysta z orientacji magnetycznej.
 
-100 Hz ogranicza teoretyczną częstotliwość Nyquista do 50 Hz; użyteczne
-pasmo zależy dodatkowo od filtrów i raportowania czujnika. Ten tryb nie
-wystarcza do szerokopasmowej diagnostyki łożysk. FFT to podgląd do ok.
-50 Hz liczony z czasów odbioru raportów; nie ma klasyfikacji usterek,
+150 Hz daje częstotliwość Nyquista 75 Hz; użyteczne pasmo zależy
+dodatkowo od filtrów wewnątrz czujnika i jego faktycznego tempa raportów
+(sprawdź `rate=` na porcie szeregowym). Ten tryb nie
+wystarcza do szerokopasmowej diagnostyki łożysk. FFT to podgląd do połowy
+częstotliwości raportów liczony z czasów odbioru raportów; nie ma klasyfikacji usterek,
 zapisu ani oceny według norm przemysłowych. Sztywność mocowania
 magnetycznego i przewód również wpływają na wynik.
 

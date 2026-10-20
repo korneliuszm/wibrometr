@@ -5,8 +5,18 @@
 
 // Link statistics since the last beginSpi, for serial diagnostics.
 struct Bno08xLinkStats {
-  uint32_t reads = 0, badHeaders = 0, writeTimeouts = 0;
+  uint32_t reads = 0, badHeaders = 0, writeTimeouts = 0, lateInt = 0;
   uint8_t lastBad[4] = {};
+  // Last headers clocked out of the hub (4 bytes each), newest at head-1.
+  static constexpr int ringSize = 12;
+  uint8_t ring[ringSize][4] = {};
+  uint32_t ringMs[ringSize] = {};
+  uint8_t head = 0;
+  void record(const uint8_t *header) {
+    memcpy(ring[head], header, 4);
+    ringMs[head] = millis();
+    head = (head + 1) % ringSize;
+  }
 };
 
 // BNO08x 1.2.5 SH2 close is not null-safe. With this pinned driver, _init
@@ -55,8 +65,16 @@ class RestartableBNO08x : public Adafruit_BNO08x {
     if (digitalRead(int_) == HIGH) return 0;
     *t_us = micros();
     spi_->beginTransaction(settings());
+    // beginTransaction can wait for the TFT to finish a frame; only clock the
+    // hub if it is still asserting INT afterwards, never on a stale reading.
+    if (digitalRead(int_) == HIGH) {
+      spi_->endTransaction();
+      ++stats.lateInt;
+      return 0;
+    }
     digitalWrite(cs_, LOW);
     for (int i = 0; i < 4; ++i) buffer[i] = spi_->transfer(0);
+    stats.record(buffer);
     const uint16_t size = packetSize(buffer);
     // A floating MISO reads as 0xFF.. and would claim 32 kB: never clock past
     // what the caller can hold, abort and let the next INT retry instead.

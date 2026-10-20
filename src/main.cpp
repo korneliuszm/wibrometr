@@ -9,15 +9,27 @@
 #include <cmath>
 #include "SignalHistory.h"
 #include "Spectrum.h"
+#include "StrokeCounter.h"
 #include "RestartableBNO08x.h"
 
 namespace {
-constexpr uint32_t binMs = 40, reportUs = 10000, staleMs = 1000;
+constexpr uint32_t binMs = 40, reportUs = 6667, staleMs = 1000;
+// Raw accelerometer (ADC counts, scale assumes +-8 g over 16 bits). Tested on
+// BNO085 firmware 3.2.13: enabling it succeeds but the hub sends no reports,
+// so it stays off.
+constexpr bool useRaw = false;
+constexpr sh2_SensorId_t imuSensor = useRaw ? SH2_RAW_ACCELEROMETER : SH2_ACCELEROMETER;
+constexpr float rawToMs2 = 9.80665f / 4096.0f;
+constexpr uint32_t reconnectMs = 200;
+// Gravity-free acceleration from the hub's fusion, used only by the stroke
+// counter: tilting the hand moves gravity between axes as much as a stroke does.
+constexpr uint32_t linearUs = 10000; // Delay before re-initialising a stalled sensor.
 constexpr uint32_t retryMs = 3000;
 // BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
 constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3, imuWake = A2;
 constexpr int bins = 100;
-constexpr std::size_t fftSize = 256; // ~2.6 s at 100 Hz, ~0.4 Hz per bin.
+constexpr std::size_t fftSize = 512; // ~3.4 s at 150 Hz, ~0.3 Hz per bin.
+constexpr float fftRange = 5.0f;     // Fixed full scale of the spectrum, m/s2.
 constexpr uint32_t fftGapMs = 100, batteryMs = 2000, gaugeRetryMs = 5000;
 constexpr float fullScale = 20.0f;
 constexpr int plotX = 30, plotY = 28, plotW = 200, plotH = 79;
@@ -27,12 +39,11 @@ Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(240, 135);
 SignalHistory<bins> history;
 RestartableBNO08x imu(imuRst);
-enum Screen { TimeScreen, FftX, FftY, FftZ, BatteryScreen, ScreenCount };
+enum Screen { TimeScreen, FftX, FftY, FftZ, StrokeScreen, BatteryScreen, ScreenCount };
 int screen = TimeScreen;
 SampleWindow<fftSize> window;
+StrokeCounter strokes; // Hand strokes in any direction; fed regardless of pause.
 float spectrum[fftSize / 2 + 1];
-float fftScale[3] = {0.1f, 0.1f, 0.1f};
-uint32_t fftLowSince[3] = {};
 // Feather 5483 carries a MAX17048 (newer) or LC709203F (older) fuel gauge.
 enum class Gauge { None, Max17048, Lc709203f };
 Gauge gauge = Gauge::None;
@@ -40,8 +51,8 @@ Adafruit_LC709203F lc;
 bool batteryValid = false;
 float batteryVolts = 0, batteryPercent = 0, batteryRate = 0;
 uint32_t batteryAt = 0, gaugeProbeAt = 0;
-enum class Kind { Sample, Connecting, Waiting, Reset, NoInt, NoSpi };
-struct Event { Kind kind; uint32_t ms; Accel value; };
+enum class Kind { Sample, Linear, Connecting, Waiting, Reset, NoInt, NoSpi };
+struct Event { Kind kind; uint32_t ms; uint32_t us; Accel value; };
 QueueHandle_t events;
 std::atomic<uint32_t> dropped{0};
 bool paused = false, haveSample = false, zeroed = false;
@@ -55,18 +66,55 @@ const char *workerState = "SZUKAM BNO085";
 uint32_t noticeUntil = 0;
 const char *notice = "";
 
-void emit(Kind kind, Accel value = {}) {
-  Event event{kind, millis(), value};
+std::atomic<uint32_t> lastGoodMs{0};
+std::atomic<bool> linearActive{false};
+
+void emit(Kind kind, Accel value = {}, uint32_t us = 0) {
+  Event event{kind, millis(), us, value};
   if (xQueueSend(events, &event, 0) != pdTRUE) ++dropped;
+}
+
+// Called by SH2 once per report. The hub packs several reports into one SHTP
+// packet at high rates and the library's own handler keeps only the last, so
+// every report is forwarded here with the sensor's own timestamp.
+void onSensorEvent(void *, sh2_SensorEvent_t *event) {
+  sh2_SensorValue_t value{};
+  if (sh2_decodeSensorEvent(&value, event) != SH2_OK) return;
+  if (value.sensorId == SH2_LINEAR_ACCELERATION) {
+    const auto &l = value.un.linearAcceleration;
+    if (std::isfinite(l.x) && std::isfinite(l.y) && std::isfinite(l.z))
+      emit(Kind::Linear, {l.x, l.y, l.z}, uint32_t(value.timestamp));
+    return;
+  }
+  if (value.sensorId != imuSensor) return;
+  Accel a;
+  uint32_t us = uint32_t(value.timestamp);
+  if (useRaw) {
+    const auto &r = value.un.rawAccelerometer;
+    a = {r.x * rawToMs2, r.y * rawToMs2, r.z * rawToMs2};
+    us = r.timestamp ? r.timestamp : us; // Sensor's own sample time, when present.
+  } else {
+    a = {value.un.accelerometer.x, value.un.accelerometer.y, value.un.accelerometer.z};
+  }
+  if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z)) return;
+  lastGoodMs = millis();
+  emit(Kind::Sample, a, us);
+}
+
+// Main report is required; linear acceleration is optional and the stroke
+// counter falls back to the plain accelerometer without it.
+bool enableReports() {
+  linearActive = imu.enableReport(SH2_LINEAR_ACCELERATION, linearUs);
+  Serial.printf("BNO085: linear acceleration %s\n", linearActive ? "on" : "unavailable");
+  return imu.enableReport(imuSensor, reportUs);
 }
 
 // Only this task owns the SH2 driver. The SPI bus is shared with the TFT;
 // Arduino-ESP32 transactions serialize both tasks. Library initialization can
 // block briefly; TFT and buttons continue to run on the Arduino loop task.
 void sensorTask(void *) {
-  sh2_SensorValue_t report{}; // SH2 retains this pointer: keep it alive for the task.
   bool ready = false;
-  uint32_t lastGood = 0, retryAt = 0;
+  uint32_t retryAt = 0;
   for (;;) {
     uint32_t now = millis();
     if (!ready) {
@@ -94,15 +142,16 @@ void sensorTask(void *) {
           Serial.println("BNO085: INT ok, no SPI reply: check PS0->A2, PS1 at 3V, SCK, MOSI (DI/AD0), MISO (SDA), CS->A5");
           emit(Kind::NoSpi);
         } else {
-          imu.getSensorEvent(&report); // Register the persistent callback target.
-          if (imu.enableReport(SH2_ACCELEROMETER, reportUs)) {
+          sh2_setSensorCallback(onSensorEvent, nullptr);
+          if (enableReports()) {
             imu.wasReset();
             ready = true;
-            lastGood = millis();
-            Serial.printf("BNO085 SPI: part %lu sw %u.%u.%u, accelerometer requested 100 Hz\n",
+            lastGoodMs = millis();
+            Serial.printf("BNO085 SPI: part %lu sw %u.%u.%u, accelerometer requested %lu Hz\n",
                           (unsigned long)imu.prodIds.entry[0].swPartNumber,
                           imu.prodIds.entry[0].swVersionMajor, imu.prodIds.entry[0].swVersionMinor,
-                          imu.prodIds.entry[0].swVersionPatch);
+                          imu.prodIds.entry[0].swVersionPatch,
+                          (unsigned long)(1000000UL / reportUs));
           } else {
             Serial.println("BNO085: SPI ok, enabling accelerometer failed");
             emit(Kind::Waiting);
@@ -113,33 +162,45 @@ void sensorTask(void *) {
     } else {
       if (imu.wasReset()) {
         emit(Kind::Reset);
-        ready = imu.enableReport(SH2_ACCELEROMETER, reportUs);
-        lastGood = millis();
+        ready = enableReports();
+        lastGoodMs = millis();
       }
 
       // INT low means data is waiting; otherwise the SPI HAL would block and
       // hardware-reset the sensor after 500 ms.
-      if (ready && digitalRead(imuInt) == LOW && imu.getSensorEvent(&report) &&
-          report.sensorId == SH2_ACCELEROMETER) {
-        Accel a{report.un.accelerometer.x, report.un.accelerometer.y,
-                report.un.accelerometer.z};
-        if (std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z)) {
-          lastGood = millis();
-          emit(Kind::Sample, a);
-        }
-      }
-      if (!ready || uint32_t(millis() - lastGood) > staleMs) {
+      if (ready && digitalRead(imuInt) == LOW) sh2_service(); // Reports arrive in onSensorEvent.
+      if (!ready || uint32_t(millis() - lastGoodMs) > staleMs) {
         const auto &st = RestartableBNO08x::stats;
-        Serial.printf("BNO085: reports stopped; INT=%d reads=%lu badHdr=%lu (%02X %02X %02X %02X) wrTimeouts=%lu\n",
+        Serial.printf("BNO085: reports stopped; INT=%d reads=%lu badHdr=%lu (%02X %02X %02X %02X) wrTimeouts=%lu lateInt=%lu\n",
                       digitalRead(imuInt), (unsigned long)st.reads, (unsigned long)st.badHeaders,
                       st.lastBad[0], st.lastBad[1], st.lastBad[2], st.lastBad[3],
-                      (unsigned long)st.writeTimeouts);
+                      (unsigned long)st.writeTimeouts, (unsigned long)st.lateInt);
+        // Last packet headers: channel (byte 2) 3 = sensor reports, 0/1 = hub
+        // housekeeping, FF FF = no data. Oldest first, ms before now.
+        uint32_t nowMs = millis();
+        for (int n = 0; n < Bno08xLinkStats::ringSize; ++n) {
+          int i = (st.head + n) % Bno08xLinkStats::ringSize;
+          if (!st.ringMs[i]) continue;
+          Serial.printf("  -%lu ms: %02X %02X %02X %02X\n", (unsigned long)(nowMs - st.ringMs[i]),
+                        st.ring[i][0], st.ring[i][1], st.ring[i][2], st.ring[i][3]);
+        }
+        // Is the hub alive but silent? Request wake and see if it raises INT.
+        digitalWrite(imuWake, LOW);
+        uint32_t t0 = millis();
+        while (digitalRead(imuInt) == HIGH && uint32_t(millis() - t0) < 100) delay(1);
+        Serial.printf("BNO085: WAKE probe: INT %s after %lu ms\n",
+                      digitalRead(imuInt) == LOW ? "LOW (hub alive)" : "HIGH (hub silent)",
+                      (unsigned long)(millis() - t0));
+        digitalWrite(imuWake, HIGH);
         ready = false;
         emit(Kind::Waiting);
-        retryAt = millis() + retryMs;
+        retryAt = millis() + reconnectMs;
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
+    // At 150 Hz and up a fixed 1 ms sleep per packet is too slow; sleep only while
+    // the hub has nothing pending.
+    if (!ready || digitalRead(imuInt) == HIGH) vTaskDelay(pdMS_TO_TICKS(1));
+    else taskYIELD();
   }
 }
 
@@ -173,7 +234,11 @@ void pollButton(uint32_t now) {
     if (pressed) buttonDown = now;
     else {
       uint32_t duration = now - buttonDown;
-      if (duration >= 3000) {
+      if (screen == StrokeScreen) {
+        // This screen: a tap clears the counter, a hold moves on.
+        if (duration >= 1000) screen = (screen + 1) % ScreenCount;
+        else { strokes.reset(); showNotice("LICZNIK SKASOWANY", now); }
+      } else if (duration >= 3000) {
         if (zeroed) {
           history.zero({});
           zeroed = false;
@@ -262,20 +327,6 @@ void drawTime(uint32_t now) {
   else if (dropped.load()) label(81, 110, ST77XX_YELLOW, "UTRATA PROBEK");
 }
 
-// Smallest 1-2-5 step above the peak; grows at once, shrinks after 2 s.
-float fftRange(int channel, float peak, uint32_t now) {
-  static constexpr float steps[] = {0.02f, 0.05f, 0.1f, 0.2f, 0.5f, 1, 2, 5, 10, 20};
-  float target = steps[9];
-  for (float step : steps)
-    if (peak * 1.1f <= step) { target = step; break; }
-  float &scale = fftScale[channel];
-  if (target >= scale) { scale = target; fftLowSince[channel] = now; }
-  else if (uint32_t(now - fftLowSince[channel]) >= 2000) {
-    scale = target;
-    fftLowSince[channel] = now;
-  }
-  return scale;
-}
 void drawSpectrum(uint32_t now, int channel) {
   static const char *titles[] = {"FFT OS X", "FFT OS Y", "FFT OS Z"};
   drawHeader(now, titles[channel], colors[channel]);
@@ -294,21 +345,21 @@ void drawSpectrum(uint32_t now, int channel) {
     std::size_t best = 1;
     for (std::size_t k = 1; k <= fftSize / 2; ++k)
       if (spectrum[k] > spectrum[best]) best = k;
-    const float range = fftRange(channel, spectrum[best], now);
     canvas.setTextColor(paused ? ST77XX_YELLOW : ST77XX_GREEN);
     canvas.setCursor(0, 13);
     canvas.printf("%s  max %.1f Hz  %.2f", paused ? "PAUZA" : "NA ZYWO",
                   best * rate / fftSize, spectrum[best]);
     canvas.setTextColor(muted);
     canvas.setCursor(0, plotY);
-    canvas.printf(range < 0.1f ? "%.2f" : range < 1 ? "%.1f" : "%.0f", range);
+    canvas.printf("%.0f", fftRange);
     label(18, plotY + plotH - 7, muted, "0");
-    // DC is removed, so bin 0 is skipped; one stem per bin up to Nyquist.
+    // DC is removed, so bin 0 is skipped; one line vertex per bin up to Nyquist.
+    int prevX = 0, prevY = 0;
     for (std::size_t k = 1; k <= fftSize / 2; ++k) {
       int x = plotX + k * (plotW - 1) / (fftSize / 2);
-      int h = lroundf(fminf(spectrum[k] / range, 1.0f) * (plotH - 1));
-      if (h > 0)
-        canvas.drawFastVLine(x, plotY + plotH - 1 - h, h + 1, colors[channel]);
+      int y = plotY + plotH - 1 - lroundf(fminf(spectrum[k] / fftRange, 1.0f) * (plotH - 1));
+      if (k > 1) canvas.drawLine(prevX, prevY, x, y, colors[channel]);
+      prevX = x; prevY = y;
     }
     canvas.setCursor(plotX, 110);
     canvas.print("0");
@@ -360,6 +411,40 @@ void pollBattery(uint32_t now) {
   }
   if (!batteryValid) { gauge = Gauge::None; gaugeProbeAt = now + gaugeRetryMs; }
 }
+void drawStrokes(uint32_t now) {
+  drawHeader(now, "LICZNIK RUCHOW", ST77XX_WHITE);
+  label(0, 13, fresh(now) ? ST77XX_GREEN : ST77XX_YELLOW, liveState(now));
+  canvas.setTextSize(5);
+  canvas.setTextColor(ST77XX_WHITE);
+  canvas.setCursor(0, 26);
+  canvas.printf("%lu", (unsigned long)strokes.count());
+  canvas.setTextSize(2);
+  canvas.setTextColor(strokes.perMinute() > 0 ? ST77XX_GREEN : muted);
+  canvas.setCursor(130, 28);
+  canvas.printf("%.0f/min", strokes.perMinute());
+  canvas.setTextSize(1);
+  label(130, 48, muted, "pelnych ruchow");
+  label(130, 58, muted, "(tam i z powrotem)");
+  // Tracked stroke direction in sensor axes, so the grip does not matter.
+  canvas.setCursor(0, 72);
+  canvas.setTextColor(linearActive ? muted : ST77XX_YELLOW);
+  if (linearActive)
+    canvas.printf("kierunek X%+.1f Y%+.1f Z%+.1f", strokes.axis(0), strokes.axis(1), strokes.axis(2));
+  else canvas.print("BEZ przysp. liniowego (slabiej)");
+  // Velocity-like signal against the detection threshold: +-range spans the bar.
+  const int barX = 2, barW = 236, mid = barX + barW / 2, barY = 88, barH = 14;
+  const float range = fmaxf(strokes.envelope(), 0.1f);
+  canvas.drawRect(barX, barY, barW, barH, muted);
+  const int tick = lroundf(fminf(strokes.threshold() / range, 1.0f) * (barW / 2 - 2));
+  canvas.drawFastVLine(mid - tick, barY, barH, ST77XX_YELLOW);
+  canvas.drawFastVLine(mid + tick, barY, barH, ST77XX_YELLOW);
+  const int len = lroundf(fmaxf(-1.0f, fminf(1.0f, strokes.filtered() / range)) * (barW / 2 - 2));
+  if (len >= 0) canvas.fillRect(mid, barY + 2, len, barH - 4, colors[0]);
+  else canvas.fillRect(mid + len, barY + 2, -len, barH - 4, colors[0]);
+  canvas.setCursor(0, 108);
+  canvas.setTextColor(muted);
+  canvas.printf("prog %.2f m/s   szczyt %.2f m/s", strokes.threshold(), strokes.envelope());
+}
 void drawBattery(uint32_t now) {
   drawHeader(now, "AKUMULATOR", ST77XX_WHITE);
   if (gauge == Gauge::None || !batteryValid) {
@@ -401,14 +486,18 @@ void drawBattery(uint32_t now) {
 void draw(uint32_t now) {
   canvas.fillScreen(bg);
   if (screen == TimeScreen) drawTime(now);
+  else if (screen == StrokeScreen) drawStrokes(now);
   else if (screen == BatteryScreen) drawBattery(now);
   else drawSpectrum(now, screen - FftX);
-  if (buttonStable) {
+  if (buttonStable && screen == StrokeScreen) {
+    label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? "PUSC: NASTEPNY EKRAN" : "PUSC: SKASUJ LICZNIK");
+  } else if (buttonStable) {
     uint32_t held = now - buttonDown;
     label(0, 125, ST77XX_YELLOW, held >= 3000 ? (zeroed ? "PUSC: PELNY ODCZYT" : "PUSC: USTAW ZERO") :
           held >= 1000 ? "PUSC: PAUZA / 3s: ZERO" : "PUSC: NASTEPNY EKRAN");
   } else if (int32_t(noticeUntil - now) > 0)
     label(0, 125, ST77XX_YELLOW, notice);
+  else if (screen == StrokeScreen) label(0, 125, muted, "BOOT: kasuj / 1s: nastepny ekran");
   else label(0, 125, muted, "BOOT: ekran / 1s:pauza / 3s:zero");
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), 240, 135);
 }
@@ -440,7 +529,7 @@ void setup() {
     tft.print("Brak RAM dla wykresu");
     while (true) delay(1000);
   }
-  events = xQueueCreate(64, sizeof(Event));
+  events = xQueueCreate(256, sizeof(Event));
   binStart = lastFrame = rateStart = millis();
   draw(millis());
   if (!events || xTaskCreate(sensorTask, "BNO085", 8192, nullptr, 1, nullptr) != pdPASS) {
@@ -454,21 +543,26 @@ void loop() {
   if (events) {
     while (xQueueReceive(events, &e, 0) == pdTRUE) {
       advanceTo(e.ms);
-      if (e.kind == Kind::Sample) {
+      if (e.kind == Kind::Linear) {
+        strokes.setBiasTau(2.0f);
+        strokes.add(e.value, e.us);
+      } else if (e.kind == Kind::Sample) {
         latest = e.value;
         lastSample = e.ms;
         haveSample = true;
         ++sampleCount;
         workerState = "BRAK DANYCH";
+        if (!linearActive) { strokes.setBiasTau(1.0f); strokes.add(e.value, e.us); }
         if (!paused) {
           history.add(e.value);
           // A gap in reports would smear the spectrum: start a new window.
-          if (window.size() && uint32_t(e.ms - window.newestMs()) > fftGapMs)
+          if (window.size() && uint32_t(e.us - window.newestUs()) > fftGapMs * 1000)
             window.clear();
-          window.add(e.value, e.ms);
+          window.add(e.value, e.us);
         }
       } else {
         history.discardPending();
+        strokes.breakSignal();
         haveSample = false;
         workerState = e.kind == Kind::Connecting ? "LACZENIE BNO085" :
                       e.kind == Kind::Reset ? "RESET CZUJNIKA" :

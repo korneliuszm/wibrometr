@@ -4,16 +4,16 @@
 #include <cstdint>
 #include "SignalHistory.h"
 
-// Last N raw samples with arrival times, oldest first via at().
+// Last N raw samples with sensor timestamps in microseconds, oldest first via at().
 template <std::size_t N> class SampleWindow {
   static_assert(N >= 2 && (N & (N - 1)) == 0, "FFT needs a power of two");
   Accel samples_[N]{};
-  uint32_t ms_[N]{};
+  uint32_t us_[N]{};
   std::size_t head_ = 0, count_ = 0;
 public:
-  constexpr void add(Accel v, uint32_t ms) {
+  constexpr void add(Accel v, uint32_t us) {
     samples_[head_] = v;
-    ms_[head_] = ms;
+    us_[head_] = us;
     head_ = (head_ + 1) % N;
     if (count_ < N) ++count_;
   }
@@ -24,12 +24,12 @@ public:
   constexpr Accel at(std::size_t index) const {
     return samples_[(head_ + N - count_ + index) % N];
   }
-  constexpr uint32_t newestMs() const { return ms_[(head_ + N - 1) % N]; }
+  constexpr uint32_t newestUs() const { return us_[(head_ + N - 1) % N]; }
   // Mean sample rate over the window; 0 when it cannot be measured.
   constexpr float rateHz() const {
     if (count_ < 2) return 0;
-    const uint32_t span = newestMs() - ms_[(head_ + N - count_) % N];
-    return span ? (count_ - 1) * 1000.0f / span : 0;
+    const uint32_t span = newestUs() - us_[(head_ + N - count_) % N];
+    return span ? (count_ - 1) * 1000000.0f / span : 0;
   }
 };
 

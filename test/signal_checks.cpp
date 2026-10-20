@@ -46,9 +46,9 @@ static_assert(elapsedBins(24, 0xFFFFFFF0u) == 1, "Millis rollover must preserve 
 #include "Spectrum.h"
 constexpr bool windowOrderAndRate() {
   SampleWindow<4> window;
-  for (int i = 1; i <= 6; ++i) window.add({float(i), 0, 0}, 1000 + i * 10);
+  for (int i = 1; i <= 6; ++i) window.add({float(i), 0, 0}, 1000000 + i * 10000);
   return window.full() && window.at(0).x == 3 && window.at(3).x == 6 &&
-         window.newestMs() == 1060 && window.rateHz() == 100.0f;
+         window.newestUs() == 1060000 && window.rateHz() == 100.0f;
 }
 constexpr bool windowClear() {
   SampleWindow<4> window;
@@ -58,3 +58,42 @@ constexpr bool windowClear() {
 }
 static_assert(windowOrderAndRate(), "FFT window must keep newest samples and measure rate");
 static_assert(windowClear(), "Cleared FFT window must not report a rate");
+
+#include "StrokeCounter.h"
+// Full strokes (two minimum-jerk passes each) at 100 Hz along direction
+// (dx, dy, dz) on top of an offset. Gravity-free input, as the linear report gives.
+constexpr uint32_t strokesCounted(int strokes, float distance, float strokeS, float bias,
+                                  float dx = 1, float dy = 0, float dz = 0) {
+  StrokeCounter counter;
+  const int perPass = int(strokeS / 2 * 100);
+  uint32_t us = 0;
+  for (int p = 0; p < 2 * strokes; ++p)
+    for (int i = 0; i < perPass; ++i) {
+      const float t = float(i) / perPass, T = strokeS / 2;
+      const float dir = p % 2 ? -1.0f : 1.0f;
+      const float a = dir * distance / (T * T) * (60 * t - 180 * t * t + 120 * t * t * t);
+      counter.add({a * dx + bias, a * dy - bias, a * dz}, us += 10000);
+    }
+  return counter.count();
+}
+constexpr bool near(uint32_t got, uint32_t want) { return got + 1 >= want && got <= want; }
+static_assert(near(strokesCounted(10, 0.10f, 0.5f, 0.2f), 10), "2 strokes/s along X must count each stroke once");
+static_assert(near(strokesCounted(10, 0.04f, 0.25f, 0.2f), 10), "Fast short strokes must count");
+static_assert(near(strokesCounted(10, 0.15f, 1.2f, 0.2f), 10), "Slow long strokes must count");
+static_assert(near(strokesCounted(10, 0.10f, 0.5f, 0.2f, 0, 1, 0), 10), "Direction must not matter (Y)");
+static_assert(near(strokesCounted(10, 0.10f, 0.5f, 0.2f, 0.5f, 0.5f, 0.7f), 10), "Oblique direction must count");
+static_assert(strokesCounted(10, 0.0f, 0.5f, 0.3f) == 0, "Constant offset must not count");
+static_assert(strokesCounted(20, 0.0005f, 0.1f, 0.0f) == 0, "10 Hz hand tremor (0.5 mm) must not count");
+constexpr bool resetClears() {
+  StrokeCounter counter;
+  uint32_t us = 0;
+  for (int p = 0; p < 6; ++p)
+    for (int i = 0; i < 25; ++i) {
+      const float t = i / 25.0f;
+      counter.add({(p % 2 ? -1 : 1) * 1.6f * (60 * t - 180 * t * t + 120 * t * t * t), 0, 0}, us += 10000);
+    }
+  const bool counted = counter.count() > 0;
+  counter.reset();
+  return counted && counter.count() == 0 && counter.perMinute() == 0;
+}
+static_assert(resetClears(), "Reset must clear the count and rate");
