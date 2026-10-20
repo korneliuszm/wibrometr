@@ -135,6 +135,23 @@ void sensorTask(void *) {
                       digitalRead(imuInt), (unsigned long)st.reads, (unsigned long)st.badHeaders,
                       st.lastBad[0], st.lastBad[1], st.lastBad[2], st.lastBad[3],
                       (unsigned long)st.writeTimeouts, (unsigned long)st.lateInt);
+        // Last packet headers: channel (byte 2) 3 = sensor reports, 0/1 = hub
+        // housekeeping, FF FF = no data. Oldest first, ms before now.
+        uint32_t nowMs = millis();
+        for (int n = 0; n < Bno08xLinkStats::ringSize; ++n) {
+          int i = (st.head + n) % Bno08xLinkStats::ringSize;
+          if (!st.ringMs[i]) continue;
+          Serial.printf("  -%lu ms: %02X %02X %02X %02X\n", (unsigned long)(nowMs - st.ringMs[i]),
+                        st.ring[i][0], st.ring[i][1], st.ring[i][2], st.ring[i][3]);
+        }
+        // Is the hub alive but silent? Request wake and see if it raises INT.
+        digitalWrite(imuWake, LOW);
+        uint32_t t0 = millis();
+        while (digitalRead(imuInt) == HIGH && uint32_t(millis() - t0) < 100) delay(1);
+        Serial.printf("BNO085: WAKE probe: INT %s after %lu ms\n",
+                      digitalRead(imuInt) == LOW ? "LOW (hub alive)" : "HIGH (hub silent)",
+                      (unsigned long)(millis() - t0));
+        digitalWrite(imuWake, HIGH);
         ready = false;
         emit(Kind::Waiting);
         retryAt = millis() + reconnectMs;
