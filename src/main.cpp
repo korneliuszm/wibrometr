@@ -13,6 +13,7 @@
 
 namespace {
 constexpr uint32_t binMs = 40, reportUs = 10000, staleMs = 1000;
+constexpr uint32_t reconnectMs = 200; // Delay before re-initialising a stalled sensor.
 constexpr uint32_t retryMs = 3000;
 // BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
 constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3, imuWake = A2;
@@ -130,13 +131,13 @@ void sensorTask(void *) {
       }
       if (!ready || uint32_t(millis() - lastGood) > staleMs) {
         const auto &st = RestartableBNO08x::stats;
-        Serial.printf("BNO085: reports stopped; INT=%d reads=%lu badHdr=%lu (%02X %02X %02X %02X) wrTimeouts=%lu\n",
+        Serial.printf("BNO085: reports stopped; INT=%d reads=%lu badHdr=%lu (%02X %02X %02X %02X) wrTimeouts=%lu lateInt=%lu\n",
                       digitalRead(imuInt), (unsigned long)st.reads, (unsigned long)st.badHeaders,
                       st.lastBad[0], st.lastBad[1], st.lastBad[2], st.lastBad[3],
-                      (unsigned long)st.writeTimeouts);
+                      (unsigned long)st.writeTimeouts, (unsigned long)st.lateInt);
         ready = false;
         emit(Kind::Waiting);
-        retryAt = millis() + retryMs;
+        retryAt = millis() + reconnectMs;
       }
     }
     vTaskDelay(pdMS_TO_TICKS(1));

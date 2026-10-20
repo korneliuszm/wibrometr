@@ -5,7 +5,7 @@
 
 // Link statistics since the last beginSpi, for serial diagnostics.
 struct Bno08xLinkStats {
-  uint32_t reads = 0, badHeaders = 0, writeTimeouts = 0;
+  uint32_t reads = 0, badHeaders = 0, writeTimeouts = 0, lateInt = 0;
   uint8_t lastBad[4] = {};
 };
 
@@ -55,6 +55,13 @@ class RestartableBNO08x : public Adafruit_BNO08x {
     if (digitalRead(int_) == HIGH) return 0;
     *t_us = micros();
     spi_->beginTransaction(settings());
+    // beginTransaction can wait for the TFT to finish a frame; only clock the
+    // hub if it is still asserting INT afterwards, never on a stale reading.
+    if (digitalRead(int_) == HIGH) {
+      spi_->endTransaction();
+      ++stats.lateInt;
+      return 0;
+    }
     digitalWrite(cs_, LOW);
     for (int i = 0; i < 4; ++i) buffer[i] = spi_->transfer(0);
     const uint16_t size = packetSize(buffer);
