@@ -44,7 +44,9 @@ rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
 
 - X czerwony, Y zielony, Z niebieski; jednostka m/s².
 - Ostatnie 4 s, skala stała ±20 m/s², nowe dane po prawej.
-- Odczyt żądany 500 Hz (stała `reportUs` = 2000 µs w `src/main.cpp`); ekran docelowo 25 Hz. Nagłówek podaje faktyczną
+- Odczyt żądany 500 Hz (stała `reportUs` = 2000 µs w `src/main.cpp`), ale
+  zmierzone maksimum tego czujnika w trybie SPI to ok. 180 Hz — tyle
+  faktycznie dostarcza, więc FFT sięga ok. 90 Hz. Ekran docelowo 25 Hz. Nagłówek podaje faktyczną
   liczbę otrzymanych raportów na sekundę, nie zmierzone pasmo czujnika.
 - Każdy przedział 40 ms pokazuje min/max oraz połączenie między próbkami.
   To obwiednia pików z odczytów, a nie prezentacja wszystkich punktów.
@@ -55,10 +57,10 @@ rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
 
 ### 2–4. FFT osi X, Y, Z
 
-- Widmo amplitudowe z ostatnich 512 próbek (ok. 1 s przy 500 Hz),
+- Widmo amplitudowe z ostatnich 512 próbek (ok. 2,8 s przy 180 Hz),
   okno Hanna, usunięta składowa stała (grawitacja i offset nie wpływają
-  na wykres). Rozdzielczość ok. 1 Hz, zakres 0 Hz – połowa faktycznej
-  częstotliwości raportów (do 250 Hz przy 500 Hz). Oś Hz skaluje się
+  na wykres). Rozdzielczość ok. 0,35 Hz, zakres 0 Hz – połowa faktycznej
+  częstotliwości raportów (ok. 90 Hz przy faktycznych 180 Hz). Oś Hz skaluje się
   według zmierzonego tempa raportów, więc przy mniejszej częstotliwości
   pokazuje mniejszy zakres. Czas próbek pochodzi z zegara czujnika
   (znacznik czasu każdego raportu), a nie z chwili odbioru pakietu.
@@ -134,7 +136,7 @@ podłączonej płytki dowolnym kompilatorem C++17:
 g++ -std=c++17 -Iinclude -fsyntax-only test/signal_checks.cpp
 ```
 
-1. Po starcie potwierdź odczyt zbliżony do 500 Hz (nagłówek ekranu i `rate=` na porcie szeregowym) i poprawny wykres na TFT.
+1. Po starcie potwierdź odczyt ok. 180 Hz (nagłówek ekranu i `rate=` na porcie szeregowym) i poprawny wykres na TFT.
 2. Obracaj czujnik w spoczynku: składowa grawitacji powinna przechodzić
    między osiami. Pełne przyspieszenie statyczne ma moduł około 9,81 m/s².
 3. Sprawdź przełączanie ekranów, pauzę, zero i kasowanie offsetu; lekkie stuknięcie powinno
@@ -152,7 +154,7 @@ Ustawienie zera odejmuje stały wektor, a nie zmienną grawitację podczas
 obrotu ramienia ani przyspieszenia trajektorii. Magnes mocujący może
 zaburzać magnetometr; ta wersja nie korzysta z orientacji magnetycznej.
 
-500 Hz daje częstotliwość Nyquista 250 Hz; użyteczne pasmo zależy
+Faktyczne ok. 180 Hz daje częstotliwość Nyquista ok. 90 Hz; użyteczne pasmo zależy
 dodatkowo od filtrów wewnątrz czujnika i jego faktycznego tempa raportów
 (sprawdź `rate=` na porcie szeregowym). Ten tryb nie
 wystarcza do szerokopasmowej diagnostyki łożysk. FFT to podgląd do połowy
