@@ -12,7 +12,7 @@
 #include "RestartableBNO08x.h"
 
 namespace {
-constexpr uint32_t binMs = 40, reportUs = 2000, staleMs = 1000;
+constexpr uint32_t binMs = 40, reportUs = 6667, staleMs = 1000;
 // Raw accelerometer (ADC counts, scale assumes +-8 g over 16 bits). Tested on
 // BNO085 firmware 3.2.13: enabling it succeeds but the hub sends no reports,
 // so it stays off.
@@ -24,7 +24,7 @@ constexpr uint32_t retryMs = 3000;
 // BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
 constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3, imuWake = A2;
 constexpr int bins = 100;
-constexpr std::size_t fftSize = 512; // ~1 s at 500 Hz, ~1 Hz per bin.
+constexpr std::size_t fftSize = 512; // ~3.4 s at 150 Hz, ~0.3 Hz per bin.
 constexpr float fftRange = 5.0f;     // Fixed full scale of the spectrum, m/s2.
 constexpr uint32_t fftGapMs = 100, batteryMs = 2000, gaugeRetryMs = 5000;
 constexpr float fullScale = 20.0f;
@@ -176,7 +176,7 @@ void sensorTask(void *) {
         retryAt = millis() + reconnectMs;
       }
     }
-    // At 500 Hz a fixed 1 ms sleep per packet is too slow; sleep only while
+    // At 150 Hz and up a fixed 1 ms sleep per packet is too slow; sleep only while
     // the hub has nothing pending.
     if (!ready || digitalRead(imuInt) == HIGH) vTaskDelay(pdMS_TO_TICKS(1));
     else taskYIELD();
