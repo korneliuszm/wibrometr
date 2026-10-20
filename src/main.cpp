@@ -42,7 +42,7 @@ RestartableBNO08x imu(imuRst);
 enum Screen { TimeScreen, FftX, FftY, FftZ, StrokeScreen, BatteryScreen, ScreenCount };
 int screen = TimeScreen;
 SampleWindow<fftSize> window;
-StrokeCounter strokes; // Hand strokes along the sensor X axis; fed regardless of pause.
+StrokeCounter strokes; // Hand strokes in any direction; fed regardless of pause.
 float spectrum[fftSize / 2 + 1];
 // Feather 5483 carries a MAX17048 (newer) or LC709203F (older) fuel gauge.
 enum class Gauge { None, Max17048, Lc709203f };
@@ -412,7 +412,7 @@ void pollBattery(uint32_t now) {
   if (!batteryValid) { gauge = Gauge::None; gaugeProbeAt = now + gaugeRetryMs; }
 }
 void drawStrokes(uint32_t now) {
-  drawHeader(now, "RUCHY OSI X", colors[0]);
+  drawHeader(now, "LICZNIK RUCHOW", ST77XX_WHITE);
   label(0, 13, fresh(now) ? ST77XX_GREEN : ST77XX_YELLOW, liveState(now));
   canvas.setTextSize(5);
   canvas.setTextColor(ST77XX_WHITE);
@@ -423,11 +423,14 @@ void drawStrokes(uint32_t now) {
   canvas.setCursor(130, 28);
   canvas.printf("%.0f/min", strokes.perMinute());
   canvas.setTextSize(1);
-  label(130, 48, muted, "ruchow (kazde przesuniecie)");
-  canvas.setCursor(130, 60);
-  canvas.printf("cykli tam-powrot: %lu", (unsigned long)strokes.cycles());
-  label(0, 72, linearActive ? muted : ST77XX_YELLOW,
-        linearActive ? "os X czujnika, przysp. liniowe" : "os X, BEZ przysp. liniowego (slabiej)");
+  label(130, 48, muted, "pelnych ruchow");
+  label(130, 58, muted, "(tam i z powrotem)");
+  // Tracked stroke direction in sensor axes, so the grip does not matter.
+  canvas.setCursor(0, 72);
+  canvas.setTextColor(linearActive ? muted : ST77XX_YELLOW);
+  if (linearActive)
+    canvas.printf("kierunek X%+.1f Y%+.1f Z%+.1f", strokes.axis(0), strokes.axis(1), strokes.axis(2));
+  else canvas.print("BEZ przysp. liniowego (slabiej)");
   // Velocity-like signal against the detection threshold: +-range spans the bar.
   const int barX = 2, barW = 236, mid = barX + barW / 2, barY = 88, barH = 14;
   const float range = fmaxf(strokes.envelope(), 0.1f);
@@ -542,14 +545,14 @@ void loop() {
       advanceTo(e.ms);
       if (e.kind == Kind::Linear) {
         strokes.setBiasTau(2.0f);
-        strokes.add(e.value.x, e.us);
+        strokes.add(e.value, e.us);
       } else if (e.kind == Kind::Sample) {
         latest = e.value;
         lastSample = e.ms;
         haveSample = true;
         ++sampleCount;
         workerState = "BRAK DANYCH";
-        if (!linearActive) { strokes.setBiasTau(1.0f); strokes.add(e.value.x, e.us); }
+        if (!linearActive) { strokes.setBiasTau(1.0f); strokes.add(e.value, e.us); }
         if (!paused) {
           history.add(e.value);
           // A gap in reports would smear the spectrum: start a new window.

@@ -38,8 +38,8 @@ Port szeregowy podaje szczegóły każdej próby. Krótki przewód i wspólna ma
 ## Ekran i obsługa
 
 Sześć ekranów przełączanych krótkim naciśnięciem BOOT (numer w prawym górnym
-rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — licznik ruchów
-posuwistych osi X, 6 — akumulator. Na ekranie 5 BOOT działa inaczej (niżej).
+rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — licznik ruchów,
+6 — akumulator. Na ekranie 5 BOOT działa inaczej (niżej).
 
 ### 1. Przebieg czasowy
 
@@ -74,29 +74,31 @@ posuwistych osi X, 6 — akumulator. Na ekranie 5 BOOT działa inaczej (niżej).
 - ZBIERANIE n/512: okno jeszcze się wypełnia (po starcie, wznowieniu
   pauzy lub przerwie w raportach dłuższej niż 100 ms).
 
-### 5. Ruchy osi X (licznik)
+### 5. Licznik ruchów
 
-Licznik ruchów posuwistych wzdłuż osi X czujnika, np. przy ruchach ręki
-trzymającej czujnik. Duża liczba to **ruchy** — każde przesunięcie w jedną
-stronę; pod spodem **cykle tam-powrót** (dwa ruchy to jeden cykl) i tempo
-w ruchach na minutę.
+Licznik powtarzalnych ruchów posuwistych ręki trzymającej czujnik. Duża
+liczba to **pełne ruchy** (tam i z powrotem), obok tempo w ruchach na minutę.
+Dostrojony do 0,7–5 ruchów/s i skoku od kilku do kilkunastu cm.
 - Źródłem jest przyspieszenie liniowe z fuzji czujnika (bez grawitacji,
-  ok. 100 Hz), bo przechylanie ręki przesuwa grawitację między osiami tak
-  samo mocno jak sam ruch. Gdy czujnik go nie udostępnia, ekran to pisze na
+  ok. 100 Hz), bo obrót dłoni przesuwa grawitację między osiami tak samo
+  mocno jak sam ruch. Gdy czujnik go nie udostępnia, ekran to pisze na
   żółto i liczy ze zwykłego przyspieszenia (wyraźnie słabiej).
+- Kierunek ruchu wyznaczany jest automatycznie ze wszystkich trzech osi
+  (dominujący kierunek z ostatnich ok. 0,5 s) i śledzi obrót nadgarstka,
+  więc ułożenie czujnika w dłoni nie ma znaczenia. Ekran pokazuje bieżący
+  kierunek w osiach czujnika.
 - Przyspieszenie jest wygładzane i całkowane do sygnału zbliżonego do
-  prędkości: każde przesunięcie daje jeden wyraźny impuls, a nie kilka
-  szczytów jak surowe przyspieszenie.
-- Próg to 30% ostatniego szczytu (minimum 0,04 m/s), więc liczą się
-  zarówno delikatne, jak i mocne ruchy; szum i drżenie nie liczą się wcale.
+  prędkości: każde przesunięcie daje jeden wyraźny impuls; dwa impulsy
+  w przeciwne strony to jeden ruch.
+- Próg to 20% ostatniego szczytu (zanik w ok. 1 s, minimum 0,04 m/s), więc
+  liczą się zarówno delikatne, jak i mocne ruchy; drżenie dłoni nie liczy się.
 - Pasek pokazuje bieżący sygnał względem progu (żółte znaczniki).
-- Test na symulowanych ruchach (zmienna siła, pauzy, szum) policzył
-  92–100% ruchów; nie testowano na prawdziwej ręce.
+- Symulacja (6×30 s na scenariusz): stałe i zmienne tempo 0,7–5 ruchów/s,
+  dowolna oś, pauzy: 0% do −2% błędu; przy obrocie nadgarstka 20°/s: −2%.
+  Nie testowano na prawdziwym ruchu.
 - Licznik działa niezależnie od pauzy na innych ekranach.
 - **BOOT na tym ekranie:** krótkie naciśnięcie kasuje licznik, przytrzymanie
   ≥1 s przechodzi do następnego ekranu.
-- Licznik zlicza ruch w osi X czujnika: trzymaj czujnik tak, aby kierunek
-  ruchu pokrywał się z osią X.
 
 ### 6. Akumulator
 
