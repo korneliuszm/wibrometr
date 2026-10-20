@@ -13,6 +13,12 @@
 
 namespace {
 constexpr uint32_t binMs = 40, reportUs = 2000, staleMs = 1000;
+// Raw accelerometer: ADC counts at the sensor's own rate, no calibration or
+// filtering by the hub. Scale assumes +-8 g over 16 bits (4096 counts/g):
+// verify against |a| = 9.81 m/s2 at rest in the serial accel_xyz line.
+constexpr bool useRaw = true;
+constexpr sh2_SensorId_t imuSensor = useRaw ? SH2_RAW_ACCELEROMETER : SH2_ACCELEROMETER;
+constexpr float rawToMs2 = 9.80665f / 4096.0f;
 constexpr uint32_t reconnectMs = 200; // Delay before re-initialising a stalled sensor.
 constexpr uint32_t retryMs = 3000;
 // BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
@@ -67,12 +73,19 @@ void emit(Kind kind, Accel value = {}, uint32_t us = 0) {
 // every report is forwarded here with the sensor's own timestamp.
 void onSensorEvent(void *, sh2_SensorEvent_t *event) {
   sh2_SensorValue_t value{};
-  if (sh2_decodeSensorEvent(&value, event) != SH2_OK ||
-      value.sensorId != SH2_ACCELEROMETER) return;
-  Accel a{value.un.accelerometer.x, value.un.accelerometer.y, value.un.accelerometer.z};
+  if (sh2_decodeSensorEvent(&value, event) != SH2_OK || value.sensorId != imuSensor) return;
+  Accel a;
+  uint32_t us = uint32_t(value.timestamp);
+  if (useRaw) {
+    const auto &r = value.un.rawAccelerometer;
+    a = {r.x * rawToMs2, r.y * rawToMs2, r.z * rawToMs2};
+    us = r.timestamp ? r.timestamp : us; // Sensor's own sample time, when present.
+  } else {
+    a = {value.un.accelerometer.x, value.un.accelerometer.y, value.un.accelerometer.z};
+  }
   if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z)) return;
   lastGoodMs = millis();
-  emit(Kind::Sample, a, uint32_t(value.timestamp));
+  emit(Kind::Sample, a, us);
 }
 
 // Only this task owns the SH2 driver. The SPI bus is shared with the TFT;
@@ -109,7 +122,7 @@ void sensorTask(void *) {
           emit(Kind::NoSpi);
         } else {
           sh2_setSensorCallback(onSensorEvent, nullptr);
-          if (imu.enableReport(SH2_ACCELEROMETER, reportUs)) {
+          if (imu.enableReport(imuSensor, reportUs)) {
             imu.wasReset();
             ready = true;
             lastGoodMs = millis();
@@ -128,7 +141,7 @@ void sensorTask(void *) {
     } else {
       if (imu.wasReset()) {
         emit(Kind::Reset);
-        ready = imu.enableReport(SH2_ACCELEROMETER, reportUs);
+        ready = imu.enableReport(imuSensor, reportUs);
         lastGoodMs = millis();
       }
 
