@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_BNO08x.h>
 #include <Adafruit_ST7789.h>
@@ -12,6 +11,8 @@
 namespace {
 constexpr uint32_t binMs = 40, reportUs = 10000, staleMs = 1000;
 constexpr uint32_t retryMs = 3000;
+// BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
+constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3;
 constexpr int bins = 100;
 constexpr float fullScale = 20.0f;
 constexpr int plotX = 30, plotY = 28, plotW = 200, plotH = 79;
@@ -20,7 +21,7 @@ constexpr uint16_t colors[] = {ST77XX_RED, ST77XX_GREEN, 0x3DFF};
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(240, 135);
 SignalHistory<bins> history;
-RestartableBNO08x imu;
+RestartableBNO08x imu(imuRst);
 enum class Kind { Sample, Connecting, Waiting, Reset };
 struct Event { Kind kind; uint32_t ms; Accel value; };
 QueueHandle_t events;
@@ -41,11 +42,10 @@ void emit(Kind kind, Accel value = {}) {
   if (xQueueSend(events, &event, 0) != pdTRUE) ++dropped;
 }
 
-// Only this task owns Wire and the SH2 driver. Library initialization can block
-// briefly; TFT and buttons continue to run on the Arduino loop task.
+// Only this task owns the SH2 driver. The SPI bus is shared with the TFT;
+// Arduino-ESP32 transactions serialize both tasks. Library initialization can
+// block briefly; TFT and buttons continue to run on the Arduino loop task.
 void sensorTask(void *) {
-  Wire.begin(42, 41, 100000);
-  Wire.setTimeOut(50);
   sh2_SensorValue_t report{}; // SH2 retains this pointer: keep it alive for the task.
   bool ready = false;
   uint32_t lastGood = 0, retryAt = 0;
@@ -54,23 +54,14 @@ void sensorTask(void *) {
     if (!ready) {
       if (int32_t(now - retryAt) >= 0) {
         emit(Kind::Connecting);
-        Wire.end();
-        Wire.begin(42, 41, 100000);
-        Wire.setTimeOut(50);
-        // Probe only the two valid BNO08x addresses; other onboard I2C
-        // peripherals must never be treated as an IMU.
-        for (uint8_t addr : {uint8_t(0x4A), uint8_t(0x4B)}) {
-          Wire.beginTransmission(addr);
-          if (Wire.endTransmission() != 0) continue;
-
-          if (!imu.begin_I2C(addr, &Wire)) continue;
+        // begin_SPI pulses RST before opening SH2, so each retry starts clean.
+        if (imu.begin_SPI(imuCs, imuInt, &SPI)) {
           imu.getSensorEvent(&report); // Register the persistent callback target.
           if (imu.enableReport(SH2_ACCELEROMETER, reportUs)) {
             imu.wasReset();
             ready = true;
             lastGood = millis();
-            Serial.printf("BNO085 0x%02X: accelerometer requested 100 Hz\n", addr);
-            break;
+            Serial.println("BNO085 SPI: accelerometer requested 100 Hz");
           }
         }
         if (!ready) emit(Kind::Waiting);
@@ -83,7 +74,9 @@ void sensorTask(void *) {
         lastGood = millis();
       }
 
-      if (ready && imu.getSensorEvent(&report) &&
+      // INT low means data is waiting; otherwise the SPI HAL would block and
+      // hardware-reset the sensor after 500 ms.
+      if (ready && digitalRead(imuInt) == LOW && imu.getSensorEvent(&report) &&
           report.sensorId == SH2_ACCELEROMETER) {
         Accel a{report.un.accelerometer.x, report.un.accelerometer.y,
                 report.un.accelerometer.z};
@@ -223,6 +216,8 @@ void setup() {
   pinMode(0, INPUT_PULLUP);
   pinMode(TFT_I2C_POWER, OUTPUT);
   digitalWrite(TFT_I2C_POWER, HIGH);
+  pinMode(imuCs, OUTPUT);
+  digitalWrite(imuCs, HIGH); // Keep BNO085 off the bus while the TFT starts.
   pinMode(TFT_BACKLITE, OUTPUT);
   digitalWrite(TFT_BACKLITE, HIGH);
   SPI.begin(SCK, MISO, MOSI);
