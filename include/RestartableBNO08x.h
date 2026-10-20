@@ -6,6 +6,8 @@
 // product-ID exchange fails. Release that instance only on later _init calls.
 class RestartableBNO08x : public Adafruit_BNO08x {
   bool sessionStarted_ = false;
+public:
+  using Adafruit_BNO08x::Adafruit_BNO08x;
 protected:
   bool _init(int32_t sensorId) override {
     if (sessionStarted_) sh2_close();

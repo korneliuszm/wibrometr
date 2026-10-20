@@ -6,19 +6,26 @@ ESP32-S3 TFT Feather, nie wersja Reverse TFT.
 
 ## Połączenia
 
+Czujnik pracuje przez SPI (tryb 3, 1 MHz), na wspólnej magistrali z TFT.
+
 | GY-BNO085 | Feather |
 |---|---|
-| SDA | GPIO42 |
-| SCL | GPIO41 |
+| SCL (SCK) | SCK / GPIO36 |
+| AD0 / DI (MOSI) | MOSI / GPIO35 |
+| SDA (MISO) | MISO / GPIO37 |
+| CS | A5 / GPIO8 |
+| INT | A4 / GPIO14 |
+| RST | A3 / GPIO15 |
+| PS0 (WAKE), PS1 | 3V (oba w stanie wysokim = SPI) |
 | GND | GND |
 | Zasilanie modułu | 3V / 3,3 V, zgodnie z opisem wejścia Twojego GY-BNO085 |
 
-Linie I2C pracują na poziomie 3,3 V. Sprawdź oznaczenia zasilania na swoim
-wariancie GY; moduły mogą mieć różne regulatory i opisy pinów.
-Moduł musi być ustawiony w tryb I2C według jego pinów PS0/PS1.
-Firmware szuka adresów 0x4A i 0x4B. INT i RST nie są wymagane w tej wersji.
-Nie sterujemy zasilaniem zewnętrznego modułu przy odzyskiwaniu połączenia.
-Krótki przewód i wspólna masa; Feather ma już rezystory podciągające I2C.
+Linie SPI pracują na poziomie 3,3 V. Sprawdź oznaczenia na swoim wariancie
+GY; moduły mogą mieć różne regulatory i opisy pinów (MOSI bywa opisane
+jako AD0, SA0 lub DI). INT jest wymagany: sterownik czyta dane tylko przy
+INT w stanie niskim. RST pozwala zresetować czujnik przy każdej próbie
+połączenia. Piny INT/RST można zmienić w stałych `imuInt` / `imuRst`
+w `src/main.cpp`. Krótki przewód i wspólna masa.
 
 ## Ekran i obsługa
 
@@ -59,12 +66,11 @@ pio device monitor --port COM6 --baud 115200
 
 COM6 to port wykryty podczas tworzenia projektu; może zmienić się po
 resecie lub na innym komputerze. Sprawdzenie: `pio device list`.
-Po wgraniu monitor powinien podawać adres IMU, częstotliwość raportów
+Po wgraniu monitor powinien podawać połączenie z IMU, częstotliwość raportów
 i liczbę utraconych próbek. Jeżeli automatyczny upload nie działa:
 przytrzymaj BOOT, naciśnij RESET, puść BOOT, sprawdź port i ponów upload.
 
 Platforma jest przypięta do pioarduino 55.03.36 (Arduino 3.3.6, IDF 5.5.2).
-Nowszy IDF wybrano ze względu na clock stretching na ESP32-S3.
 Biblioteki: Adafruit BNO08x 1.2.5 i ST7735/ST7789 1.11.0.
 Pakiety PlatformIO trafiają do ${sysenv.TEMP}/vibrationSensor-pio-core;
 pliki kompilacji do ${sysenv.TEMP}/vibrationSensor-pio-build.
@@ -107,13 +113,15 @@ wystarcza do szerokopasmowej diagnostyki łożysk. Nie ma FFT, klasyfikacji
 usterek, zapisu ani oceny według norm przemysłowych. Sztywność mocowania
 magnetycznego i przewód również wpływają na wynik.
 
-BNO08x ma znane problemy czasowe I2C z ESP32/ESP32-S3. Nowy sterownik,
-timeout i retry nie gwarantują odzyskania ze wszystkich stanów;
-czasem konieczny jest reset lub odłączenie zasilania samego modułu.
-Odczyt pracuje w osobnym zadaniu, aby inicjalizacja IMU nie zatrzymywała TFT.
+SPI omija znane problemy BNO08x z clock stretching I2C na ESP32-S3.
+Każda próba połączenia resetuje czujnik przez RST; nie gwarantuje to
+odzyskania ze wszystkich stanów i czasem konieczne jest odłączenie
+zasilania samego modułu. Odczyt pracuje w osobnym zadaniu, aby
+inicjalizacja IMU nie zatrzymywała TFT; transakcje SPI czujnika i ekranu
+są szeregowane przez sterownik magistrali.
 
 Dokumentacja:
 - [Feather: piny, zasilanie, TFT i przyciski](https://learn.adafruit.com/adafruit-esp32-s3-tft-feather/pinouts)
-- [BNO085: ograniczenia I2C](https://learn.adafruit.com/i2c-addresses/troublesome-chips)
+- [BNO085: połączenie SPI](https://learn.adafruit.com/adafruit-9-dof-orientation-imu-fusion-breakout-bno085/arduino)
 - [Platforma 55.03.36](https://github.com/pioarduino/platform-espressif32/releases/tag/55.03.36)
 
