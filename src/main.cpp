@@ -12,13 +12,14 @@
 #include "RestartableBNO08x.h"
 
 namespace {
-constexpr uint32_t binMs = 40, reportUs = 10000, staleMs = 1000;
+constexpr uint32_t binMs = 40, reportUs = 2000, staleMs = 1000;
 constexpr uint32_t reconnectMs = 200; // Delay before re-initialising a stalled sensor.
 constexpr uint32_t retryMs = 3000;
 // BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
 constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3, imuWake = A2;
 constexpr int bins = 100;
-constexpr std::size_t fftSize = 256; // ~2.6 s at 100 Hz, ~0.4 Hz per bin.
+constexpr std::size_t fftSize = 512; // ~1 s at 500 Hz, ~1 Hz per bin.
+constexpr float fftRange = 5.0f;     // Fixed full scale of the spectrum, m/s2.
 constexpr uint32_t fftGapMs = 100, batteryMs = 2000, gaugeRetryMs = 5000;
 constexpr float fullScale = 20.0f;
 constexpr int plotX = 30, plotY = 28, plotW = 200, plotH = 79;
@@ -32,8 +33,6 @@ enum Screen { TimeScreen, FftX, FftY, FftZ, BatteryScreen, ScreenCount };
 int screen = TimeScreen;
 SampleWindow<fftSize> window;
 float spectrum[fftSize / 2 + 1];
-float fftScale[3] = {0.1f, 0.1f, 0.1f};
-uint32_t fftLowSince[3] = {};
 // Feather 5483 carries a MAX17048 (newer) or LC709203F (older) fuel gauge.
 enum class Gauge { None, Max17048, Lc709203f };
 Gauge gauge = Gauge::None;
@@ -100,10 +99,11 @@ void sensorTask(void *) {
             imu.wasReset();
             ready = true;
             lastGood = millis();
-            Serial.printf("BNO085 SPI: part %lu sw %u.%u.%u, accelerometer requested 100 Hz\n",
+            Serial.printf("BNO085 SPI: part %lu sw %u.%u.%u, accelerometer requested %lu Hz\n",
                           (unsigned long)imu.prodIds.entry[0].swPartNumber,
                           imu.prodIds.entry[0].swVersionMajor, imu.prodIds.entry[0].swVersionMinor,
-                          imu.prodIds.entry[0].swVersionPatch);
+                          imu.prodIds.entry[0].swVersionPatch,
+                          (unsigned long)(1000000UL / reportUs));
           } else {
             Serial.println("BNO085: SPI ok, enabling accelerometer failed");
             emit(Kind::Waiting);
@@ -157,7 +157,10 @@ void sensorTask(void *) {
         retryAt = millis() + reconnectMs;
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
+    // At 500 Hz a fixed 1 ms sleep per packet is too slow; sleep only while
+    // the hub has nothing pending.
+    if (!ready || digitalRead(imuInt) == HIGH) vTaskDelay(pdMS_TO_TICKS(1));
+    else taskYIELD();
   }
 }
 
@@ -280,20 +283,6 @@ void drawTime(uint32_t now) {
   else if (dropped.load()) label(81, 110, ST77XX_YELLOW, "UTRATA PROBEK");
 }
 
-// Smallest 1-2-5 step above the peak; grows at once, shrinks after 2 s.
-float fftRange(int channel, float peak, uint32_t now) {
-  static constexpr float steps[] = {0.02f, 0.05f, 0.1f, 0.2f, 0.5f, 1, 2, 5, 10, 20};
-  float target = steps[9];
-  for (float step : steps)
-    if (peak * 1.1f <= step) { target = step; break; }
-  float &scale = fftScale[channel];
-  if (target >= scale) { scale = target; fftLowSince[channel] = now; }
-  else if (uint32_t(now - fftLowSince[channel]) >= 2000) {
-    scale = target;
-    fftLowSince[channel] = now;
-  }
-  return scale;
-}
 void drawSpectrum(uint32_t now, int channel) {
   static const char *titles[] = {"FFT OS X", "FFT OS Y", "FFT OS Z"};
   drawHeader(now, titles[channel], colors[channel]);
@@ -312,19 +301,18 @@ void drawSpectrum(uint32_t now, int channel) {
     std::size_t best = 1;
     for (std::size_t k = 1; k <= fftSize / 2; ++k)
       if (spectrum[k] > spectrum[best]) best = k;
-    const float range = fftRange(channel, spectrum[best], now);
     canvas.setTextColor(paused ? ST77XX_YELLOW : ST77XX_GREEN);
     canvas.setCursor(0, 13);
     canvas.printf("%s  max %.1f Hz  %.2f", paused ? "PAUZA" : "NA ZYWO",
                   best * rate / fftSize, spectrum[best]);
     canvas.setTextColor(muted);
     canvas.setCursor(0, plotY);
-    canvas.printf(range < 0.1f ? "%.2f" : range < 1 ? "%.1f" : "%.0f", range);
+    canvas.printf("%.0f", fftRange);
     label(18, plotY + plotH - 7, muted, "0");
     // DC is removed, so bin 0 is skipped; one stem per bin up to Nyquist.
     for (std::size_t k = 1; k <= fftSize / 2; ++k) {
       int x = plotX + k * (plotW - 1) / (fftSize / 2);
-      int h = lroundf(fminf(spectrum[k] / range, 1.0f) * (plotH - 1));
+      int h = lroundf(fminf(spectrum[k] / fftRange, 1.0f) * (plotH - 1));
       if (h > 0)
         canvas.drawFastVLine(x, plotY + plotH - 1 - h, h + 1, colors[channel]);
     }
@@ -458,7 +446,7 @@ void setup() {
     tft.print("Brak RAM dla wykresu");
     while (true) delay(1000);
   }
-  events = xQueueCreate(64, sizeof(Event));
+  events = xQueueCreate(256, sizeof(Event));
   binStart = lastFrame = rateStart = millis();
   draw(millis());
   if (!events || xTaskCreate(sensorTask, "BNO085", 8192, nullptr, 1, nullptr) != pdPASS) {
