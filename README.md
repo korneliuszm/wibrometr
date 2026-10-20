@@ -29,6 +29,11 @@ w `src/main.cpp`. Krótki przewód i wspólna masa.
 
 ## Ekran i obsługa
 
+Pięć ekranów przełączanych krótkim naciśnięciem BOOT (numer w prawym górnym
+rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — akumulator.
+
+### 1. Przebieg czasowy
+
 - X czerwony, Y zielony, Z niebieski; jednostka m/s².
 - Ostatnie 4 s, skala stała ±20 m/s², nowe dane po prawej.
 - Odczyt żądany 100 Hz; ekran docelowo 25 Hz. Nagłówek podaje faktyczną
@@ -40,13 +45,39 @@ w `src/main.cpp`. Krótki przewód i wspólna masa.
 - BRAK BNO085 / RETRY: ponowienie inicjalizacji co około 3 s po błędzie.
 - UTRATA PROBEK: przepełnienie kolejki w dowolnym momencie od startu.
 
+### 2–4. FFT osi X, Y, Z
+
+- Widmo amplitudowe z ostatnich 256 próbek (ok. 2,6 s przy 100 Hz),
+  okno Hanna, usunięta składowa stała (grawitacja i offset nie wpływają
+  na wykres). Rozdzielczość ok. 0,4 Hz, zakres 0 Hz – połowa faktycznej
+  częstotliwości raportów (ok. 50 Hz).
+- Oś pionowa: amplituda sinusoidy w m/s², skala automatyczna 1-2-5
+  (rośnie od razu, maleje po 2 s). Wiersz statusu podaje częstotliwość
+  i amplitudę największego prążka.
+- ZBIERANIE n/256: okno jeszcze się wypełnia (po starcie, wznowieniu
+  pauzy lub przerwie w raportach dłuższej niż 100 ms).
+
+### 5. Akumulator
+
+- Procent naładowania, napięcie ogniwa i pasek stanu z układu pomiaru
+  na płytce (I2C, GPIO42/41). Odczyt co 2 s.
+- Nowsze płytki 5483 mają MAX17048: stan ładowania wynika ze znaku
+  szybkości zmiany naładowania (%/h): LADOWANIE, ROZLADOWANIE,
+  NALADOWANY lub BEZ ZMIAN. Ładowarka nie ma wyjścia statusu na GPIO,
+  więc to jedyna dostępna informacja; po starcie wartość ustala się
+  przez pewien czas.
+- Starsze płytki z LC709203F pokazują tylko procent i napięcie — ten
+  układ nie odróżnia ładowania od rozładowania.
+- BRAK ODCZYTU UKLADU POMIARU: układ nie odpowiada (np. brak akumulatora,
+  bo MAX17048 jest zasilany z ogniwa). Ponowna próba co 5 s.
+
 **BOOT (GPIO0), akcja przy puszczeniu:**
 
 | Naciśnięcie | Działanie |
 |---|---|
-| krócej niż 1 s | pauza / wznowienie wykresu |
-| 1–3 s | odjęcie ostatniego aktualnego odczytu XYZ jako offsetu |
-| od 3 s | skasowanie offsetu, pełne przyspieszenie |
+| krócej niż 1 s | następny ekran |
+| 1–3 s | pauza / wznowienie wykresu i FFT |
+| od 3 s | ustawienie zera (odjęcie ostatniego odczytu XYZ) albo, gdy zero jest ustawione, powrót do pełnego przyspieszenia |
 
 Pauza zatrzymuje tylko widok; odczyt i status działają dalej. Wznowienie
 i zmiana offsetu czyszczą historię. Na ekranie pojawia się wskazówka
@@ -71,7 +102,7 @@ i liczbę utraconych próbek. Jeżeli automatyczny upload nie działa:
 przytrzymaj BOOT, naciśnij RESET, puść BOOT, sprawdź port i ponów upload.
 
 Platforma jest przypięta do pioarduino 55.03.36 (Arduino 3.3.6, IDF 5.5.2).
-Biblioteki: Adafruit BNO08x 1.2.5 i ST7735/ST7789 1.11.0.
+Biblioteki: Adafruit BNO08x 1.2.5, ST7735/ST7789 1.11.0 i LC709203F 1.3.4.
 Pakiety PlatformIO trafiają do ${sysenv.TEMP}/vibrationSensor-pio-core;
 pliki kompilacji do ${sysenv.TEMP}/vibrationSensor-pio-build.
 Oba katalogi znajdują się poza Dyskiem Google i ścieżką zawierającą polskie
@@ -92,7 +123,7 @@ g++ -std=c++17 -Iinclude -fsyntax-only test/signal_checks.cpp
 1. Po starcie potwierdź odczyt około 100 Hz i poprawny wykres na TFT.
 2. Obracaj czujnik w spoczynku: składowa grawitacji powinna przechodzić
    między osiami. Pełne przyspieszenie statyczne ma moduł około 9,81 m/s².
-3. Sprawdź pauzę, zero i kasowanie offsetu; lekkie stuknięcie powinno
+3. Sprawdź przełączanie ekranów, pauzę, zero i kasowanie offsetu; lekkie stuknięcie powinno
    być widoczne jako pik. Sprawdź też zachowanie poza skalą.
 4. Po wyłączeniu zasilania zmień połączenia i sprawdź start bez czujnika,
    a następnie ponowny start z czujnikiem. Test zaniku podczas pracy
@@ -109,8 +140,9 @@ zaburzać magnetometr; ta wersja nie korzysta z orientacji magnetycznej.
 
 100 Hz ogranicza teoretyczną częstotliwość Nyquista do 50 Hz; użyteczne
 pasmo zależy dodatkowo od filtrów i raportowania czujnika. Ten tryb nie
-wystarcza do szerokopasmowej diagnostyki łożysk. Nie ma FFT, klasyfikacji
-usterek, zapisu ani oceny według norm przemysłowych. Sztywność mocowania
+wystarcza do szerokopasmowej diagnostyki łożysk. FFT to podgląd do ok.
+50 Hz liczony z czasów odbioru raportów; nie ma klasyfikacji usterek,
+zapisu ani oceny według norm przemysłowych. Sztywność mocowania
 magnetycznego i przewód również wpływają na wynik.
 
 SPI omija znane problemy BNO08x z clock stretching I2C na ESP32-S3.

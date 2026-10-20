@@ -42,3 +42,19 @@ static_assert(elapsedBins(1001, 1000) == 0, "Sub-frame time must not advance");
 static_assert(elapsedBins(999, 1000) == 0, "Late queued events must not erase history");
 static_assert(elapsedBins(1040, 1000) == 1, "40ms makes one bin");
 static_assert(elapsedBins(24, 0xFFFFFFF0u) == 1, "Millis rollover must preserve time");
+
+#include "Spectrum.h"
+constexpr bool windowOrderAndRate() {
+  SampleWindow<4> window;
+  for (int i = 1; i <= 6; ++i) window.add({float(i), 0, 0}, 1000 + i * 10);
+  return window.full() && window.at(0).x == 3 && window.at(3).x == 6 &&
+         window.newestMs() == 1060 && window.rateHz() == 100.0f;
+}
+constexpr bool windowClear() {
+  SampleWindow<4> window;
+  window.add({1, 2, 3}, 5);
+  window.clear();
+  return window.size() == 0 && window.rateHz() == 0;
+}
+static_assert(windowOrderAndRate(), "FFT window must keep newest samples and measure rate");
+static_assert(windowClear(), "Cleared FFT window must not report a rate");
