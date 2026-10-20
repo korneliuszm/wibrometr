@@ -13,10 +13,10 @@
 
 namespace {
 constexpr uint32_t binMs = 40, reportUs = 2000, staleMs = 1000;
-// Raw accelerometer: ADC counts at the sensor's own rate, no calibration or
-// filtering by the hub. Scale assumes +-8 g over 16 bits (4096 counts/g):
-// verify against |a| = 9.81 m/s2 at rest in the serial accel_xyz line.
-constexpr bool useRaw = true;
+// Raw accelerometer (ADC counts, scale assumes +-8 g over 16 bits). Tested on
+// BNO085 firmware 3.2.13: enabling it succeeds but the hub sends no reports,
+// so it stays off.
+constexpr bool useRaw = false;
 constexpr sh2_SensorId_t imuSensor = useRaw ? SH2_RAW_ACCELEROMETER : SH2_ACCELEROMETER;
 constexpr float rawToMs2 = 9.80665f / 4096.0f;
 constexpr uint32_t reconnectMs = 200; // Delay before re-initialising a stalled sensor.
