@@ -20,7 +20,10 @@ constexpr uint32_t binMs = 40, reportUs = 6667, staleMs = 1000;
 constexpr bool useRaw = false;
 constexpr sh2_SensorId_t imuSensor = useRaw ? SH2_RAW_ACCELEROMETER : SH2_ACCELEROMETER;
 constexpr float rawToMs2 = 9.80665f / 4096.0f;
-constexpr uint32_t reconnectMs = 200; // Delay before re-initialising a stalled sensor.
+constexpr uint32_t reconnectMs = 200;
+// Gravity-free acceleration from the hub's fusion, used only by the stroke
+// counter: tilting the hand moves gravity between axes as much as a stroke does.
+constexpr uint32_t linearUs = 10000; // Delay before re-initialising a stalled sensor.
 constexpr uint32_t retryMs = 3000;
 // BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
 constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3, imuWake = A2;
@@ -48,7 +51,7 @@ Adafruit_LC709203F lc;
 bool batteryValid = false;
 float batteryVolts = 0, batteryPercent = 0, batteryRate = 0;
 uint32_t batteryAt = 0, gaugeProbeAt = 0;
-enum class Kind { Sample, Connecting, Waiting, Reset, NoInt, NoSpi };
+enum class Kind { Sample, Linear, Connecting, Waiting, Reset, NoInt, NoSpi };
 struct Event { Kind kind; uint32_t ms; uint32_t us; Accel value; };
 QueueHandle_t events;
 std::atomic<uint32_t> dropped{0};
@@ -64,6 +67,7 @@ uint32_t noticeUntil = 0;
 const char *notice = "";
 
 std::atomic<uint32_t> lastGoodMs{0};
+std::atomic<bool> linearActive{false};
 
 void emit(Kind kind, Accel value = {}, uint32_t us = 0) {
   Event event{kind, millis(), us, value};
@@ -75,7 +79,14 @@ void emit(Kind kind, Accel value = {}, uint32_t us = 0) {
 // every report is forwarded here with the sensor's own timestamp.
 void onSensorEvent(void *, sh2_SensorEvent_t *event) {
   sh2_SensorValue_t value{};
-  if (sh2_decodeSensorEvent(&value, event) != SH2_OK || value.sensorId != imuSensor) return;
+  if (sh2_decodeSensorEvent(&value, event) != SH2_OK) return;
+  if (value.sensorId == SH2_LINEAR_ACCELERATION) {
+    const auto &l = value.un.linearAcceleration;
+    if (std::isfinite(l.x) && std::isfinite(l.y) && std::isfinite(l.z))
+      emit(Kind::Linear, {l.x, l.y, l.z}, uint32_t(value.timestamp));
+    return;
+  }
+  if (value.sensorId != imuSensor) return;
   Accel a;
   uint32_t us = uint32_t(value.timestamp);
   if (useRaw) {
@@ -88,6 +99,14 @@ void onSensorEvent(void *, sh2_SensorEvent_t *event) {
   if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z)) return;
   lastGoodMs = millis();
   emit(Kind::Sample, a, us);
+}
+
+// Main report is required; linear acceleration is optional and the stroke
+// counter falls back to the plain accelerometer without it.
+bool enableReports() {
+  linearActive = imu.enableReport(SH2_LINEAR_ACCELERATION, linearUs);
+  Serial.printf("BNO085: linear acceleration %s\n", linearActive ? "on" : "unavailable");
+  return imu.enableReport(imuSensor, reportUs);
 }
 
 // Only this task owns the SH2 driver. The SPI bus is shared with the TFT;
@@ -124,7 +143,7 @@ void sensorTask(void *) {
           emit(Kind::NoSpi);
         } else {
           sh2_setSensorCallback(onSensorEvent, nullptr);
-          if (imu.enableReport(imuSensor, reportUs)) {
+          if (enableReports()) {
             imu.wasReset();
             ready = true;
             lastGoodMs = millis();
@@ -143,7 +162,7 @@ void sensorTask(void *) {
     } else {
       if (imu.wasReset()) {
         emit(Kind::Reset);
-        ready = imu.enableReport(imuSensor, reportUs);
+        ready = enableReports();
         lastGoodMs = millis();
       }
 
@@ -401,16 +420,19 @@ void drawStrokes(uint32_t now) {
   canvas.printf("%lu", (unsigned long)strokes.count());
   canvas.setTextSize(2);
   canvas.setTextColor(strokes.perMinute() > 0 ? ST77XX_GREEN : muted);
-  canvas.setCursor(130, 30);
+  canvas.setCursor(130, 28);
   canvas.printf("%.0f/min", strokes.perMinute());
   canvas.setTextSize(1);
-  label(130, 50, muted, "pelnych cykli tam i z powrotem");
-  label(0, 70, muted, "ruch w osi X czujnika");
-  // Filtered X against the detection threshold: +-env spans the bar.
+  label(130, 48, muted, "ruchow (kazde przesuniecie)");
+  canvas.setCursor(130, 60);
+  canvas.printf("cykli tam-powrot: %lu", (unsigned long)strokes.cycles());
+  label(0, 72, linearActive ? muted : ST77XX_YELLOW,
+        linearActive ? "os X czujnika, przysp. liniowe" : "os X, BEZ przysp. liniowego (slabiej)");
+  // Velocity-like signal against the detection threshold: +-range spans the bar.
   const int barX = 2, barW = 236, mid = barX + barW / 2, barY = 88, barH = 14;
-  const float range = fmaxf(strokes.envelope(), 2.0f);
+  const float range = fmaxf(strokes.envelope(), 0.1f);
   canvas.drawRect(barX, barY, barW, barH, muted);
-  const int tick = lroundf(strokes.threshold() / range * (barW / 2 - 2));
+  const int tick = lroundf(fminf(strokes.threshold() / range, 1.0f) * (barW / 2 - 2));
   canvas.drawFastVLine(mid - tick, barY, barH, ST77XX_YELLOW);
   canvas.drawFastVLine(mid + tick, barY, barH, ST77XX_YELLOW);
   const int len = lroundf(fmaxf(-1.0f, fminf(1.0f, strokes.filtered() / range)) * (barW / 2 - 2));
@@ -418,7 +440,7 @@ void drawStrokes(uint32_t now) {
   else canvas.fillRect(mid + len, barY + 2, -len, barH - 4, colors[0]);
   canvas.setCursor(0, 108);
   canvas.setTextColor(muted);
-  canvas.printf("prog %.1f m/s2   amplituda %.1f", strokes.threshold(), strokes.envelope());
+  canvas.printf("prog %.2f m/s   szczyt %.2f m/s", strokes.threshold(), strokes.envelope());
 }
 void drawBattery(uint32_t now) {
   drawHeader(now, "AKUMULATOR", ST77XX_WHITE);
@@ -518,13 +540,16 @@ void loop() {
   if (events) {
     while (xQueueReceive(events, &e, 0) == pdTRUE) {
       advanceTo(e.ms);
-      if (e.kind == Kind::Sample) {
+      if (e.kind == Kind::Linear) {
+        strokes.setBiasTau(2.0f);
+        strokes.add(e.value.x, e.us);
+      } else if (e.kind == Kind::Sample) {
         latest = e.value;
         lastSample = e.ms;
         haveSample = true;
         ++sampleCount;
         workerState = "BRAK DANYCH";
-        strokes.add(e.value.x, e.us);
+        if (!linearActive) { strokes.setBiasTau(1.0f); strokes.add(e.value.x, e.us); }
         if (!paused) {
           history.add(e.value);
           // A gap in reports would smear the spectrum: start a new window.

@@ -60,30 +60,39 @@ static_assert(windowOrderAndRate(), "FFT window must keep newest samples and mea
 static_assert(windowClear(), "Cleared FFT window must not report a rate");
 
 #include "StrokeCounter.h"
-// 120 Hz samples, triangle wave of `periodSamples` per cycle around a gravity offset.
-constexpr uint32_t strokesInTriangle(int samples, int periodSamples, float amplitude) {
+// Hand strokes as minimum-jerk passes (alternating direction, no pauses) at
+// 120 Hz on top of an offset. Gravity-free input, as the linear report gives.
+constexpr uint32_t passesCounted(int passes, float distance, float seconds, float bias) {
   StrokeCounter counter;
-  for (int i = 0; i < samples; ++i) {
-    const int phase = i % periodSamples;
-    const int tri = phase < periodSamples / 2 ? phase : periodSamples - phase;
-    const float x = 5.0f + (tri * 2.0f / periodSamples - 0.5f) * 2 * amplitude;
-    counter.add(x, i * 8333u);
-  }
+  const int perPass = int(seconds * 120);
+  uint32_t us = 0;
+  for (int p = 0; p < passes; ++p)
+    for (int i = 0; i < perPass; ++i) {
+      const float t = float(i) / perPass;
+      const float dir = p % 2 ? -1.0f : 1.0f;
+      const float a = dir * distance / (seconds * seconds) * (60 * t - 180 * t * t + 120 * t * t * t);
+      counter.add(a + bias, us += 8333);
+    }
   return counter.count();
 }
-static_assert(strokesInTriangle(600, 60, 3.0f) >= 8 && strokesInTriangle(600, 60, 3.0f) <= 10,
-              "2 Hz strokes for 5 s must count about 10 cycles on top of gravity");
-static_assert(strokesInTriangle(600, 240, 1.0f) >= 1 && strokesInTriangle(600, 240, 1.0f) <= 2,
-              "Slow gentle strokes must still be counted");
-static_assert(strokesInTriangle(600, 60, 0.2f) == 0, "Sensor noise must not count as strokes");
+static_assert(passesCounted(10, 0.10f, 0.5f, 0.2f) >= 9 && passesCounted(10, 0.10f, 0.5f, 0.2f) <= 10,
+              "Each hand pass must count once");
+static_assert(passesCounted(10, 0.03f, 0.8f, 0.2f) >= 9 && passesCounted(10, 0.03f, 0.8f, 0.2f) <= 10,
+              "Short gentle strokes must still be counted");
+static_assert(passesCounted(10, 0.15f, 0.25f, 0.0f) >= 9 && passesCounted(10, 0.15f, 0.25f, 0.0f) <= 10,
+              "Fast strokes must be counted");
+static_assert(passesCounted(10, 0.0f, 0.5f, 0.3f) == 0, "Constant offset must not count");
+static_assert(passesCounted(10, 0.002f, 0.1f, 0.0f) == 0, "Tremor must not count");
 constexpr bool resetClears() {
   StrokeCounter counter;
-  for (int i = 0; i < 600; ++i) {
-    const int phase = i % 60;
-    counter.add(5.0f + (phase < 30 ? phase - 15 : 45 - phase) * 0.2f, i * 8333u);
-  }
+  uint32_t us = 0;
+  for (int p = 0; p < 6; ++p)
+    for (int i = 0; i < 60; ++i) {
+      const float t = i / 60.0f;
+      counter.add((p % 2 ? -1 : 1) * 0.4f * (60 * t - 180 * t * t + 120 * t * t * t), us += 8333);
+    }
   const bool counted = counter.count() > 0;
   counter.reset();
-  return counted && counter.count() == 0 && counter.perMinute() == 0;
+  return counted && counter.count() == 0 && counter.cycles() == 0 && counter.perMinute() == 0;
 }
 static_assert(resetClears(), "Reset must clear the count and rate");

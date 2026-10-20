@@ -76,19 +76,27 @@ posuwistych osi X, 6 — akumulator. Na ekranie 5 BOOT działa inaczej (niżej).
 
 ### 5. Ruchy osi X (licznik)
 
-Licznik pełnych cykli „tam i z powrotem” wzdłuż osi X czujnika, np. przy
-ruchach posuwistych ręką trzymającą czujnik, oraz tempo w cyklach na minutę.
-- Z sygnału X usuwana jest wolna składowa (filtr ok. 1 s), więc grawitacja
-  i powolne przechylanie ręki nie wpływają na wynik.
-- Cykl liczy się, gdy przyspieszenie przejdzie poniżej `-próg`, a potem powyżej
-  `+próg`. Próg to 40% ostatniej amplitudy (minimum 0,5 m/s²), więc liczą się
-  zarówno delikatne, jak i mocne ruchy; szum czujnika nie liczy się wcale.
-- Pasek pokazuje bieżący przebieg X względem progu (żółte znaczniki).
+Licznik ruchów posuwistych wzdłuż osi X czujnika, np. przy ruchach ręki
+trzymającej czujnik. Duża liczba to **ruchy** — każde przesunięcie w jedną
+stronę; pod spodem **cykle tam-powrót** (dwa ruchy to jeden cykl) i tempo
+w ruchach na minutę.
+- Źródłem jest przyspieszenie liniowe z fuzji czujnika (bez grawitacji,
+  ok. 100 Hz), bo przechylanie ręki przesuwa grawitację między osiami tak
+  samo mocno jak sam ruch. Gdy czujnik go nie udostępnia, ekran to pisze na
+  żółto i liczy ze zwykłego przyspieszenia (wyraźnie słabiej).
+- Przyspieszenie jest wygładzane i całkowane do sygnału zbliżonego do
+  prędkości: każde przesunięcie daje jeden wyraźny impuls, a nie kilka
+  szczytów jak surowe przyspieszenie.
+- Próg to 30% ostatniego szczytu (minimum 0,04 m/s), więc liczą się
+  zarówno delikatne, jak i mocne ruchy; szum i drżenie nie liczą się wcale.
+- Pasek pokazuje bieżący sygnał względem progu (żółte znaczniki).
+- Test na symulowanych ruchach (zmienna siła, pauzy, szum) policzył
+  92–100% ruchów; nie testowano na prawdziwej ręce.
 - Licznik działa niezależnie od pauzy na innych ekranach.
 - **BOOT na tym ekranie:** krótkie naciśnięcie kasuje licznik, przytrzymanie
   ≥1 s przechodzi do następnego ekranu.
-- Licznik zlicza cykle w osi X czujnika, nie w osi ruchu ręki: trzymaj czujnik
-  tak, aby kierunek ruchu pokrywał się z osią X.
+- Licznik zlicza ruch w osi X czujnika: trzymaj czujnik tak, aby kierunek
+  ruchu pokrywał się z osią X.
 
 ### 6. Akumulator
 
