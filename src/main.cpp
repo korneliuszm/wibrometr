@@ -7,12 +7,19 @@
 #include <Adafruit_GFX.h>
 #include <atomic>
 #include <cmath>
+#include <iterator>
 #include "SignalHistory.h"
 #include "Spectrum.h"
 #include "StrokeCounter.h"
 #include "RestartableBNO08x.h"
+#include "indoor_positioning/IndoorPositioning.h"
+#include "NavigationScreen.h"
+#include "UiTheme.h"
 
 namespace {
+// Accelerometer (BNO085) and its screens are switched off while the Wi-Fi
+// indoor positioning prototype is evaluated; set true to bring them back.
+constexpr bool imuEnabled = false;
 constexpr uint32_t binMs = 40, reportUs = 6667, staleMs = 1000;
 // Raw accelerometer (ADC counts, scale assumes +-8 g over 16 bits). Tested on
 // BNO085 firmware 3.2.13: enabling it succeeds but the hub sends no reports,
@@ -33,14 +40,24 @@ constexpr float fftRange = 5.0f;     // Fixed full scale of the spectrum, m/s2.
 constexpr uint32_t fftGapMs = 100, batteryMs = 2000, gaugeRetryMs = 5000;
 constexpr float fullScale = 20.0f;
 constexpr int plotX = 30, plotY = 28, plotW = 200, plotH = 79;
-constexpr uint16_t bg = 0x0841, grid = 0x2945, muted = 0x9CF3;
+using ui::bg;
+using ui::grid;
+using ui::muted;
 constexpr uint16_t colors[] = {ST77XX_RED, ST77XX_GREEN, 0x3DFF};
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(240, 135);
 SignalHistory<bins> history;
 RestartableBNO08x imu(imuRst);
-enum Screen { TimeScreen, FftX, FftY, FftZ, StrokeScreen, BatteryScreen, ScreenCount };
-int screen = TimeScreen;
+enum Screen { TimeScreen, FftX, FftY, FftZ, StrokeScreen, NavScreen, BatteryScreen };
+constexpr Screen imuScreens[] = {TimeScreen, FftX, FftY, FftZ, StrokeScreen, NavScreen, BatteryScreen};
+constexpr Screen ipsScreens[] = {NavScreen, BatteryScreen};
+const Screen *const activeScreens = imuEnabled ? imuScreens : ipsScreens;
+constexpr int screenCount = imuEnabled ? int(std::size(imuScreens)) : int(std::size(ipsScreens));
+int screenPos = 0; // Index into activeScreens.
+Screen screen = activeScreens[0];
+ips::IndoorPositioning positioning;
+uint32_t lastNavSignature = 0;
+bool navDrawn = false;
 SampleWindow<fftSize> window;
 StrokeCounter strokes; // Hand strokes in any direction; fed regardless of pause.
 float spectrum[fftSize / 2 + 1];
@@ -222,6 +239,11 @@ void advanceTo(uint32_t now) {
 bool fresh(uint32_t now) {
   return haveSample && uint32_t(now - lastSample) < staleMs;
 }
+void nextScreen() {
+  screenPos = (screenPos + 1) % screenCount;
+  screen = activeScreens[screenPos];
+  navDrawn = false;
+}
 void showNotice(const char *text, uint32_t now) {
   notice = text;
   noticeUntil = now + 1600;
@@ -234,9 +256,29 @@ void pollButton(uint32_t now) {
     if (pressed) buttonDown = now;
     else {
       uint32_t duration = now - buttonDown;
-      if (screen == StrokeScreen) {
+      if (screen == NavScreen) {
+        const auto progress = positioning.getCalibrationProgress();
+        if (progress.active) {
+          // Calibrating: tap measures the current point, hold cancels.
+          if (duration >= 1000) {
+            positioning.cancelCalibration();
+            showNotice("KALIBRACJA ANULOWANA", now);
+          } else if (!progress.measuring) {
+            positioning.confirmCalibrationPoint();
+          }
+        } else if (duration >= 3000) {
+          positioning.resetCalibration();
+          showNotice("KALIBRACJA USUNIETA", now);
+        } else if (duration >= 1000) {
+          positioning.startCalibration();
+        } else {
+          nextScreen();
+        }
+      } else if (!imuEnabled) {
+        nextScreen(); // Pause and zero belong to the accelerometer screens.
+      } else if (screen == StrokeScreen) {
         // This screen: a tap clears the counter, a hold moves on.
-        if (duration >= 1000) screen = (screen + 1) % ScreenCount;
+        if (duration >= 1000) nextScreen();
         else { strokes.reset(); showNotice("LICZNIK SKASOWANY", now); }
       } else if (duration >= 3000) {
         if (zeroed) {
@@ -254,7 +296,7 @@ void pollButton(uint32_t now) {
         paused = !paused;
         if (!paused) { history.clear(); window.clear(); binStart = now; }
       } else {
-        screen = (screen + 1) % ScreenCount;
+        nextScreen();
       }
     }
   }
@@ -274,12 +316,14 @@ void label(int x, int y, uint16_t color, const char *text) {
 }
 void drawHeader(uint32_t now, const char *title, uint16_t color) {
   label(0, 0, color, title);
-  canvas.setTextColor(ST77XX_WHITE);
-  canvas.setCursor(162, 0);
-  canvas.printf("%3.0f Hz", fresh(now) ? actualHz : 0);
+  if (imuEnabled) {
+    canvas.setTextColor(ST77XX_WHITE);
+    canvas.setCursor(162, 0);
+    canvas.printf("%3.0f Hz", fresh(now) ? actualHz : 0);
+  }
   canvas.setTextColor(muted);
   canvas.setCursor(222, 0);
-  canvas.printf("%d/%d", screen + 1, int(ScreenCount));
+  canvas.printf("%d/%d", screenPos + 1, screenCount);
 }
 void drawGrid() {
   for (int n = 0; n <= 4; ++n) {
@@ -483,7 +527,32 @@ void drawBattery(uint32_t now) {
   }
 }
 
+NavScreenState navState(uint32_t now) {
+  NavScreenState n;
+  n.progress = positioning.getCalibrationProgress();
+  n.position = positioning.getPosition();
+  n.calibrated = positioning.isCalibrated();
+  n.sideM = positioning.sideM();
+  for (uint8_t i = 0; i < 3; ++i) positioning.referencePoint(i, n.refX[i], n.refY[i]);
+  n.screenPos = screenPos;
+  n.screenCount = screenCount;
+  n.buttonHeld = buttonStable;
+  n.heldMs = now - buttonDown;
+  n.notice = int32_t(noticeUntil - now) > 0 ? notice : nullptr;
+  return n;
+}
+
 void draw(uint32_t now) {
+  if (screen == NavScreen) {
+    const NavScreenState state = navState(now);
+    const uint32_t signature = navSignature(state, now);
+    if (navDrawn && signature == lastNavSignature) return; // Nothing changed: no SPI traffic.
+    lastNavSignature = signature;
+    navDrawn = true;
+    drawNavigationScreen(canvas, state, now);
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), 240, 135);
+    return;
+  }
   canvas.fillScreen(bg);
   if (screen == TimeScreen) drawTime(now);
   else if (screen == StrokeScreen) drawStrokes(now);
@@ -498,6 +567,7 @@ void draw(uint32_t now) {
   } else if (int32_t(noticeUntil - now) > 0)
     label(0, 125, ST77XX_YELLOW, notice);
   else if (screen == StrokeScreen) label(0, 125, muted, "BOOT: kasuj / 1s: nastepny ekran");
+  else if (!imuEnabled) label(0, 125, muted, "BOOT: nastepny ekran");
   else label(0, 125, muted, "BOOT: ekran / 1s:pauza / 3s:zero");
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), 240, 135);
 }
@@ -529,9 +599,11 @@ void setup() {
     tft.print("Brak RAM dla wykresu");
     while (true) delay(1000);
   }
-  events = xQueueCreate(256, sizeof(Event));
   binStart = lastFrame = rateStart = millis();
   draw(millis());
+  positioning.begin();
+  if (!imuEnabled) return;
+  events = xQueueCreate(256, sizeof(Event));
   if (!events || xTaskCreate(sensorTask, "BNO085", 8192, nullptr, 1, nullptr) != pdPASS) {
     workerState = "BLAD PAMIECI / TASK";
     return;
@@ -576,7 +648,11 @@ void loop() {
   advanceTo(now);
   pollButton(now);
   pollBattery(now);
-  if (uint32_t(now - rateStart) >= 1000) {
+  // Scan only while the map is shown (or a calibration runs from it).
+  if (screen == NavScreen) positioning.startPositioning();
+  else positioning.stopPositioning();
+  positioning.loop(now);
+  if (imuEnabled && uint32_t(now - rateStart) >= 1000) {
     actualHz = sampleCount * 1000.0f / uint32_t(now - rateStart);
     sampleCount = 0;
     rateStart = now;

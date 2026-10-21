@@ -4,6 +4,13 @@ Pierwsza wersja do obserwacji przyspieszeń ramienia robota podczas ruchu.
 Projekt PlatformIO znajduje się w tym katalogu. Płytka: Adafruit **5483**
 ESP32-S3 TFT Feather, nie wersja Reverse TFT.
 
+> **Stan obecny:** akcelerometr i jego ekrany (1–5 poniżej) są tymczasowo
+> wyłączone (`imuEnabled = false` w `src/main.cpp`), a urządzenie działa jako
+> prototyp nawigacji wewnętrznej po Wi-Fi — patrz
+> [Nawigacja wewnętrzna](#nawigacja-wewnętrzna-wi-fi-rssi--prototyp).
+> Ekrany: 1/2 — mapa nawigacji, 2/2 — akumulator. Kod akcelerometru jest
+> zachowany; `imuEnabled = true` przywraca wszystkie ekrany.
+
 ## Połączenia
 
 Czujnik pracuje przez SPI (tryb 3, 1 MHz), na wspólnej magistrali z TFT.
@@ -127,6 +134,149 @@ i zmiana offsetu czyszczą historię. Na ekranie pojawia się wskazówka
 zależna od czasu przytrzymania. RESET płytki restartuje firmware.
 Nie trzymaj BOOT podczas resetu, jeśli nie chcesz uruchomić bootloadera.
 Płytka 5483 ma tylko jeden przycisk użytkownika; nie używamy D1/D2.
+
+## Nawigacja wewnętrzna (Wi-Fi RSSI) — prototyp
+
+Eksperyment: szacowanie położenia w pomieszczeniu na podstawie siły
+sygnałów okolicznych punktów dostępowych Wi-Fi (fingerprinting RSSI).
+Działa autonomicznie — bez Internetu, serwera i bez łączenia się z siecią;
+ESP32 jedynie skanuje eter. **Pozycja jest szacunkiem z interpolacji trzech
+punktów odniesienia, a nie pomiarem w metrach.** Przy trzech punktach
+spodziewaj się błędów rzędu metrów; to demonstrator, który pozwala ocenić,
+na ile fingerprinting działa w danym miejscu.
+
+![Ekran nawigacji: brak kalibracji, kalibracja, pomiar, błąd punktu, pozycja OK, niska jakość](docs/indoor-navigation-screens.png)
+
+*Podgląd wyrenderowany na komputerze tym samym kodem i biblioteką GFX co
+na urządzeniu (skala 2×).*
+
+### Obsługa (ekran mapy)
+
+| Stan | BOOT krótko | BOOT ≥1 s | BOOT ≥3 s |
+|---|---|---|---|
+| mapa (zwykły widok) | następny ekran | rozpocznij kalibrację | usuń kalibrację z pamięci |
+| kalibracja — czekanie na punkt | zmierz punkt | anuluj (stara kalibracja zostaje) | — |
+| kalibracja — pomiar | — | anuluj | — |
+
+Kalibracja zapisuje się w pamięci nieulotnej (NVS) i przetrwa restart.
+Nowa kalibracja zastępuje starą dopiero po pomiarze wszystkich trzech punktów.
+
+### Kalibracja — trzy punkty
+
+Trójkąt równoboczny o boku `CALIBRATION_SIDE_M` (domyślnie 5 m):
+A (0, 0), B (5, 0), C (2,5, 4,33) — współrzędne liczone z długości boku.
+
+1. Przytrzymaj BOOT 1 s na ekranie mapy → „Przejdź do punktu A”
+   (punkt docelowy miga na mapie).
+2. Stań w punkcie A, naciśnij BOOT. Urządzenie wykonuje 15 skanów
+   (ok. 25 s, zależnie od czasu skanu) — ekran pokazuje np. „Kalibracja A: 7/15”. Stój w miejscu
+   i nie zasłaniaj urządzenia.
+3. To samo w B i C. Po C kalibracja zapisuje się i od razu włącza się
+   lokalizacja.
+
+Jeśli w punkcie zostanie mniej niż 3 użyteczne sieci, ekran pokaże „Za mało
+sieci” — pomiar tego punktu można powtórzyć tym samym przyciskiem.
+
+Agregacja punktu (dla każdego BSSID osobno; SSID i kanał są zapisywane
+pomocniczo, bo SSID nie jest unikalny):
+- odrzucenie wartości odstających: dalej niż max(6 dB, 3·1,4826·MAD)
+  od mediany;
+- zapis średniej, odchylenia, liczby wykryć i liczby skanów;
+- pominięcie AP widocznych w mniej niż 50% skanów, słabszych niż
+  −90 dBm albo z odchyleniem > 8 dB;
+- najwyżej 24 najsilniejsze AP na punkt.
+
+### Algorytm lokalizacji
+
+Co ok. 2,5 s (skan aktywny 120 ms na kanał, ok. 1,6 s; w tle — interfejs
+działa dalej):
+1. Bieżący wektor RSSI po BSSID porównywany jest z każdym punktem jako
+   ważony RMS różnic w dB (bez modelu tłumienia; RSSI nie jest liniowe
+   względem odległości):
+   - waga AP = wykrywalność / (σ² + 2²) — stabilne AP ważą więcej;
+   - AP nieobecny w profilu punktu liczy się jako −100 dBm (brak też
+     niesie informację);
+   - AP niewidoczny w bieżącym skanie ma połowę wagi i liczy się tylko
+     różnica między punktami (może to być chwilowy zanik albo wyłączony AP);
+   - każda różnica jest obcięta do 12 dB, a najgorzej pasujący AP
+     odrzucony — pojedynczy niestabilny AP nie przeważy wyniku;
+   - nowe, nieznane BSSID są pomijane.
+2. Wagi punktów `1 / (d + 1 dB)³`, pozycja = średnia ważona A, B, C.
+   W tej wersji wynik leży zawsze w trójkącie.
+3. Mniej niż 3 rozpoznane AP → `NO_POSITION`.
+4. Confidence 0–100% to heurystyka (nie gwarancja dokładności): jakość
+   najlepszego dopasowania × pokrycie znanych AP × rozróżnialność punktów
+   × liczba AP. Poniżej 40% → `LOW_CONFIDENCE`.
+
+Filtr pozycji: EMA (α = 0,35, mniejsza przy niskim confidence); skok
+> 2 m wymaga potwierdzenia drugim pomiarem w tym samym miejscu (rzeczywisty
+ruch pokaże się o jeden pomiar później, pojedynczy zły skan — wcale);
+strefa martwa 0,15 m. Bieżąca pozycja nie jest zapisywana do flash.
+
+Na mapie: zielona/żółta kropka — pozycja po filtrze, mały okrąg — ostatni
+surowy wynik.
+
+### Konfiguracja i diagnostyka
+
+Parametry w `src/indoor_positioning/IpsConfig.h`; najważniejsze można
+nadpisać w `platformio.ini` (`build_flags`, przykłady zakomentowane):
+`CALIBRATION_SIDE_M`, `IPS_SCANS_PER_POINT`, `IPS_DEBUG`.
+
+`-D IPS_DEBUG=1` wypisuje na Serial: listę BSSID/RSSI z każdego skanu,
+zapisane fingerprinty A/B/C, odległości od nich, wagi interpolacji,
+pozycję przed i po filtrze, confidence, czas skanu i czas obliczeń.
+
+### Architektura
+
+`src/indoor_positioning/`:
+- `WifiFingerprint` — typy danych i agregacja kalibracji (czysty C++),
+- `FingerprintLocator` — dopasowanie i interpolacja (czysty C++, dowolna
+  liczba punktów ≥ 2 — gotowe na więcej punktów kalibracyjnych),
+- `PositionFilter` — wygładzanie (czysty C++),
+- `WifiScanner` — nieblokujące skanowanie (Arduino WiFi),
+- `FingerprintStore` — zapis w NVS (Preferences),
+- `IndoorPositioning` — maszyna stanów i API: `startCalibration()`,
+  `confirmCalibrationPoint()`, `cancelCalibration()`, `isCalibrated()`,
+  `startPositioning()`, `stopPositioning()`, `getPosition()`,
+  `getCalibrationProgress()`, `resetCalibration()`.
+
+`src/NavigationScreen` rysuje ekran ze stanu (bez dostępu do radia).
+Wszystkie bufory mają stały rozmiar (bez alokacji na skan). Po dodaniu
+Wi-Fi firmware zajmuje 68% flash (+0,6 MB) i 26% statycznego RAM (+42 KB);
+stos Wi-Fi rezerwuje dodatkowo pamięć dynamiczną w czasie działania.
+
+### Testy na komputerze
+
+```text
+g++ -std=c++17 -Isrc/indoor_positioning test/ips_checks.cpp src/indoor_positioning/WifiFingerprint.cpp src/indoor_positioning/FingerprintLocator.cpp src/indoor_positioning/PositionFilter.cpp -o ips_checks && ./ips_checks
+```
+
+Syntetyczne pomieszczenie (AP, tłumienie, szum, zaniki) sprawdza:
+agregację i odrzucanie wartości odstających, pozycję w A/B/C i pomiędzy,
+brak części AP, nowe nieznane AP, duże wahania RSSI (8 dB), pojedynczy
+szalejący AP, brak danych, nierozróżnialne punkty, dzielenie przez zero
+i stabilność nieruchomego punktu z filtrem. Wynik nieruchomego punktu
+w środku trójkąta (najbardziej niejednoznaczne miejsce) waha się
+w symulacji w zakresie ok. ±0,65 m przy 2 dB szumu.
+
+### Sprawdzenie na urządzeniu
+
+1. Wgraj firmware (najlepiej z `-D IPS_DEBUG=1`) i otwórz monitor portu.
+2. Odmierz trójkąt o boku 5 m (lub ustaw `CALIBRATION_SIDE_M`), zaznacz
+   punkty. Pomieszczenie powinno „widzieć” co najmniej kilka sieci.
+3. Wykonaj kalibrację A → B → C; po każdym punkcie Serial podaje liczbę
+   użytecznych AP. Zrestartuj płytkę i sprawdź, czy kalibracja wczytuje się
+   z NVS („IPS: calibration loaded from NVS”).
+4. Stań kolejno w A, B, C i w środku boków; zanotuj pozycję po ustaleniu
+   (kilka aktualizacji) i confidence. Postój 1–2 min w jednym miejscu
+   pokaże rozrzut pozycji.
+5. Przejdź z A do B: kropka powinna podążać z opóźnieniem 1–2 aktualizacji.
+6. Sprawdź „BOOT ≥3 s” (usunięcie kalibracji) i anulowanie kalibracji.
+
+Ograniczenia: trzy punkty dają tylko interpolację wewnątrz trójkąta;
+ludzie, drzwi i zmiana położenia AP zmieniają odczyty (kalibrację trzeba
+wtedy powtórzyć); telefony i hotspoty mogą się pojawiać i znikać; orientacja
+urządzenia i ciało użytkownika tłumią sygnał o kilka dB.
 
 ## Budowanie i wgranie
 
