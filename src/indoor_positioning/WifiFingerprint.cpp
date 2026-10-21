@@ -40,7 +40,7 @@ void FingerprintBuilder::addScan(const ScanResult &scan) {
     for (std::size_t k = 0; k < count_; ++k)
       if (cand_[k].bssid == r.bssid) { c = &cand_[k]; break; }
     if (!c) {
-      if (count_ >= kMaxCandidateAps) continue; // Scan lists strongest first.
+      if (count_ >= kMaxCandidateAps) continue; // Table full: later newcomers are ignored.
       c = &cand_[count_++];
       c->bssid = r.bssid;
       std::memcpy(c->ssid, r.ssid, kSsidLen);

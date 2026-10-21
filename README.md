@@ -233,7 +233,10 @@ pozycję przed i po filtrze, confidence, czas skanu i czas obliczeń.
 - `FingerprintLocator` — dopasowanie i interpolacja (czysty C++, dowolna
   liczba punktów ≥ 2 — gotowe na więcej punktów kalibracyjnych),
 - `PositionFilter` — wygładzanie (czysty C++),
-- `WifiScanner` — nieblokujące skanowanie (Arduino WiFi),
+- `WifiScanner` — nieblokujące skanowanie bezpośrednio przez ESP-IDF
+  (`esp_wifi`); biblioteka Arduino `WiFi` jest celowo pominięta, bo ciągnie
+  źródła `Network`/lwIP, które na Windowsie nie kompilują się po skróceniu
+  ścieżek include przez pioarduino (`lwip/sockets.h: No such file`),
 - `FingerprintStore` — zapis w NVS (Preferences),
 - `IndoorPositioning` — maszyna stanów i API: `startCalibration()`,
   `confirmCalibrationPoint()`, `cancelCalibration()`, `isCalibrated()`,
@@ -242,8 +245,8 @@ pozycję przed i po filtrze, confidence, czas skanu i czas obliczeń.
 
 `src/NavigationScreen` rysuje ekran ze stanu (bez dostępu do radia).
 Wszystkie bufory mają stały rozmiar (bez alokacji na skan). Po dodaniu
-Wi-Fi firmware zajmuje 68% flash (+0,6 MB) i 26% statycznego RAM (+42 KB);
-stos Wi-Fi rezerwuje dodatkowo pamięć dynamiczną w czasie działania.
+Wi-Fi firmware zajmuje 61% flash (+0,5 MB) i 27% statycznego RAM (+45 KB);
+sterownik Wi-Fi rezerwuje dodatkowo pamięć dynamiczną w czasie działania.
 
 ### Testy na komputerze
 
