@@ -4,12 +4,13 @@ Pierwsza wersja do obserwacji przyspieszeń ramienia robota podczas ruchu.
 Projekt PlatformIO znajduje się w tym katalogu. Płytka: Adafruit **5483**
 ESP32-S3 TFT Feather, nie wersja Reverse TFT.
 
-> **Stan obecny:** akcelerometr i jego ekrany (1–5 poniżej) są tymczasowo
-> wyłączone (`imuEnabled = false` w `src/main.cpp`), a urządzenie działa jako
-> prototyp nawigacji wewnętrznej po Wi-Fi — patrz
-> [Nawigacja wewnętrzna](#nawigacja-wewnętrzna-wi-fi-rssi--prototyp).
-> Ekrany: 1/2 — mapa nawigacji, 2/2 — akumulator. Kod akcelerometru jest
-> zachowany; `imuEnabled = true` przywraca wszystkie ekrany.
+> **Stan obecny:** urządzenie mierzy odległość do wybranego urządzenia BLE —
+> patrz [Odległość do urządzenia BLE](#odległość-do-urządzenia-ble).
+> Ekrany: 1/2 — odległość BLE, 2/2 — akumulator.
+> Pozostałe funkcje są wyłączone flagami w `src/main.cpp`, a ich kod jest
+> zachowany: akcelerometr i jego ekrany (`imuEnabled`, ekrany 1–5 poniżej)
+> oraz nawigacja po Wi-Fi (`ipsEnabled`; w praktyce działała słabo).
+> Wyłączony moduł nie trafia do firmware.
 
 ## Połączenia
 
@@ -135,7 +136,75 @@ zależna od czasu przytrzymania. RESET płytki restartuje firmware.
 Nie trzymaj BOOT podczas resetu, jeśli nie chcesz uruchomić bootloadera.
 Płytka 5483 ma tylko jeden przycisk użytkownika; nie używamy D1/D2.
 
+## Odległość do urządzenia BLE
+
+Szacunek odległości do jednego urządzenia Bluetooth Low Energy na podstawie
+siły jego sygnału (RSSI). Domyślny cel: `5A:23:BE:FC:D0:B1` (stała
+`BLE_TARGET_ADDRESS` w `src/ble_ranging/BleDistance.h`, można nadpisać
+w `platformio.ini`).
+
+![Ekran BLE: szukanie, blisko, daleko, utrata sygnału, przejęcie celu](docs/ble-distance-screens.png)
+
+*Podgląd wyrenderowany na komputerze tym samym kodem co na urządzeniu (skala 2×).*
+
+**Ważne — adres się zmienia.** `5A:…` to losowy adres prywatny (RPA, dwa
+najstarsze bity `01`). Telefony Apple i Android zmieniają go zwykle co ok.
+15 minut, więc stary adres w pewnym momencie przestanie być widoczny. Ekran
+podpowiada to na żółto, gdy cel z takim adresem zniknie na dłużej niż 10 s.
+Wtedy połóż urządzenie blisko płytki i przytrzymaj BOOT 1 s — najsilniejsze
+słyszane urządzenie (poza obecnym celem) zostaje nowym celem i jest
+zapamiętywane w NVS. Na ekranie widać jego adres i RSSI, a „A”/„Apple”
+oznacza dane producenta Apple w rozgłoszeniu.
+
+| BOOT | Działanie |
+|---|---|
+| krótko | następny ekran |
+| ≥1 s | nowy cel = najsilniejsze inne urządzenie z ostatnich 3 s |
+| ≥3 s | kalibracja 1 m: trzymaj cel 1 m od płytki; bieżąca mediana RSSI staje się wartością odniesienia |
+
+Cel i kalibracja zapisują się w NVS i przetrwają restart.
+
+**Jak liczona jest odległość:**
+- skanowanie pasywne, ciągłe (okno = interwał 50 ms), każde rozgłoszenie to
+  próbka RSSI;
+- poziom sygnału = mediana próbek z ostatnich 3 s (odporna na pojedyncze
+  odbicia i zaniki);
+- odległość `d = 10^((P1m − RSSI) / (10·n))`, gdzie P1m = RSSI na 1 m
+  (domyślnie −59 dBm, jak w popularnych aplikacjach-skanerach — ten sam
+  model daje 0,28 m dla −48 dBm ze zrzutu), n = 2;
+- ekran podaje też typowy odstęp rozgłoszeń, liczbę urządzeń w pobliżu
+  i najsilniejsze inne urządzenie.
+
+**Dokładność — to szacunek.** Ciało, ściany, ułożenie anten i odbicia
+zmieniają RSSI o 5–10 dB, czyli przy n = 2 odległość nawet 2–3×.
+W symulacji (szum 4 dB i 10% głębokich zaników) 95% odczytów mieściło się
+w ×1,8 prawdziwej odległości, a typowy w ×1,3; seria zaników w jednym oknie
+potrafi chwilowo pokazać 2–4× za daleko. Kalibracja 1 m z konkretnym
+urządzeniem wyraźnie poprawia wynik; wykładnik n (`kPathLossExponent`)
+w pomieszczeniach bywa 2–3.
+
+**Implementacja:** `src/ble_ranging/` — `BleRanging` (czysty C++: adres,
+filtr RSSI, model, śledzenie celu i kandydatów; testy w
+`test/ble_checks.cpp`), `BleScanner` (NimBLE z ESP-IDF bezpośrednio, bez
+biblioteki Arduino BLE — tak jak przy Wi-Fi nie dokłada źródeł
+problematycznych przy skracaniu ścieżek na Windowsie), `BleDistance`
+(zapis w NVS, log na Serial co 1 s). Ekran: `src/BleScreen`. Odświeżanie
+4 razy na sekundę.
+
+Testy na komputerze:
+
+```text
+g++ -std=c++17 -Isrc/ble_ranging test/ble_checks.cpp src/ble_ranging/BleRanging.cpp -o ble_checks && ./ble_checks
+```
+
+Sprawdzenie na urządzeniu: monitor portu pokazuje co sekundę
+`BLE: rssi=… median=… distance~… interval~…`. Porównaj z aplikacją na
+telefonie przy 0,3 m, 1 m i 3 m; zrób kalibrację 1 m i powtórz pomiary.
+
 ## Nawigacja wewnętrzna (Wi-Fi RSSI) — prototyp
+
+> Wyłączona (`ipsEnabled = false` w `src/main.cpp`): w praktyce działała
+> słabo. Opis poniżej dotyczy kodu, który pozostał w repozytorium.
 
 Eksperyment: szacowanie położenia w pomieszczeniu na podstawie siły
 sygnałów okolicznych punktów dostępowych Wi-Fi (fingerprinting RSSI).

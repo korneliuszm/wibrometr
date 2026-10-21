@@ -14,12 +14,19 @@
 #include "RestartableBNO08x.h"
 #include "indoor_positioning/IndoorPositioning.h"
 #include "NavigationScreen.h"
+#include "BleScreen.h"
+#include "ble_ranging/BleDistance.h"
 #include "UiTheme.h"
 
 namespace {
 // Accelerometer (BNO085) and its screens are switched off while the Wi-Fi
 // indoor positioning prototype is evaluated; set true to bring them back.
 constexpr bool imuEnabled = false;
+// Wi-Fi indoor positioning prototype: off (too coarse in practice); the code
+// stays, set true to bring back its map screen.
+constexpr bool ipsEnabled = false;
+// Distance to one BLE device from its RSSI.
+constexpr bool bleEnabled = true;
 constexpr uint32_t binMs = 40, reportUs = 6667, staleMs = 1000;
 // Raw accelerometer (ADC counts, scale assumes +-8 g over 16 bits). Tested on
 // BNO085 firmware 3.2.13: enabling it succeeds but the hub sends no reports,
@@ -48,14 +55,27 @@ Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(240, 135);
 SignalHistory<bins> history;
 RestartableBNO08x imu(imuRst);
-enum Screen { TimeScreen, FftX, FftY, FftZ, StrokeScreen, NavScreen, BatteryScreen };
-constexpr Screen imuScreens[] = {TimeScreen, FftX, FftY, FftZ, StrokeScreen, NavScreen, BatteryScreen};
-constexpr Screen ipsScreens[] = {NavScreen, BatteryScreen};
-const Screen *const activeScreens = imuEnabled ? imuScreens : ipsScreens;
-constexpr int screenCount = imuEnabled ? int(std::size(imuScreens)) : int(std::size(ipsScreens));
+enum Screen { TimeScreen, FftX, FftY, FftZ, StrokeScreen, NavScreen, BleScreen, BatteryScreen };
+// Screens of the enabled features, in BOOT order; battery is always last.
+constexpr int countScreens() { return (imuEnabled ? 5 : 0) + ipsEnabled + bleEnabled + 1; }
+constexpr int screenCount = countScreens();
+struct ScreenList {
+  Screen s[screenCount] = {};
+  constexpr ScreenList() {
+    int n = 0;
+    if (imuEnabled)
+      for (Screen x : {TimeScreen, FftX, FftY, FftZ, StrokeScreen}) s[n++] = x;
+    if (ipsEnabled) s[n++] = NavScreen;
+    if (bleEnabled) s[n++] = BleScreen;
+    s[n] = BatteryScreen;
+  }
+};
+constexpr ScreenList activeScreens;
 int screenPos = 0; // Index into activeScreens.
-Screen screen = activeScreens[0];
+Screen screen = activeScreens.s[0];
 ips::IndoorPositioning positioning;
+ble::BleDistance bleDistance;
+uint32_t lastBleFrame = 0;
 uint32_t lastNavSignature = 0;
 bool navDrawn = false;
 SampleWindow<fftSize> window;
@@ -241,7 +261,7 @@ bool fresh(uint32_t now) {
 }
 void nextScreen() {
   screenPos = (screenPos + 1) % screenCount;
-  screen = activeScreens[screenPos];
+  screen = activeScreens.s[screenPos];
   navDrawn = false;
 }
 void showNotice(const char *text, uint32_t now) {
@@ -256,7 +276,7 @@ void pollButton(uint32_t now) {
     if (pressed) buttonDown = now;
     else {
       uint32_t duration = now - buttonDown;
-      if (screen == NavScreen) {
+      if (ipsEnabled && screen == NavScreen) {
         const auto progress = positioning.getCalibrationProgress();
         if (progress.active) {
           // Calibrating: tap measures the current point, hold cancels.
@@ -271,6 +291,25 @@ void pollButton(uint32_t now) {
           showNotice("KALIBRACJA USUNIETA", now);
         } else if (duration >= 1000) {
           positioning.startCalibration();
+        } else {
+          nextScreen();
+        }
+      } else if (bleEnabled && screen == BleScreen) {
+        static char text[40];
+        if (duration >= 3000) {
+          float rssi = 0;
+          if (bleDistance.calibrate1m(now, rssi)) {
+            snprintf(text, sizeof text, "1 m = %.0f dBm ZAPISANE", rssi);
+            showNotice(text, now);
+          } else showNotice("BRAK SYGNALU CELU", now);
+        } else if (duration >= 1000) {
+          ble::Address adopted;
+          if (bleDistance.adoptStrongest(now, adopted)) {
+            char addr[18];
+            adopted.format(addr, sizeof addr);
+            snprintf(text, sizeof text, "NOWY CEL %s", addr);
+            showNotice(text, now);
+          } else showNotice("BRAK INNYCH URZADZEN", now);
         } else {
           nextScreen();
         }
@@ -543,7 +582,22 @@ NavScreenState navState(uint32_t now) {
 }
 
 void draw(uint32_t now) {
-  if (screen == NavScreen) {
+  if (bleEnabled && screen == BleScreen) {
+    // RSSI changes with every advert; 4 frames/s is plenty and saves the bus.
+    if (uint32_t(now - lastBleFrame) < 250 && !buttonStable) return;
+    lastBleFrame = now;
+    BleScreenState state;
+    state.view = bleDistance.view(now);
+    state.screenPos = screenPos;
+    state.screenCount = screenCount;
+    state.buttonHeld = buttonStable;
+    state.heldMs = now - buttonDown;
+    state.notice = int32_t(noticeUntil - now) > 0 ? notice : nullptr;
+    drawBleScreen(canvas, state);
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), 240, 135);
+    return;
+  }
+  if (ipsEnabled && screen == NavScreen) {
     const NavScreenState state = navState(now);
     const uint32_t signature = navSignature(state, now);
     if (navDrawn && signature == lastNavSignature) return; // Nothing changed: no SPI traffic.
@@ -601,7 +655,8 @@ void setup() {
   }
   binStart = lastFrame = rateStart = millis();
   draw(millis());
-  positioning.begin();
+  if (ipsEnabled) positioning.begin();
+  if (bleEnabled) bleDistance.begin();
   if (!imuEnabled) return;
   events = xQueueCreate(256, sizeof(Event));
   if (!events || xTaskCreate(sensorTask, "BNO085", 8192, nullptr, 1, nullptr) != pdPASS) {
@@ -649,9 +704,12 @@ void loop() {
   pollButton(now);
   pollBattery(now);
   // Scan only while the map is shown (or a calibration runs from it).
-  if (screen == NavScreen) positioning.startPositioning();
-  else positioning.stopPositioning();
-  positioning.loop(now);
+  if (ipsEnabled) {
+    if (screen == NavScreen) positioning.startPositioning();
+    else positioning.stopPositioning();
+    positioning.loop(now);
+  }
+  if (bleEnabled) bleDistance.loop(now);
   if (imuEnabled && uint32_t(now - rateStart) >= 1000) {
     actualHz = sampleCount * 1000.0f / uint32_t(now - rateStart);
     sampleCount = 0;
