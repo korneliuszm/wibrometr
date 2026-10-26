@@ -1,117 +1,136 @@
-# Przenośny monitor drgań — Feather ESP32-S3 TFT + GY-BNO085
+# Przenośny monitor drgań — Feather ESP32-S3 TFT + MPU6050
 
 Pierwsza wersja do obserwacji przyspieszeń ramienia robota podczas ruchu.
 Projekt PlatformIO znajduje się w tym katalogu. Płytka: Adafruit **5483**
-ESP32-S3 TFT Feather, nie wersja Reverse TFT.
+ESP32-S3 TFT Feather, nie wersja Reverse TFT. Akcelerometr: MPU6050 (moduł
+GY-521) przez I2C.
 
-> **Stan obecny:** urządzenie mierzy odległość do wybranego urządzenia BLE —
-> patrz [Odległość do urządzenia BLE](#odległość-do-urządzenia-ble).
-> Ekrany: 1/2 — odległość BLE, 2/2 — akumulator.
+> **Stan obecny:** ekrany 1/2 — przyspieszenie XYZ, 2/2 — akumulator.
 > Pozostałe funkcje są wyłączone flagami w `src/main.cpp`, a ich kod jest
-> zachowany: akcelerometr i jego ekrany (`imuEnabled`, ekrany 1–5 poniżej)
-> oraz nawigacja po Wi-Fi (`ipsEnabled`; w praktyce działała słabo).
-> Wyłączony moduł nie trafia do firmware.
+> zachowany: ekrany analizy (przebieg czasowy, FFT, licznik ruchów —
+> `imuEnabled`) oraz nawigacja po Wi-Fi (`ipsEnabled`; w praktyce działała
+> słabo). Wyłączony moduł nie trafia do firmware. Bluetooth został usunięty.
 
 ## Połączenia
 
-Czujnik pracuje przez SPI (tryb 3, 1 MHz), na wspólnej magistrali z TFT.
+Czujnik pracuje na magistrali I2C płytki (400 kHz), tej samej co układ
+pomiaru akumulatora (adres 0x36 — bez konfliktu z MPU6050 pod 0x68/0x69).
+Ta magistrala jest też wyprowadzona na złączu STEMMA QT.
 
-| GY-BNO085 | Feather |
+| MPU6050 (GY-521) | Feather |
 |---|---|
-| SCL (SCK) | SCK / GPIO36 |
-| AD0 / DI (MOSI) | MOSI / GPIO35 |
-| SDA (MISO) | MISO / GPIO37 |
-| CS | A5 / GPIO8 |
-| INT | A4 / GPIO14 |
-| RST | A3 / GPIO15 |
-| PS0 (WAKE) | A2 / GPIO16 |
-| PS1 | 3V |
+| VCC | 3V (3,3 V) |
 | GND | GND |
-| Zasilanie modułu | 3V / 3,3 V, zgodnie z opisem wejścia Twojego GY-BNO085 |
+| SDA | SDA / GPIO42 |
+| SCL | SCL / GPIO41 |
+| INT | **A5 / GPIO8** |
+| AD0 | GND albo niepodłączony → adres 0x68; 3V → 0x69 |
+| XDA, XCL | niepodłączone |
 
-Linie SPI pracują na poziomie 3,3 V. Sprawdź oznaczenia na swoim wariancie
-GY; moduły mogą mieć różne regulatory i opisy pinów (MOSI bywa opisane
-jako AD0, SA0 lub DI). INT, RST i PS0 są wymagane. PS0 nie może być
-na stałe podpięty do 3V: firmware trzyma go wysoko podczas resetu (tryb
-SPI), a przed każdym zapisem ściąga nisko (WAKE), żeby czujnik
-zgłosił gotowość przez INT — bez tego czujnik nie przyjmuje poleceń.
-Piny można zmienić w stałych `imuInt` / `imuRst` / `imuWake`
-w `src/main.cpp`.
-
-Gdy czujnik nie odpowiada, ekran pokazuje `BNO: BRAK INT` (brak reakcji
-INT po resecie — sprawdź INT, RST, zasilanie) albo `BNO: BRAK SPI`
-(INT działa, ale brak odpowiedzi — sprawdź PS0, PS1, SCK, MOSI, MISO, CS).
-Port szeregowy podaje szczegóły każdej próby. Krótki przewód i wspólna masa.
+- Firmware sam wybiera 0x68 lub 0x69.
+- INT (aktywny stan wysoki, zatrzask do odczytu) zgłasza każdą nową próbkę;
+  odczyt jest wtedy wyzwalany przerwaniem, a czas próbki to chwila
+  przerwania — bez duplikatów i pominięć. Gdy INT nie jest podłączony,
+  po ok. 100 ms firmware przechodzi na odpytywanie co 5 ms (komunikat na
+  porcie szeregowym); pomiar działa, ale z mniej dokładnym czasem próbek.
+- Konfiguracja: zakres ±8 g (4096 LSB/g), filtr dolnoprzepustowy 94 Hz,
+  próbkowanie 200 Hz; żyroskop wyłączony.
+- Moduły GY-521 mają własne rezystory podciągające I2C; Feather ma swoje.
+  Krótkie przewody i wspólna masa.
+- Gdy czujnik nie odpowiada, ekran pokazuje `BRAK MPU6050 (I2C 0x68/0x69)`,
+  a firmware ponawia próbę co 2 s (port szeregowy podpowiada, co sprawdzić).
 
 ## Ekran i obsługa
 
-Sześć ekranów przełączanych krótkim naciśnięciem BOOT (numer w prawym górnym
-rogu): 1 — przebieg czasowy XYZ, 2/3/4 — FFT osi X/Y/Z, 5 — licznik ruchów,
-6 — akumulator. Na ekranie 5 BOOT działa inaczej (niżej).
+Ekrany przełączane krótkim naciśnięciem BOOT (numer w prawym górnym rogu):
+1 — przyspieszenie XYZ, 2 — akumulator. Z flagą `imuEnabled = true`
+dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 1.
 
-### 1. Przebieg czasowy
+![Ekran przyspieszenia: płasko, przechylony, uderzenie, tara, brak czujnika, łączenie](docs/accel-screens.png)
 
+*Podgląd wyrenderowany na komputerze tym samym kodem co na urządzeniu (skala 2×).*
+
+### 1. Przyspieszenie XYZ
+
+- Trzy wiersze: X czerwony, Y zielony, Z niebieski; wartość w m/s² i w g
+  oraz pasek od środka (zero) w skali ±20 m/s²; na dole moduł |a|.
+- Odczyt jest lekko wygładzony (ok. 0,15 s), żeby cyfry dało się czytać;
+  nagłówek podaje faktyczną liczbę próbek na sekundę (ok. 200 Hz).
+- Czujnik w spoczynku mierzy reakcję podłoża, więc położony płasko pokazuje
+  Z ≈ +9,81 m/s² (1 g), a X i Y bliskie zeru. Osie są takie, jak na
+  nadruku modułu.
+- **BOOT:** krótko — następny ekran; przytrzymanie ≥1 s — **tara**:
+  bieżący wektor jest odejmowany (np. grawitacja przy ustalonym ułożeniu),
+  na ekranie pojawia się „TARA”; kolejne ≥1 s wyłącza tarę.
+- Czujnik mierzy do ±8 g (ok. ±78 m/s²); mocniejsze uderzenia są obcinane
+  przez czujnik. Pasek jest obcinany na końcach.
+
+### Ekrany analizy (`imuEnabled = true`)
+
+Przebieg czasowy, FFT osi X/Y/Z i licznik ruchów korzystają z tych samych
+próbek 200 Hz. Wyłączone domyślnie (nie liczą się wtedy w ogóle).
+
+**Przebieg czasowy**
 - X czerwony, Y zielony, Z niebieski; jednostka m/s².
 - Ostatnie 4 s, skala stała ±20 m/s², nowe dane po prawej.
-- Odczyt żądany 150 Hz (stała `reportUs` = 6667 µs w `src/main.cpp`);
-  zmierzone maksimum tego czujnika w trybie SPI to ok. 180 Hz, więc 150 Hz
-  ma zapas. FFT sięga ok. 75 Hz. Ekran docelowo 25 Hz. Nagłówek podaje faktyczną
-  liczbę otrzymanych raportów na sekundę, nie zmierzone pasmo czujnika.
 - Każdy przedział 40 ms pokazuje min/max oraz połączenie między próbkami.
   To obwiednia pików z odczytów, a nie prezentacja wszystkich punktów.
 - POZA SKALA oznacza obcięcie widoku; dane nie są automatycznie skalowane.
-- Przerwy w raportach pozostawiają puste przedziały, bez sztucznych zer.
-- BRAK BNO085 / RETRY: ponowienie inicjalizacji co około 3 s po błędzie.
+- Przerwy w próbkach pozostawiają puste przedziały, bez sztucznych zer.
 - UTRATA PROBEK: przepełnienie kolejki w dowolnym momencie od startu.
 
-### 2–4. FFT osi X, Y, Z
-
-- Widmo amplitudowe z ostatnich 512 próbek (ok. 3,4 s przy 150 Hz),
+**FFT osi X, Y, Z**
+- Widmo amplitudowe z ostatnich 512 próbek (ok. 2,6 s przy 200 Hz),
   okno Hanna, usunięta składowa stała (grawitacja i offset nie wpływają
-  na wykres). Rozdzielczość ok. 0,3 Hz, zakres 0 Hz – połowa faktycznej
-  częstotliwości raportów (ok. 75 Hz przy 150 Hz). Oś Hz skaluje się
-  według zmierzonego tempa raportów, więc przy mniejszej częstotliwości
-  pokazuje mniejszy zakres. Czas próbek pochodzi z zegara czujnika
-  (znacznik czasu każdego raportu), a nie z chwili odbioru pakietu.
-  Czujnik pakuje wiele raportów w jeden pakiet SPI; firmware odbiera
-  każdy z nich własną funkcją zwrotną, bo biblioteka Adafruit zachowuje
-  tylko ostatni raport z pakietu.
-- Oś pionowa: amplituda sinusoidy w m/s² rysowana jako linia, skala sztywna 0–5 (stała
-  `fftRange`); większe prążki są obcinane. Wiersz statusu podaje
+  na wykres). Rozdzielczość ok. 0,4 Hz, zakres 0 Hz – połowa faktycznej
+  częstotliwości próbek (100 Hz). Filtr czujnika ma pasmo 94 Hz, więc
+  powyżej ok. 90 Hz sygnał jest już tłumiony. Oś Hz skaluje się według
+  zmierzonego tempa próbek, a czas każdej próbki to chwila przerwania INT.
+- Oś pionowa: amplituda sinusoidy w m/s² rysowana jako linia, skala sztywna
+  0–5 (stała `fftRange`); większe prążki są obcinane. Wiersz statusu podaje
   częstotliwość i amplitudę największego prążka.
 - ZBIERANIE n/512: okno jeszcze się wypełnia (po starcie, wznowieniu
-  pauzy lub przerwie w raportach dłuższej niż 100 ms).
+  pauzy lub przerwie w próbkach dłuższej niż 100 ms).
 
-### 5. Licznik ruchów
+**Licznik ruchów**
 
 Licznik powtarzalnych ruchów posuwistych ręki trzymającej czujnik. Duża
 liczba to **pełne ruchy** (tam i z powrotem), obok tempo w ruchach na minutę.
 Dostrojony do 0,7–5 ruchów/s i skoku od kilku do kilkunastu cm.
-- Źródłem jest przyspieszenie liniowe z fuzji czujnika (bez grawitacji,
-  ok. 100 Hz), bo obrót dłoni przesuwa grawitację między osiami tak samo
-  mocno jak sam ruch. Gdy czujnik go nie udostępnia, ekran to pisze na
-  żółto i liczy ze zwykłego przyspieszenia (wyraźnie słabiej).
+- MPU6050 nie ma fuzji czujników, więc licznik pracuje na zwykłym
+  przyspieszeniu z grawitacją, którą odfiltrowuje filtr górnoprzepustowy
+  (ok. 1 s). **Przechylanie ręki przesuwa grawitację między osiami tak samo
+  mocno jak sam ruch, więc wynik jest wyraźnie słabszy niż na czujniku
+  z przyspieszeniem liniowym** (tego licznik był strojony). Nie testowano
+  na prawdziwym ruchu.
 - Kierunek ruchu wyznaczany jest automatycznie ze wszystkich trzech osi
-  (dominujący kierunek z ostatnich ok. 0,5 s) i śledzi obrót nadgarstka,
-  więc ułożenie czujnika w dłoni nie ma znaczenia. Ekran pokazuje bieżący
-  kierunek w osiach czujnika.
+  (dominujący kierunek z ostatnich ok. 0,5 s), więc ułożenie czujnika
+  w dłoni nie ma znaczenia. Ekran pokazuje bieżący kierunek w osiach czujnika.
 - Przyspieszenie jest wygładzane i całkowane do sygnału zbliżonego do
   prędkości: każde przesunięcie daje jeden wyraźny impuls; dwa impulsy
-  w przeciwne strony to jeden ruch.
-- Próg to 20% ostatniego szczytu (zanik w ok. 1 s, minimum 0,04 m/s), więc
-  liczą się zarówno delikatne, jak i mocne ruchy; drżenie dłoni nie liczy się.
-- Pasek pokazuje bieżący sygnał względem progu (żółte znaczniki).
-- Symulacja (6×30 s na scenariusz): stałe i zmienne tempo 0,7–5 ruchów/s,
-  dowolna oś, pauzy: 0% do −2% błędu; przy obrocie nadgarstka 20°/s: −2%.
-  Nie testowano na prawdziwym ruchu.
-- Licznik działa niezależnie od pauzy na innych ekranach.
+  w przeciwne strony to jeden ruch. Próg to 20% ostatniego szczytu
+  (zanik w ok. 1 s, minimum 0,04 m/s).
+- Pasek pokazuje bieżący sygnał względem progu (żółte znaczniki). Licznik
+  działa niezależnie od pauzy na innych ekranach.
 - **BOOT na tym ekranie:** krótkie naciśnięcie kasuje licznik, przytrzymanie
   ≥1 s przechodzi do następnego ekranu.
 
-### 6. Akumulator
+**BOOT na pozostałych ekranach analizy:**
+
+| Naciśnięcie | Działanie |
+|---|---|
+| krócej niż 1 s | następny ekran |
+| 1–3 s | pauza / wznowienie wykresu i FFT |
+| od 3 s | ustawienie zera (odjęcie ostatniego odczytu XYZ) albo, gdy zero jest ustawione, powrót do pełnego przyspieszenia |
+
+Pauza zatrzymuje tylko widok; odczyt i status działają dalej. Wznowienie
+i zmiana offsetu czyszczą historię.
+
+### Akumulator
 
 - Procent naładowania, napięcie ogniwa i pasek stanu z układu pomiaru
-  na płytce (I2C, GPIO42/41). Odczyt co 2 s.
+  na płytce (I2C, ta sama magistrala co MPU6050). Odczyt co 2 s, w zadaniu
+  czujnika — jedynym, które używa magistrali.
 - Nowsze płytki 5483 mają MAX17048: stan ładowania wynika ze znaku
   szybkości zmiany naładowania (%/h): LADOWANIE, ROZLADOWANIE,
   NALADOWANY lub BEZ ZMIAN. Ładowarka nie ma wyjścia statusu na GPIO,
@@ -122,84 +141,12 @@ Dostrojony do 0,7–5 ruchów/s i skoku od kilku do kilkunastu cm.
 - BRAK ODCZYTU UKLADU POMIARU: układ nie odpowiada (np. brak akumulatora,
   bo MAX17048 jest zasilany z ogniwa). Ponowna próba co 5 s.
 
-**BOOT (GPIO0), akcja przy puszczeniu:**
-
-| Naciśnięcie | Działanie |
-|---|---|
-| krócej niż 1 s | następny ekran |
-| 1–3 s | pauza / wznowienie wykresu i FFT |
-| od 3 s | ustawienie zera (odjęcie ostatniego odczytu XYZ) albo, gdy zero jest ustawione, powrót do pełnego przyspieszenia |
-
-Pauza zatrzymuje tylko widok; odczyt i status działają dalej. Wznowienie
-i zmiana offsetu czyszczą historię. Na ekranie pojawia się wskazówka
-zależna od czasu przytrzymania. RESET płytki restartuje firmware.
-Nie trzymaj BOOT podczas resetu, jeśli nie chcesz uruchomić bootloadera.
-Płytka 5483 ma tylko jeden przycisk użytkownika; nie używamy D1/D2.
-
-## Odległość do urządzenia BLE
-
-Szacunek odległości do jednego urządzenia Bluetooth Low Energy na podstawie
-siły jego sygnału (RSSI). Domyślny cel: `5A:23:BE:FC:D0:B1` (stała
-`BLE_TARGET_ADDRESS` w `src/ble_ranging/BleDistance.h`, można nadpisać
-w `platformio.ini`).
-
-![Ekran BLE: szukanie, blisko, daleko, utrata sygnału, przejęcie celu](docs/ble-distance-screens.png)
-
-*Podgląd wyrenderowany na komputerze tym samym kodem co na urządzeniu (skala 2×).*
-
-**Ważne — adres się zmienia.** `5A:…` to losowy adres prywatny (RPA, dwa
-najstarsze bity `01`). Telefony Apple i Android zmieniają go zwykle co ok.
-15 minut, więc stary adres w pewnym momencie przestanie być widoczny. Ekran
-podpowiada to na żółto, gdy cel z takim adresem zniknie na dłużej niż 10 s.
-Wtedy połóż urządzenie blisko płytki i przytrzymaj BOOT 1 s — najsilniejsze
-słyszane urządzenie (poza obecnym celem) zostaje nowym celem i jest
-zapamiętywane w NVS. Na ekranie widać jego adres i RSSI, a „A”/„Apple”
-oznacza dane producenta Apple w rozgłoszeniu.
-
-| BOOT | Działanie |
-|---|---|
-| krótko | następny ekran |
-| ≥1 s | nowy cel = najsilniejsze inne urządzenie z ostatnich 3 s |
-| ≥3 s | kalibracja 1 m: trzymaj cel 1 m od płytki; bieżąca mediana RSSI staje się wartością odniesienia |
-
-Cel i kalibracja zapisują się w NVS i przetrwają restart.
-
-**Jak liczona jest odległość:**
-- skanowanie pasywne, ciągłe (okno = interwał 50 ms), każde rozgłoszenie to
-  próbka RSSI;
-- poziom sygnału = mediana próbek z ostatnich 3 s (odporna na pojedyncze
-  odbicia i zaniki);
-- odległość `d = 10^((P1m − RSSI) / (10·n))`, gdzie P1m = RSSI na 1 m
-  (domyślnie −59 dBm, jak w popularnych aplikacjach-skanerach — ten sam
-  model daje 0,28 m dla −48 dBm ze zrzutu), n = 2;
-- ekran podaje też typowy odstęp rozgłoszeń, liczbę urządzeń w pobliżu
-  i najsilniejsze inne urządzenie.
-
-**Dokładność — to szacunek.** Ciało, ściany, ułożenie anten i odbicia
-zmieniają RSSI o 5–10 dB, czyli przy n = 2 odległość nawet 2–3×.
-W symulacji (szum 4 dB i 10% głębokich zaników) 95% odczytów mieściło się
-w ×1,8 prawdziwej odległości, a typowy w ×1,3; seria zaników w jednym oknie
-potrafi chwilowo pokazać 2–4× za daleko. Kalibracja 1 m z konkretnym
-urządzeniem wyraźnie poprawia wynik; wykładnik n (`kPathLossExponent`)
-w pomieszczeniach bywa 2–3.
-
-**Implementacja:** `src/ble_ranging/` — `BleRanging` (czysty C++: adres,
-filtr RSSI, model, śledzenie celu i kandydatów; testy w
-`test/ble_checks.cpp`), `BleScanner` (NimBLE z ESP-IDF bezpośrednio, bez
-biblioteki Arduino BLE — tak jak przy Wi-Fi nie dokłada źródeł
-problematycznych przy skracaniu ścieżek na Windowsie), `BleDistance`
-(zapis w NVS, log na Serial co 1 s). Ekran: `src/BleScreen`. Odświeżanie
-4 razy na sekundę.
-
-Testy na komputerze:
-
-```text
-g++ -std=c++17 -Isrc/ble_ranging test/ble_checks.cpp src/ble_ranging/BleRanging.cpp -o ble_checks && ./ble_checks
-```
-
-Sprawdzenie na urządzeniu: monitor portu pokazuje co sekundę
-`BLE: rssi=… median=… distance~… interval~…`. Porównaj z aplikacją na
-telefonie przy 0,3 m, 1 m i 3 m; zrób kalibrację 1 m i powtórz pomiary.
+**BOOT (GPIO0), akcja przy puszczeniu**, na ekranach przyspieszenia i
+akumulatora: krótko — następny ekran; na ekranie przyspieszenia ≥1 s — tara.
+Na ekranie widać wskazówkę zależną od czasu przytrzymania. RESET płytki
+restartuje firmware. Nie trzymaj BOOT podczas resetu, jeśli nie chcesz
+uruchomić bootloadera. Płytka 5483 ma tylko jeden przycisk użytkownika;
+nie używamy D1/D2.
 
 ## Nawigacja wewnętrzna (Wi-Fi RSSI) — prototyp
 
@@ -362,12 +309,15 @@ pio device monitor --port COM6 --baud 115200
 
 COM6 to port wykryty podczas tworzenia projektu; może zmienić się po
 resecie lub na innym komputerze. Sprawdzenie: `pio device list`.
-Po wgraniu monitor powinien podawać połączenie z IMU, częstotliwość raportów
-i liczbę utraconych próbek. Jeżeli automatyczny upload nie działa:
-przytrzymaj BOOT, naciśnij RESET, puść BOOT, sprawdź port i ponów upload.
+Po wgraniu monitor podaje adres MPU6050 i `WHO_AM_I` (0x68 — oryginał; inna
+wartość to prawdopodobnie klon, zwykle też działa), informację „INT works”,
+a co sekundę `rate=` (oczekiwane ok. 200 Hz) i liczbę utraconych próbek.
+Jeżeli automatyczny upload nie działa: przytrzymaj BOOT, naciśnij RESET,
+puść BOOT, sprawdź port i ponów upload.
 
 Platforma jest przypięta do pioarduino 55.03.36 (Arduino 3.3.6, IDF 5.5.2).
-Biblioteki: Adafruit BNO08x 1.2.5, ST7735/ST7789 1.11.0 i LC709203F 1.3.4.
+Biblioteki: ST7735/ST7789 1.11.0 i LC709203F 1.3.4; MPU6050 obsługuje własny
+sterownik (`src/Mpu6050.*`), bez biblioteki.
 Pakiety PlatformIO trafiają do ${sysenv.TEMP}/vibrationSensor-pio-core;
 pliki kompilacji do ${sysenv.TEMP}/vibrationSensor-pio-build.
 Oba katalogi znajdują się poza Dyskiem Google i ścieżką zawierającą polskie
@@ -378,48 +328,49 @@ pobiera kompilator i framework. Nie dodawać .pio do git.
 
 Testy `test/signal_checks.cpp` wykonują rzeczywistą logikę jako
 C++17 constexpr/static_assert: min/max, przerwy, kolejność po zawinięciu
-bufora, offset, czyszczenie i rollover czasu. Można je sprawdzić bez
-podłączonej płytki dowolnym kompilatorem C++17:
+bufora, offset, czyszczenie, rollover czasu, licznik ruchów oraz
+dekodowanie próbek MPU6050 (kolejność bajtów, znak, skala). Można je
+sprawdzić bez podłączonej płytki dowolnym kompilatorem C++17:
 
 ```text
 g++ -std=c++17 -Iinclude -fsyntax-only test/signal_checks.cpp
 ```
 
-1. Po starcie potwierdź odczyt ok. 150 Hz (nagłówek ekranu i `rate=` na porcie szeregowym) i poprawny wykres na TFT.
-2. Obracaj czujnik w spoczynku: składowa grawitacji powinna przechodzić
-   między osiami. Pełne przyspieszenie statyczne ma moduł około 9,81 m/s².
-3. Sprawdź przełączanie ekranów, pauzę, zero i kasowanie offsetu; lekkie stuknięcie powinno
-   być widoczne jako pik. Sprawdź też zachowanie poza skalą.
-4. Po wyłączeniu zasilania zmień połączenia i sprawdź start bez czujnika,
-   a następnie ponowny start z czujnikiem. Test zaniku podczas pracy
-   wykonaj przez przełącznik testowy/odpowiednie złącze, bez zwierania pinów.
-5. Sprawdź raporty przez kilka minut w docelowym montażu i na przewodzie
-   docelowej długości. Oczekuj drops=0; zanotuj spadki częstotliwości.
+1. Po starcie potwierdź na porcie szeregowym `MPU6050: addr 0x68 ...` oraz
+   `MPU6050: INT works`; `rate=` ok. 200 Hz, drops=0.
+2. Połóż płytkę płasko: Z ≈ +9,8 m/s², X i Y bliskie zeru. MPU6050 bez
+   kalibracji ma typowo ±0,5 m/s² przesunięcia zera — to normalne; tara
+   (BOOT ≥1 s) je odejmuje.
+3. Obracaj czujnik: składowa grawitacji powinna przechodzić między osiami,
+   a moduł |a| zostać około 9,8 m/s² (1 g).
+4. Lekkie stuknięcie powinno być widoczne jako szczyt na paskach.
+5. Odłącz INT (A5) przy włączonym zasilaniu i zresetuj: powinien być
+   komunikat „no INT … polling every 5 ms”, a odczyt dalej działać.
+6. Odłącz SDA podczas pracy: ekran pokaże `BRAK MPU6050`, a po
+   podłączeniu odczyt wróci w ciągu kilku sekund. Nie zwieraj pinów.
+7. Sprawdź odczyt przez kilka minut w docelowym montażu na przewodzie
+   docelowej długości; zanotuj spadki częstotliwości.
 
 ## Interpretacja i ograniczenia
 
-Raport SH2_ACCELEROMETER zawiera grawitację i przyspieszenia ruchu robota.
-Ustawienie zera odejmuje stały wektor, a nie zmienną grawitację podczas
-obrotu ramienia ani przyspieszenia trajektorii. Magnes mocujący może
-zaburzać magnetometr; ta wersja nie korzysta z orientacji magnetycznej.
+Akcelerometr mierzy grawitację razem z przyspieszeniami ruchu robota.
+Tara odejmuje stały wektor, a nie zmienną grawitację podczas obrotu
+ramienia ani przyspieszenia trajektorii. MPU6050 ma tolerancje typowe dla
+tanich modułów: przesunięcie zera rzędu ±50 mg (ok. ±0,5 m/s²), błąd
+czułości kilka procent i dryf z temperaturą; ta wersja niczego nie
+kalibruje.
 
-150 Hz daje częstotliwość Nyquista 75 Hz; użyteczne pasmo zależy
-dodatkowo od filtrów wewnątrz czujnika i jego faktycznego tempa raportów
-(sprawdź `rate=` na porcie szeregowym). Ten tryb nie
-wystarcza do szerokopasmowej diagnostyki łożysk. FFT to podgląd do połowy
-częstotliwości raportów liczony z czasów odbioru raportów; nie ma klasyfikacji usterek,
-zapisu ani oceny według norm przemysłowych. Sztywność mocowania
-magnetycznego i przewód również wpływają na wynik.
+Próbkowanie 200 Hz daje częstotliwość Nyquista 100 Hz, a filtr czujnika
+(94 Hz) tłumi wyższe składowe. Ten tryb nie wystarcza do szerokopasmowej
+diagnostyki łożysk. FFT to podgląd do połowy częstotliwości próbek; nie ma
+klasyfikacji usterek, zapisu ani oceny według norm przemysłowych.
+Sztywność mocowania magnetycznego i przewód również wpływają na wynik.
 
-SPI omija znane problemy BNO08x z clock stretching I2C na ESP32-S3.
-Każda próba połączenia resetuje czujnik przez RST; nie gwarantuje to
-odzyskania ze wszystkich stanów i czasem konieczne jest odłączenie
-zasilania samego modułu. Odczyt pracuje w osobnym zadaniu, aby
-inicjalizacja IMU nie zatrzymywała TFT; transakcje SPI czujnika i ekranu
-są szeregowane przez sterownik magistrali.
+I2C na ESP32-S3 pracuje tu z timeoutem 20 ms; po 20 kolejnych błędach
+odczytu firmware inicjuje magistralę od nowa, co uwalnia ją po zakłóceniu.
+Odczyt pracuje w osobnym zadaniu, aby ekran i przyciski nie opóźniały
+próbek.
 
 Dokumentacja:
 - [Feather: piny, zasilanie, TFT i przyciski](https://learn.adafruit.com/adafruit-esp32-s3-tft-feather/pinouts)
-- [BNO085: połączenie SPI](https://learn.adafruit.com/adafruit-9-dof-orientation-imu-fusion-breakout-bno085/arduino)
 - [Platforma 55.03.36](https://github.com/pioarduino/platform-espressif32/releases/tag/55.03.36)
-
