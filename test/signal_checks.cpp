@@ -97,3 +97,19 @@ constexpr bool resetClears() {
   return counted && counter.count() == 0 && counter.perMinute() == 0;
 }
 static_assert(resetClears(), "Reset must clear the count and rate");
+
+#include "Mpu6050Decode.h"
+// MPU6050 decoding: big-endian two's complement, +-8 g = 4096 LSB/g.
+constexpr bool mpuDecodes() {
+  const uint8_t flat[6] = {0x00, 0x00, 0x00, 0x00, 0x10, 0x00}; // Z = +4096 = 1 g.
+  const Accel a = mpu6050::decode(flat, 2);
+  const uint8_t neg[6] = {0xF0, 0x00, 0xFF, 0xFF, 0x80, 0x00}; // X = -4096, Y = -1, Z = -32768.
+  const Accel b = mpu6050::decode(neg, 2);
+  const float g = mpu6050::kGravity;
+  const auto close = [](float x, float y) { return x - y < 1e-3f && y - x < 1e-3f; };
+  return close(a.x, 0) && close(a.y, 0) && close(a.z, g) &&
+         close(b.x, -g) && close(b.y, -g / 4096) && close(b.z, -8 * g);
+}
+static_assert(mpuDecodes(), "MPU6050 samples must decode to m/s2 with the right sign");
+static_assert(mpu6050::lsbPerG(0) == 16384.0f && mpu6050::lsbPerG(3) == 2048.0f, "AFS_SEL scales");
+static_assert(mpu6050::be16(0x7F, 0xFF) == 32767 && mpu6050::be16(0x80, 0x00) == -32768, "int16 limits");

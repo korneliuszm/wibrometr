@@ -2,45 +2,69 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_LC709203F.h>
-#include <Adafruit_BNO08x.h>
 #include <Adafruit_ST7789.h>
 #include <Adafruit_GFX.h>
 #include <atomic>
 #include <cmath>
+#include <iterator>
 #include "SignalHistory.h"
 #include "Spectrum.h"
 #include "StrokeCounter.h"
-#include "RestartableBNO08x.h"
+#include "Mpu6050.h"
+#include "AccelScreen.h"
+#include "indoor_positioning/IndoorPositioning.h"
+#include "NavigationScreen.h"
+#include "UiTheme.h"
 
 namespace {
-constexpr uint32_t binMs = 40, reportUs = 6667, staleMs = 1000;
-// Raw accelerometer (ADC counts, scale assumes +-8 g over 16 bits). Tested on
-// BNO085 firmware 3.2.13: enabling it succeeds but the hub sends no reports,
-// so it stays off.
-constexpr bool useRaw = false;
-constexpr sh2_SensorId_t imuSensor = useRaw ? SH2_RAW_ACCELEROMETER : SH2_ACCELEROMETER;
-constexpr float rawToMs2 = 9.80665f / 4096.0f;
-constexpr uint32_t reconnectMs = 200;
-// Gravity-free acceleration from the hub's fusion, used only by the stroke
-// counter: tilting the hand moves gravity between axes as much as a stroke does.
-constexpr uint32_t linearUs = 10000; // Delay before re-initialising a stalled sensor.
-constexpr uint32_t retryMs = 3000;
-// BNO085 on the shared SPI bus (SCK/MOSI/MISO = GPIO36/35/37).
-constexpr uint8_t imuCs = A5, imuInt = A4, imuRst = A3, imuWake = A2;
+// MPU6050 accelerometer on I2C (SDA = GPIO42, SCL = GPIO41, the Feather's own
+// I2C bus shared with the battery gauge); its data-ready INT is on A5.
+constexpr uint8_t mpuIntPin = A5;
+constexpr uint32_t i2cHz = 400000;
+// Analysis screens fed by the accelerometer: waveform, FFT, stroke counter.
+// The plain XYZ readout is always available.
+constexpr bool imuEnabled = false;
+// Wi-Fi indoor positioning prototype: off (too coarse in practice); the code
+// stays, set true to bring back its map screen.
+constexpr bool ipsEnabled = false;
+constexpr uint32_t binMs = 40, staleMs = 1000, retryMs = 2000;
 constexpr int bins = 100;
-constexpr std::size_t fftSize = 512; // ~3.4 s at 150 Hz, ~0.3 Hz per bin.
+constexpr std::size_t fftSize = 512; // ~2.6 s at 200 Hz, ~0.4 Hz per bin.
 constexpr float fftRange = 5.0f;     // Fixed full scale of the spectrum, m/s2.
 constexpr uint32_t fftGapMs = 100, batteryMs = 2000, gaugeRetryMs = 5000;
 constexpr float fullScale = 20.0f;
 constexpr int plotX = 30, plotY = 28, plotW = 200, plotH = 79;
-constexpr uint16_t bg = 0x0841, grid = 0x2945, muted = 0x9CF3;
+using ui::bg;
+using ui::grid;
+using ui::muted;
 constexpr uint16_t colors[] = {ST77XX_RED, ST77XX_GREEN, 0x3DFF};
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(240, 135);
 SignalHistory<bins> history;
-RestartableBNO08x imu(imuRst);
-enum Screen { TimeScreen, FftX, FftY, FftZ, StrokeScreen, BatteryScreen, ScreenCount };
-int screen = TimeScreen;
+Mpu6050 mpu;
+enum Screen { AccelScreen, TimeScreen, FftX, FftY, FftZ, StrokeScreen, NavScreen, BatteryScreen };
+// Screens of the enabled features, in BOOT order; battery is always last.
+constexpr int countScreens() { return 1 + (imuEnabled ? 5 : 0) + ipsEnabled + 1; }
+constexpr int screenCount = countScreens();
+struct ScreenList {
+  Screen s[screenCount] = {};
+  constexpr ScreenList() {
+    int n = 0;
+    s[n++] = AccelScreen;
+    if (imuEnabled)
+      for (Screen x : {TimeScreen, FftX, FftY, FftZ, StrokeScreen}) s[n++] = x;
+    if (ipsEnabled) s[n++] = NavScreen;
+    s[n] = BatteryScreen;
+  }
+};
+constexpr ScreenList activeScreens;
+int screenPos = 0; // Index into activeScreens.
+Screen screen = activeScreens.s[0];
+ips::IndoorPositioning positioning;
+Accel tare{}, shown{};     // XYZ screen: offset set by BOOT hold, smoothed readout.
+bool tareSet = false;
+uint32_t lastNavSignature = 0;
+bool navDrawn = false;
 SampleWindow<fftSize> window;
 StrokeCounter strokes; // Hand strokes in any direction; fed regardless of pause.
 float spectrum[fftSize / 2 + 1];
@@ -48,10 +72,12 @@ float spectrum[fftSize / 2 + 1];
 enum class Gauge { None, Max17048, Lc709203f };
 Gauge gauge = Gauge::None;
 Adafruit_LC709203F lc;
-bool batteryValid = false;
-float batteryVolts = 0, batteryPercent = 0, batteryRate = 0;
 uint32_t batteryAt = 0, gaugeProbeAt = 0;
-enum class Kind { Sample, Linear, Connecting, Waiting, Reset, NoInt, NoSpi };
+// Published by the sensor task (sole owner of Wire), copied by the display.
+struct BatteryInfo { Gauge gauge = Gauge::None; bool valid = false; float volts = 0, percent = 0, rate = 0; };
+BatteryInfo battery;
+portMUX_TYPE batteryMux = portMUX_INITIALIZER_UNLOCKED;
+enum class Kind { Sample, Connecting, Waiting };
 struct Event { Kind kind; uint32_t ms; uint32_t us; Accel value; };
 QueueHandle_t events;
 std::atomic<uint32_t> dropped{0};
@@ -62,145 +88,132 @@ uint32_t lastSample = 0, binStart = 0, lastFrame = 0;
 uint32_t rateStart = 0, sampleCount = 0;
 float actualHz = 0;
 Accel latest{};
-const char *workerState = "SZUKAM BNO085";
+const char *workerState = "SZUKAM MPU6050";
 uint32_t noticeUntil = 0;
 const char *notice = "";
-
-std::atomic<uint32_t> lastGoodMs{0};
-std::atomic<bool> linearActive{false};
 
 void emit(Kind kind, Accel value = {}, uint32_t us = 0) {
   Event event{kind, millis(), us, value};
   if (xQueueSend(events, &event, 0) != pdTRUE) ++dropped;
 }
 
-// Called by SH2 once per report. The hub packs several reports into one SHTP
-// packet at high rates and the library's own handler keeps only the last, so
-// every report is forwarded here with the sensor's own timestamp.
-void onSensorEvent(void *, sh2_SensorEvent_t *event) {
-  sh2_SensorValue_t value{};
-  if (sh2_decodeSensorEvent(&value, event) != SH2_OK) return;
-  if (value.sensorId == SH2_LINEAR_ACCELERATION) {
-    const auto &l = value.un.linearAcceleration;
-    if (std::isfinite(l.x) && std::isfinite(l.y) && std::isfinite(l.z))
-      emit(Kind::Linear, {l.x, l.y, l.z}, uint32_t(value.timestamp));
-    return;
+bool readGaugeWord(uint8_t reg, uint16_t &value) {
+  Wire.beginTransmission(0x36);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(uint8_t(0x36), uint8_t(2)) != 2)
+    return false;
+  value = uint16_t(Wire.read()) << 8;
+  value |= Wire.read();
+  return true;
+}
+// Runs on the sensor task, which alone owns Wire. MAX17048 is read directly so
+// its state-of-charge model is not reset on every boot, as its library does.
+void pollBattery(uint32_t now) {
+  if (gauge == Gauge::None) {
+    if (int32_t(now - gaugeProbeAt) < 0) return;
+    gaugeProbeAt = now + gaugeRetryMs;
+    uint16_t version = 0;
+    if (readGaugeWord(0x08, version) && (version & 0xFFF0) == 0x0010)
+      gauge = Gauge::Max17048;
+    else if (lc.begin(&Wire)) gauge = Gauge::Lc709203f;
+    else return;
+    Serial.printf("Battery gauge: %s\n", gauge == Gauge::Max17048 ? "MAX17048" : "LC709203F");
+    batteryAt = now;
   }
-  if (value.sensorId != imuSensor) return;
-  Accel a;
-  uint32_t us = uint32_t(value.timestamp);
-  if (useRaw) {
-    const auto &r = value.un.rawAccelerometer;
-    a = {r.x * rawToMs2, r.y * rawToMs2, r.z * rawToMs2};
-    us = r.timestamp ? r.timestamp : us; // Sensor's own sample time, when present.
+  if (int32_t(now - batteryAt) < 0) return;
+  batteryAt = now + batteryMs;
+  BatteryInfo next;
+  next.gauge = gauge;
+  if (gauge == Gauge::Max17048) {
+    uint16_t vcell, soc, crate;
+    next.valid = readGaugeWord(0x02, vcell) && readGaugeWord(0x04, soc) && readGaugeWord(0x16, crate);
+    if (next.valid) {
+      next.volts = vcell * 78.125e-6f;
+      next.percent = soc / 256.0f;
+      next.rate = int16_t(crate) * 0.208f;
+    }
   } else {
-    a = {value.un.accelerometer.x, value.un.accelerometer.y, value.un.accelerometer.z};
+    next.volts = lc.cellVoltage();
+    next.percent = lc.cellPercent();
+    next.valid = std::isfinite(next.volts) && next.volts > 0;
   }
-  if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z)) return;
-  lastGoodMs = millis();
-  emit(Kind::Sample, a, us);
+  if (!next.valid) { gauge = Gauge::None; gaugeProbeAt = now + gaugeRetryMs; next.gauge = Gauge::None; }
+  portENTER_CRITICAL(&batteryMux);
+  battery = next;
+  portEXIT_CRITICAL(&batteryMux);
+}
+// Data-ready interrupt: stamps the sample time and wakes the sensor task.
+TaskHandle_t sensorHandle = nullptr;
+volatile uint32_t intUs = 0;
+void IRAM_ATTR onMpuInt() {
+  intUs = micros();
+  BaseType_t woken = pdFALSE;
+  vTaskNotifyGiveFromISR(sensorHandle, &woken);
+  portYIELD_FROM_ISR(woken);
 }
 
-// Main report is required; linear acceleration is optional and the stroke
-// counter falls back to the plain accelerometer without it.
-bool enableReports() {
-  linearActive = imu.enableReport(SH2_LINEAR_ACCELERATION, linearUs);
-  Serial.printf("BNO085: linear acceleration %s\n", linearActive ? "on" : "unavailable");
-  return imu.enableReport(imuSensor, reportUs);
-}
-
-// Only this task owns the SH2 driver. The SPI bus is shared with the TFT;
-// Arduino-ESP32 transactions serialize both tasks. Library initialization can
-// block briefly; TFT and buttons continue to run on the Arduino loop task.
+// The only task that touches Wire (MPU6050 and the battery gauge). It reads one
+// sample per data-ready interrupt; if INT never fires (wire missing) it falls
+// back to polling every 5 ms so the readout still works.
 void sensorTask(void *) {
-  bool ready = false;
+  bool ready = false, intSeen = false;
+  int errors = 0, timeouts = 0;
   uint32_t retryAt = 0;
   for (;;) {
-    uint32_t now = millis();
     if (!ready) {
+      const uint32_t now = millis();
       if (int32_t(now - retryAt) >= 0) {
         emit(Kind::Connecting);
-        // Diagnose before the driver: after RST the BNO085 boots and pulls INT
-        // low to send its advertisement, in I2C and SPI mode alike.
-        pinMode(imuInt, INPUT_PULLUP);
-        pinMode(imuWake, OUTPUT);
-        digitalWrite(imuWake, HIGH); // PS0 high at reset selects SPI mode.
-        pinMode(imuRst, OUTPUT);
-        digitalWrite(imuRst, LOW);
-        delay(10);
-        digitalWrite(imuRst, HIGH);
-        uint32_t start = millis();
-        while (digitalRead(imuInt) == HIGH && uint32_t(millis() - start) < 1000) delay(1);
-        const bool intSeen = digitalRead(imuInt) == LOW;
-        Serial.printf("BNO085: INT after reset %s (%lu ms)\n", intSeen ? "LOW" : "never LOW",
-                      (unsigned long)(millis() - start));
-        if (!intSeen) {
-          Serial.println("BNO085: check INT->A4, RST->A3, 3V, GND");
-          emit(Kind::NoInt);
-        // beginSpi pulses RST again before opening SH2, so retries start clean.
-        } else if (!imu.beginSpi(imuCs, imuInt, imuWake, &SPI)) {
-          Serial.println("BNO085: INT ok, no SPI reply: check PS0->A2, PS1 at 3V, SCK, MOSI (DI/AD0), MISO (SDA), CS->A5");
-          emit(Kind::NoSpi);
+        Wire.end(); // Re-init also frees a bus left stuck by a glitch.
+        Wire.begin(SDA, SCL, i2cHz);
+        Wire.setTimeOut(20);
+        if (mpu.begin(Wire)) {
+          Serial.printf("MPU6050: addr 0x%02X, WHO_AM_I 0x%02X%s, %.0f Hz, INT on A5\n", mpu.address(),
+                        mpu.whoAmI(), mpu.whoAmI() == 0x68 ? "" : " (clone?)", Mpu6050::kSampleRateHz);
+          // INT is latched: one read clears it, so the first data-ready after
+          // attaching is a clean rising edge.
+          Accel discard;
+          mpu.read(discard);
+          ulTaskNotifyTake(pdTRUE, 0); // Drop stale notifications.
+          attachInterrupt(mpuIntPin, onMpuInt, RISING);
+          ready = true;
+          intSeen = false;
+          errors = timeouts = 0;
         } else {
-          sh2_setSensorCallback(onSensorEvent, nullptr);
-          if (enableReports()) {
-            imu.wasReset();
-            ready = true;
-            lastGoodMs = millis();
-            Serial.printf("BNO085 SPI: part %lu sw %u.%u.%u, accelerometer requested %lu Hz\n",
-                          (unsigned long)imu.prodIds.entry[0].swPartNumber,
-                          imu.prodIds.entry[0].swVersionMajor, imu.prodIds.entry[0].swVersionMinor,
-                          imu.prodIds.entry[0].swVersionPatch,
-                          (unsigned long)(1000000UL / reportUs));
-          } else {
-            Serial.println("BNO085: SPI ok, enabling accelerometer failed");
-            emit(Kind::Waiting);
-          }
+          Serial.println("MPU6050: no answer; check SDA=GPIO42, SCL=GPIO41, 3V, GND, address 0x68/0x69");
+          emit(Kind::Waiting);
         }
         retryAt = millis() + retryMs;
       }
-    } else {
-      if (imu.wasReset()) {
-        emit(Kind::Reset);
-        ready = enableReports();
-        lastGoodMs = millis();
-      }
-
-      // INT low means data is waiting; otherwise the SPI HAL would block and
-      // hardware-reset the sensor after 500 ms.
-      if (ready && digitalRead(imuInt) == LOW) sh2_service(); // Reports arrive in onSensorEvent.
-      if (!ready || uint32_t(millis() - lastGoodMs) > staleMs) {
-        const auto &st = RestartableBNO08x::stats;
-        Serial.printf("BNO085: reports stopped; INT=%d reads=%lu badHdr=%lu (%02X %02X %02X %02X) wrTimeouts=%lu lateInt=%lu\n",
-                      digitalRead(imuInt), (unsigned long)st.reads, (unsigned long)st.badHeaders,
-                      st.lastBad[0], st.lastBad[1], st.lastBad[2], st.lastBad[3],
-                      (unsigned long)st.writeTimeouts, (unsigned long)st.lateInt);
-        // Last packet headers: channel (byte 2) 3 = sensor reports, 0/1 = hub
-        // housekeeping, FF FF = no data. Oldest first, ms before now.
-        uint32_t nowMs = millis();
-        for (int n = 0; n < Bno08xLinkStats::ringSize; ++n) {
-          int i = (st.head + n) % Bno08xLinkStats::ringSize;
-          if (!st.ringMs[i]) continue;
-          Serial.printf("  -%lu ms: %02X %02X %02X %02X\n", (unsigned long)(nowMs - st.ringMs[i]),
-                        st.ring[i][0], st.ring[i][1], st.ring[i][2], st.ring[i][3]);
-        }
-        // Is the hub alive but silent? Request wake and see if it raises INT.
-        digitalWrite(imuWake, LOW);
-        uint32_t t0 = millis();
-        while (digitalRead(imuInt) == HIGH && uint32_t(millis() - t0) < 100) delay(1);
-        Serial.printf("BNO085: WAKE probe: INT %s after %lu ms\n",
-                      digitalRead(imuInt) == LOW ? "LOW (hub alive)" : "HIGH (hub silent)",
-                      (unsigned long)(millis() - t0));
-        digitalWrite(imuWake, HIGH);
-        ready = false;
-        emit(Kind::Waiting);
-        retryAt = millis() + reconnectMs;
-      }
+      pollBattery(millis());
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
     }
-    // At 150 Hz and up a fixed 1 ms sleep per packet is too slow; sleep only while
-    // the hub has nothing pending.
-    if (!ready || digitalRead(imuInt) == HIGH) vTaskDelay(pdMS_TO_TICKS(1));
-    else taskYIELD();
+    const uint32_t waitMs = intSeen ? 100 : timeouts >= 2 ? 5 : 50;
+    const bool signalled = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs)) > 0;
+    uint32_t us = micros();
+    if (signalled) {
+      us = intUs;
+      if (!intSeen) Serial.println("MPU6050: INT works");
+      intSeen = true;
+      timeouts = 0;
+    } else if (intSeen || ++timeouts == 2) {
+      intSeen = false;
+      timeouts = 2;
+      Serial.println("MPU6050: no INT (check INT -> A5); polling every 5 ms instead");
+    }
+    Accel a;
+    if (mpu.read(a)) {
+      errors = 0;
+      emit(Kind::Sample, a, us);
+    } else if (++errors >= 20) {
+      detachInterrupt(mpuIntPin);
+      ready = false;
+      retryAt = millis() + retryMs;
+      Serial.println("MPU6050: I2C read errors; reconnecting");
+      emit(Kind::Waiting);
+    }
+    pollBattery(millis());
   }
 }
 
@@ -222,6 +235,11 @@ void advanceTo(uint32_t now) {
 bool fresh(uint32_t now) {
   return haveSample && uint32_t(now - lastSample) < staleMs;
 }
+void nextScreen() {
+  screenPos = (screenPos + 1) % screenCount;
+  screen = activeScreens.s[screenPos];
+  navDrawn = false;
+}
 void showNotice(const char *text, uint32_t now) {
   notice = text;
   noticeUntil = now + 1600;
@@ -234,9 +252,42 @@ void pollButton(uint32_t now) {
     if (pressed) buttonDown = now;
     else {
       uint32_t duration = now - buttonDown;
-      if (screen == StrokeScreen) {
+      if (ipsEnabled && screen == NavScreen) {
+        const auto progress = positioning.getCalibrationProgress();
+        if (progress.active) {
+          // Calibrating: tap measures the current point, hold cancels.
+          if (duration >= 1000) {
+            positioning.cancelCalibration();
+            showNotice("KALIBRACJA ANULOWANA", now);
+          } else if (!progress.measuring) {
+            positioning.confirmCalibrationPoint();
+          }
+        } else if (duration >= 3000) {
+          positioning.resetCalibration();
+          showNotice("KALIBRACJA USUNIETA", now);
+        } else if (duration >= 1000) {
+          positioning.startCalibration();
+        } else {
+          nextScreen();
+        }
+      } else if (screen == AccelScreen) {
+        if (duration >= 1000) {
+          if (tareSet) {
+            tareSet = false;
+            showNotice("TARA WYLACZONA", now);
+          } else if (fresh(now)) {
+            tare = latest;
+            tareSet = true;
+            showNotice("TARA USTAWIONA", now);
+          } else showNotice("BRAK DANYCH", now);
+        } else {
+          nextScreen();
+        }
+      } else if (!imuEnabled) {
+        nextScreen();
+      } else if (screen == StrokeScreen) {
         // This screen: a tap clears the counter, a hold moves on.
-        if (duration >= 1000) screen = (screen + 1) % ScreenCount;
+        if (duration >= 1000) nextScreen();
         else { strokes.reset(); showNotice("LICZNIK SKASOWANY", now); }
       } else if (duration >= 3000) {
         if (zeroed) {
@@ -254,7 +305,7 @@ void pollButton(uint32_t now) {
         paused = !paused;
         if (!paused) { history.clear(); window.clear(); binStart = now; }
       } else {
-        screen = (screen + 1) % ScreenCount;
+        nextScreen();
       }
     }
   }
@@ -279,7 +330,7 @@ void drawHeader(uint32_t now, const char *title, uint16_t color) {
   canvas.printf("%3.0f Hz", fresh(now) ? actualHz : 0);
   canvas.setTextColor(muted);
   canvas.setCursor(222, 0);
-  canvas.printf("%d/%d", screen + 1, int(ScreenCount));
+  canvas.printf("%d/%d", screenPos + 1, screenCount);
 }
 void drawGrid() {
   for (int n = 0; n <= 4; ++n) {
@@ -370,47 +421,6 @@ void drawSpectrum(uint32_t now, int channel) {
   }
 }
 
-bool readGaugeWord(uint8_t reg, uint16_t &value) {
-  Wire.beginTransmission(0x36);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(uint8_t(0x36), uint8_t(2)) != 2)
-    return false;
-  value = uint16_t(Wire.read()) << 8;
-  value |= Wire.read();
-  return true;
-}
-// Runs on the loop task, which alone owns Wire. MAX17048 is read directly so
-// its state-of-charge model is not reset on every boot, as its library does.
-void pollBattery(uint32_t now) {
-  if (gauge == Gauge::None) {
-    if (int32_t(now - gaugeProbeAt) < 0) return;
-    gaugeProbeAt = now + gaugeRetryMs;
-    uint16_t version = 0;
-    if (readGaugeWord(0x08, version) && (version & 0xFFF0) == 0x0010)
-      gauge = Gauge::Max17048;
-    else if (lc.begin(&Wire)) gauge = Gauge::Lc709203f;
-    else return;
-    Serial.printf("Battery gauge: %s\n", gauge == Gauge::Max17048 ? "MAX17048" : "LC709203F");
-    batteryAt = now;
-  }
-  if (int32_t(now - batteryAt) < 0) return;
-  batteryAt = now + batteryMs;
-  if (gauge == Gauge::Max17048) {
-    uint16_t vcell, soc, crate;
-    batteryValid = readGaugeWord(0x02, vcell) && readGaugeWord(0x04, soc) &&
-                   readGaugeWord(0x16, crate);
-    if (batteryValid) {
-      batteryVolts = vcell * 78.125e-6f;
-      batteryPercent = soc / 256.0f;
-      batteryRate = int16_t(crate) * 0.208f;
-    }
-  } else {
-    batteryVolts = lc.cellVoltage();
-    batteryPercent = lc.cellPercent();
-    batteryValid = std::isfinite(batteryVolts) && batteryVolts > 0;
-  }
-  if (!batteryValid) { gauge = Gauge::None; gaugeProbeAt = now + gaugeRetryMs; }
-}
 void drawStrokes(uint32_t now) {
   drawHeader(now, "LICZNIK RUCHOW", ST77XX_WHITE);
   label(0, 13, fresh(now) ? ST77XX_GREEN : ST77XX_YELLOW, liveState(now));
@@ -427,10 +437,8 @@ void drawStrokes(uint32_t now) {
   label(130, 58, muted, "(tam i z powrotem)");
   // Tracked stroke direction in sensor axes, so the grip does not matter.
   canvas.setCursor(0, 72);
-  canvas.setTextColor(linearActive ? muted : ST77XX_YELLOW);
-  if (linearActive)
-    canvas.printf("kierunek X%+.1f Y%+.1f Z%+.1f", strokes.axis(0), strokes.axis(1), strokes.axis(2));
-  else canvas.print("BEZ przysp. liniowego (slabiej)");
+  canvas.setTextColor(muted);
+  canvas.printf("kierunek X%+.1f Y%+.1f Z%+.1f", strokes.axis(0), strokes.axis(1), strokes.axis(2));
   // Velocity-like signal against the detection threshold: +-range spans the bar.
   const int barX = 2, barW = 236, mid = barX + barW / 2, barY = 88, barH = 14;
   const float range = fmaxf(strokes.envelope(), 0.1f);
@@ -447,7 +455,11 @@ void drawStrokes(uint32_t now) {
 }
 void drawBattery(uint32_t now) {
   drawHeader(now, "AKUMULATOR", ST77XX_WHITE);
-  if (gauge == Gauge::None || !batteryValid) {
+  BatteryInfo b;
+  portENTER_CRITICAL(&batteryMux);
+  b = battery;
+  portEXIT_CRITICAL(&batteryMux);
+  if (b.gauge == Gauge::None || !b.valid) {
     label(0, 40, ST77XX_YELLOW, "BRAK ODCZYTU UKLADU POMIARU");
     label(0, 56, muted, "MAX17048 / LC709203F na I2C");
     return;
@@ -455,41 +467,88 @@ void drawBattery(uint32_t now) {
   canvas.setTextSize(4);
   canvas.setTextColor(ST77XX_WHITE);
   canvas.setCursor(0, 22);
-  canvas.printf("%.0f%%", fminf(batteryPercent, 100));
+  canvas.printf("%.0f%%", fminf(b.percent, 100));
   canvas.setTextSize(2);
   canvas.setCursor(140, 30);
-  canvas.printf("%.2f V", batteryVolts);
+  canvas.printf("%.2f V", b.volts);
   canvas.setTextSize(1);
   const int barW = 236, barH = 12;
   canvas.drawRect(0, 62, barW, barH, muted);
-  int fill = lroundf(fminf(fmaxf(batteryPercent, 0), 100) * (barW - 4) / 100);
-  canvas.fillRect(2, 64, fill, barH - 4, batteryPercent < 20 ? ST77XX_RED : ST77XX_GREEN);
-  if (gauge == Gauge::Max17048) {
+  int fill = lroundf(fminf(fmaxf(b.percent, 0), 100) * (barW - 4) / 100);
+  canvas.fillRect(2, 64, fill, barH - 4, b.percent < 20 ? ST77XX_RED : ST77XX_GREEN);
+  if (b.gauge == Gauge::Max17048) {
     // CRATE sign is the only charge indication: the charger is not on a GPIO.
-    const char *state = batteryRate > 0.5f ? "LADOWANIE" :
-                        batteryRate < -0.5f ? "ROZLADOWANIE" :
-                        batteryPercent >= 98 ? "NALADOWANY" : "BEZ ZMIAN";
+    const char *state = b.rate > 0.5f ? "LADOWANIE" :
+                        b.rate < -0.5f ? "ROZLADOWANIE" :
+                        b.percent >= 98 ? "NALADOWANY" : "BEZ ZMIAN";
     canvas.setTextSize(2);
-    canvas.setTextColor(batteryRate > 0.5f ? ST77XX_GREEN : ST77XX_WHITE);
+    canvas.setTextColor(b.rate > 0.5f ? ST77XX_GREEN : ST77XX_WHITE);
     canvas.setCursor(0, 82);
     canvas.print(state);
     canvas.setTextSize(1);
     canvas.setTextColor(muted);
     canvas.setCursor(0, 104);
-    canvas.printf("%+.1f %%/h   MAX17048", batteryRate);
+    canvas.printf("%+.1f %%/h   MAX17048", b.rate);
   } else {
     label(0, 84, muted, "LC709203F: stan ladowania");
     label(0, 96, muted, "niedostepny na tej wersji plytki");
   }
 }
 
+// Values are smoothed a little (about 0.15 s) so the digits stay readable.
+void drawAccel(uint32_t now) {
+  AccelScreenState state;
+  state.live = fresh(now);
+  if (state.live) {
+    const float k = 0.3f;
+    const Accel in{latest.x - (tareSet ? tare.x : 0), latest.y - (tareSet ? tare.y : 0),
+                   latest.z - (tareSet ? tare.z : 0)};
+    shown = {shown.x + k * (in.x - shown.x), shown.y + k * (in.y - shown.y), shown.z + k * (in.z - shown.z)};
+  }
+  state.value = shown;
+  state.tared = tareSet;
+  state.rateHz = actualHz;
+  state.status = workerState;
+  state.screenPos = screenPos;
+  state.screenCount = screenCount;
+  drawAccelScreen(canvas, state);
+}
+
+NavScreenState navState(uint32_t now) {
+  NavScreenState n;
+  n.progress = positioning.getCalibrationProgress();
+  n.position = positioning.getPosition();
+  n.calibrated = positioning.isCalibrated();
+  n.sideM = positioning.sideM();
+  for (uint8_t i = 0; i < 3; ++i) positioning.referencePoint(i, n.refX[i], n.refY[i]);
+  n.screenPos = screenPos;
+  n.screenCount = screenCount;
+  n.buttonHeld = buttonStable;
+  n.heldMs = now - buttonDown;
+  n.notice = int32_t(noticeUntil - now) > 0 ? notice : nullptr;
+  return n;
+}
+
 void draw(uint32_t now) {
+  if (ipsEnabled && screen == NavScreen) {
+    const NavScreenState state = navState(now);
+    const uint32_t signature = navSignature(state, now);
+    if (navDrawn && signature == lastNavSignature) return; // Nothing changed: no SPI traffic.
+    lastNavSignature = signature;
+    navDrawn = true;
+    drawNavigationScreen(canvas, state, now);
+    tft.drawRGBBitmap(0, 0, canvas.getBuffer(), 240, 135);
+    return;
+  }
   canvas.fillScreen(bg);
   if (screen == TimeScreen) drawTime(now);
+  else if (screen == AccelScreen) drawAccel(now);
   else if (screen == StrokeScreen) drawStrokes(now);
   else if (screen == BatteryScreen) drawBattery(now);
   else drawSpectrum(now, screen - FftX);
-  if (buttonStable && screen == StrokeScreen) {
+  if (buttonStable && screen == AccelScreen) {
+    label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? (tareSet ? "PUSC: WYLACZ TARE" : "PUSC: USTAW TARE") : "PUSC: NASTEPNY EKRAN");
+  } else if (buttonStable && screen == StrokeScreen) {
     label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? "PUSC: NASTEPNY EKRAN" : "PUSC: SKASUJ LICZNIK");
   } else if (buttonStable) {
     uint32_t held = now - buttonDown;
@@ -497,7 +556,9 @@ void draw(uint32_t now) {
           held >= 1000 ? "PUSC: PAUZA / 3s: ZERO" : "PUSC: NASTEPNY EKRAN");
   } else if (int32_t(noticeUntil - now) > 0)
     label(0, 125, ST77XX_YELLOW, notice);
+  else if (screen == AccelScreen) label(0, 125, muted, "BOOT: ekran / 1s: tara");
   else if (screen == StrokeScreen) label(0, 125, muted, "BOOT: kasuj / 1s: nastepny ekran");
+  else if (!imuEnabled) label(0, 125, muted, "BOOT: nastepny ekran");
   else label(0, 125, muted, "BOOT: ekran / 1s:pauza / 3s:zero");
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), 240, 135);
 }
@@ -508,13 +569,10 @@ void setup() {
   pinMode(0, INPUT_PULLUP);
   pinMode(TFT_I2C_POWER, OUTPUT);
   digitalWrite(TFT_I2C_POWER, HIGH);
-  pinMode(imuCs, OUTPUT);
-  digitalWrite(imuCs, HIGH); // Keep BNO085 off the bus while the TFT starts.
-  pinMode(imuWake, OUTPUT);
-  digitalWrite(imuWake, HIGH);
+  pinMode(mpuIntPin, INPUT_PULLDOWN); // MPU6050 INT is push-pull, active high.
   pinMode(TFT_BACKLITE, OUTPUT);
   digitalWrite(TFT_BACKLITE, HIGH);
-  Wire.begin(SDA, SCL, 100000); // Fuel gauge only; the IMU is on SPI.
+  Wire.begin(SDA, SCL, i2cHz); // MPU6050 and fuel gauge; the sensor task reopens it on reconnect.
   Wire.setTimeOut(20);
   SPI.begin(SCK, MISO, MOSI);
   tft.init(135, 240);
@@ -529,10 +587,11 @@ void setup() {
     tft.print("Brak RAM dla wykresu");
     while (true) delay(1000);
   }
-  events = xQueueCreate(256, sizeof(Event));
   binStart = lastFrame = rateStart = millis();
   draw(millis());
-  if (!events || xTaskCreate(sensorTask, "BNO085", 8192, nullptr, 1, nullptr) != pdPASS) {
+  if (ipsEnabled) positioning.begin();
+  events = xQueueCreate(256, sizeof(Event));
+  if (!events || xTaskCreate(sensorTask, "MPU6050", 8192, nullptr, 1, &sensorHandle) != pdPASS) {
     workerState = "BLAD PAMIECI / TASK";
     return;
   }
@@ -543,39 +602,40 @@ void loop() {
   if (events) {
     while (xQueueReceive(events, &e, 0) == pdTRUE) {
       advanceTo(e.ms);
-      if (e.kind == Kind::Linear) {
-        strokes.setBiasTau(2.0f);
-        strokes.add(e.value, e.us);
-      } else if (e.kind == Kind::Sample) {
+      if (e.kind == Kind::Sample) {
         latest = e.value;
         lastSample = e.ms;
         haveSample = true;
         ++sampleCount;
         workerState = "BRAK DANYCH";
-        if (!linearActive) { strokes.setBiasTau(1.0f); strokes.add(e.value, e.us); }
-        if (!paused) {
-          history.add(e.value);
-          // A gap in reports would smear the spectrum: start a new window.
-          if (window.size() && uint32_t(e.us - window.newestUs()) > fftGapMs * 1000)
-            window.clear();
-          window.add(e.value, e.us);
+        if (imuEnabled) {
+          strokes.setBiasTau(1.0f); // Plain accelerometer: gravity must be filtered out.
+          strokes.add(e.value, e.us);
+          if (!paused) {
+            history.add(e.value);
+            // A gap in reports would smear the spectrum: start a new window.
+            if (window.size() && uint32_t(e.us - window.newestUs()) > fftGapMs * 1000)
+              window.clear();
+            window.add(e.value, e.us);
+          }
         }
       } else {
         history.discardPending();
         strokes.breakSignal();
         haveSample = false;
-        workerState = e.kind == Kind::Connecting ? "LACZENIE BNO085" :
-                      e.kind == Kind::Reset ? "RESET CZUJNIKA" :
-                      e.kind == Kind::NoInt ? "BNO: BRAK INT (A4/A3)" :
-                      e.kind == Kind::NoSpi ? "BNO: BRAK SPI (PS0=A2?)" :
-                      "BRAK BNO085 / RETRY";
+        workerState = e.kind == Kind::Connecting ? "LACZENIE MPU6050" : "BRAK MPU6050 (I2C 0x68/0x69)";
       }
     }
   }
   uint32_t now = millis();
   advanceTo(now);
   pollButton(now);
-  pollBattery(now);
+  // Scan only while the map is shown (or a calibration runs from it).
+  if (ipsEnabled) {
+    if (screen == NavScreen) positioning.startPositioning();
+    else positioning.stopPositioning();
+    positioning.loop(now);
+  }
   if (uint32_t(now - rateStart) >= 1000) {
     actualHz = sampleCount * 1000.0f / uint32_t(now - rateStart);
     sampleCount = 0;
