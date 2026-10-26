@@ -15,6 +15,8 @@ public:
   bool read(Accel &out);
   uint8_t address() const { return address_; }
   uint8_t whoAmI() const { return whoAmI_; }
+  // Why the last begin() failed (empty after success); short enough for the TFT.
+  const char *error() const { return error_; }
 
 private:
   bool write(uint8_t reg, uint8_t value);
@@ -22,4 +24,5 @@ private:
 
   TwoWire *wire_ = nullptr;
   uint8_t address_ = 0, whoAmI_ = 0;
+  char error_[40] = "";
 };

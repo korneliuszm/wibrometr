@@ -77,6 +77,10 @@ uint32_t batteryAt = 0, gaugeProbeAt = 0;
 struct BatteryInfo { Gauge gauge = Gauge::None; bool valid = false; float volts = 0, percent = 0, rate = 0; };
 BatteryInfo battery;
 portMUX_TYPE batteryMux = portMUX_INITIALIZER_UNLOCKED;
+// Why the accelerometer is not found, for the TFT: the sensor task writes, the
+// display copies (same spinlock as the battery).
+struct SensorDiag { char error[40] = ""; char scan[40] = "-"; uint32_t i2cHz = 0; };
+SensorDiag sensorDiag;
 enum class Kind { Sample, Connecting, Waiting };
 struct Event { Kind kind; uint32_t ms; uint32_t us; Accel value; };
 QueueHandle_t events;
@@ -142,6 +146,19 @@ void pollBattery(uint32_t now) {
   battery = next;
   portEXIT_CRITICAL(&batteryMux);
 }
+// Lists the I2C addresses that answer, e.g. "0x36 0x68"; "brak" when none.
+void scanI2c(char *out, size_t length) {
+  size_t n = 0;
+  out[0] = '\0';
+  for (uint8_t addr = 0x08; addr < 0x78; ++addr) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() != 0) continue;
+    if (n + 6 >= length) break;
+    n += snprintf(out + n, length - n, "%s0x%02X", n ? " " : "", addr);
+  }
+  if (!n) snprintf(out, length, "brak");
+}
+
 // Data-ready interrupt: stamps the sample time and wakes the sensor task.
 TaskHandle_t sensorHandle = nullptr;
 volatile uint32_t intUs = 0;
@@ -157,19 +174,22 @@ void IRAM_ATTR onMpuInt() {
 // back to polling every 5 ms so the readout still works.
 void sensorTask(void *) {
   bool ready = false, intSeen = false;
-  int errors = 0, timeouts = 0;
+  int errors = 0, timeouts = 0, attempt = 0;
   uint32_t retryAt = 0;
   for (;;) {
     if (!ready) {
       const uint32_t now = millis();
       if (int32_t(now - retryAt) >= 0) {
         emit(Kind::Connecting);
+        // Alternate 400 kHz and 100 kHz: long jumper wires often only work slow.
+        const uint32_t hz = (attempt++ % 2) ? 100000 : i2cHz;
         Wire.end(); // Re-init also frees a bus left stuck by a glitch.
-        Wire.begin(SDA, SCL, i2cHz);
+        Wire.begin(SDA, SCL, hz);
         Wire.setTimeOut(20);
         if (mpu.begin(Wire)) {
-          Serial.printf("MPU6050: addr 0x%02X, WHO_AM_I 0x%02X%s, %.0f Hz, INT on A5\n", mpu.address(),
-                        mpu.whoAmI(), mpu.whoAmI() == 0x68 ? "" : " (clone?)", Mpu6050::kSampleRateHz);
+          Serial.printf("MPU6050: addr 0x%02X, WHO_AM_I 0x%02X%s, %.0f Hz, I2C %lu kHz, INT on A5\n", mpu.address(),
+                        mpu.whoAmI(), mpu.whoAmI() == 0x68 ? "" : " (clone?)", Mpu6050::kSampleRateHz,
+                        (unsigned long)(hz / 1000));
           // INT is latched: one read clears it, so the first data-ready after
           // attaching is a clean rising edge.
           Accel discard;
@@ -179,8 +199,18 @@ void sensorTask(void *) {
           ready = true;
           intSeen = false;
           errors = timeouts = 0;
+          attempt = 0;
         } else {
-          Serial.println("MPU6050: no answer; check SDA=GPIO42, SCL=GPIO41, 3V, GND, address 0x68/0x69");
+          SensorDiag d;
+          snprintf(d.error, sizeof d.error, "%s", mpu.error());
+          scanI2c(d.scan, sizeof d.scan);
+          d.i2cHz = hz;
+          portENTER_CRITICAL(&batteryMux);
+          sensorDiag = d;
+          portEXIT_CRITICAL(&batteryMux);
+          if (attempt <= 2 || attempt % 5 == 0)
+            Serial.printf("MPU6050: not found (%s); I2C %lu kHz SDA=%d SCL=%d, devices on the bus: %s\n", d.error,
+                          (unsigned long)(hz / 1000), int(SDA), int(SCL), d.scan);
           emit(Kind::Waiting);
         }
         retryAt = millis() + retryMs;
@@ -509,6 +539,15 @@ void drawAccel(uint32_t now) {
   state.tared = tareSet;
   state.rateHz = actualHz;
   state.status = workerState;
+  SensorDiag diag;
+  portENTER_CRITICAL(&batteryMux);
+  diag = sensorDiag;
+  portEXIT_CRITICAL(&batteryMux);
+  state.error = diag.error;
+  state.scan = diag.scan;
+  state.i2cHz = diag.i2cHz;
+  state.sda = SDA;
+  state.scl = SCL;
   state.screenPos = screenPos;
   state.screenCount = screenCount;
   drawAccelScreen(canvas, state);

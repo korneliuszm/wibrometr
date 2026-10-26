@@ -37,8 +37,16 @@ Ta magistrala jest też wyprowadzona na złączu STEMMA QT.
   próbkowanie 200 Hz; żyroskop wyłączony.
 - Moduły GY-521 mają własne rezystory podciągające I2C; Feather ma swoje.
   Krótkie przewody i wspólna masa.
-- Gdy czujnik nie odpowiada, ekran pokazuje `BRAK MPU6050 (I2C 0x68/0x69)`,
-  a firmware ponawia próbę co 2 s (port szeregowy podpowiada, co sprawdzić).
+- Gdy czujnik nie został wykryty, ekran przyspieszenia zamienia się w
+  panel diagnostyczny: **powód** (brak odpowiedzi na adresie, odrzucony
+  zapis, `WHO_AM_I` równe 0x00/0xFF, niezgodny odczyt konfiguracji),
+  **użyte piny i prędkość I2C** oraz **lista adresów, które odpowiedziały**
+  na magistrali. Układ akumulatora na płytce to 0x36: jeśli on jest na
+  liście, a 0x68/0x69 nie, magistrala działa i błąd jest w podłączeniu
+  MPU6050 (VCC, GND, SDA, SCL); jeśli lista jest pusta, sprawdź pierwsze
+  piny SDA/SCL i zasilanie. Próby co 2 s na przemian 400 kHz i 100 kHz
+  (długie przewody czasem działają tylko wolno); to samo wypisuje port
+  szeregowy.
 
 ## Ekran i obsługa
 

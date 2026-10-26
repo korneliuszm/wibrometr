@@ -10,7 +10,11 @@ struct AccelScreenState {
   bool live = false;           // False: show dashes and `status`.
   bool tared = false;
   float rateHz = 0;
-  const char *status = "";     // Shown instead of the magnitude when not live.
+  const char *status = "";     // Not live: sensor state, shown above the diagnostics.
+  const char *error = "";      // Not live: why the sensor was not found.
+  const char *scan = "";       // Not live: I2C addresses that did answer.
+  uint32_t i2cHz = 0;
+  int sda = 0, scl = 0;
   int screenPos = 0, screenCount = 1;
 };
 

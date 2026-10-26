@@ -1,5 +1,6 @@
 #include "Mpu6050.h"
 #include <Arduino.h>
+#include <cstdio>
 #include "Mpu6050Decode.h"
 
 namespace {
@@ -33,25 +34,51 @@ bool Mpu6050::readBytes(uint8_t reg, uint8_t *data, uint8_t length) {
 bool Mpu6050::begin(TwoWire &wire) {
   wire_ = &wire;
   address_ = 0;
+  whoAmI_ = 0;
+  std::snprintf(error_, sizeof error_, "brak odpowiedzi 0x68/0x69");
   for (uint8_t candidate : {uint8_t(0x68), uint8_t(0x69)}) {
     wire_->beginTransmission(candidate);
     if (wire_->endTransmission() == 0) { address_ = candidate; break; }
   }
   if (!address_) return false;
   // Reset, then wake with the gyro PLL as clock (more stable than the 8 MHz
-  // internal oscillator). A clone that ignores the reset still passes the
+  // internal oscillator). The chip may still NACK right after the reset, so the
+  // wake-up write is retried. A clone that ignores the reset still passes the
   // read-back check below.
   write(kPwrMgmt1, 0x80);
   delay(100);
-  if (!write(kPwrMgmt1, 0x01)) return false;
+  bool awake = false;
+  for (int attempt = 0; attempt < 5 && !awake; ++attempt) {
+    awake = write(kPwrMgmt1, 0x01);
+    if (!awake) delay(20);
+  }
+  if (!awake) {
+    std::snprintf(error_, sizeof error_, "0x%02X: zapis PWR_MGMT_1 odrzucony", address_);
+    return false;
+  }
   delay(10);
-  whoAmI_ = 0;
-  if (!readBytes(kWhoAmI, &whoAmI_, 1)) return false;
+  if (!readBytes(kWhoAmI, &whoAmI_, 1)) {
+    std::snprintf(error_, sizeof error_, "0x%02X: odczyt WHO_AM_I nieudany", address_);
+    return false;
+  }
+  if (whoAmI_ == 0x00 || whoAmI_ == 0xFF) { // Bus stuck high/low: not a chip answering.
+    std::snprintf(error_, sizeof error_, "WHO_AM_I=0x%02X: zle SDA/SCL?", whoAmI_);
+    return false;
+  }
   const bool configured = write(kSmplrtDiv, kRateDiv) && write(kConfig, kDlpf) && write(kGyroConfig, 0) &&
                           write(kAccelConfig, uint8_t(kRange << 3)) && write(kPwrMgmt2, 0x07) &&
                           write(kIntPinCfg, kIntLatchedClearOnRead) && write(kIntEnable, kDataReadyEnable);
+  if (!configured) {
+    std::snprintf(error_, sizeof error_, "zapis konfiguracji nieudany");
+    return false;
+  }
   uint8_t back = 0xFF;
-  return configured && readBytes(kAccelConfig, &back, 1) && back == uint8_t(kRange << 3);
+  if (!readBytes(kAccelConfig, &back, 1) || back != uint8_t(kRange << 3)) {
+    std::snprintf(error_, sizeof error_, "ACCEL_CONFIG zapis 0x%02X odczyt 0x%02X", kRange << 3, back);
+    return false;
+  }
+  error_[0] = '\0';
+  return true;
 }
 
 bool Mpu6050::read(Accel &out) {
