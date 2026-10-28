@@ -862,8 +862,8 @@ function renderTables() {
       el("rect", { class: "vib-bar", x: x0b + i * (bw2 + gap2), y: p.y + 30 - h, width: bw2, height: h, fill: vibColors[i] }, r.bars);
     });
     const maxVib = Math.max(...vib) / VIB_SCALE;
-    r.g.querySelector(".st-frame").setAttribute("fill",
-      `color-mix(in srgb, var(--paper) ${Math.round(100 - Math.min(1, maxVib) * 70)}%, var(--warn))`);
+    r.g.querySelector(".st-frame").style.fill =
+      `color-mix(in srgb, var(--paper) ${Math.round(100 - Math.min(1, maxVib) * 70)}%, var(--warn))`;
   });
   refs.dims.forEach((t, i) => {
     const g = lineInfo.gaps[i] || 0;
