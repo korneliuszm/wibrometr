@@ -97,8 +97,6 @@ input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--ink); marg
 .legend { margin-left: auto; display: flex; gap: 14px; color: var(--ink-soft); }
 .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 canvas { display: block; width: 100%; }
-#accel canvas { height: 250px; }
-#gyro canvas { height: 170px; }
 
 /* Last move. */
 .move-body { display: grid; grid-template-columns: minmax(230px, 0.8fr) 1.3fr 1fr; gap: 0; }
@@ -199,25 +197,6 @@ button.quiet:hover { color: var(--warn); background: transparent; }
 @media (prefers-reduced-motion: reduce) { .meter-fill { transition: none; } }
 .empty { color: var(--ink-soft); margin: 0; max-width: 46ch; }
 
-/* Transits. */
-.tr-table { width: 100%; border-collapse: collapse; }
-.tr-table th { text-align: left; font-weight: 400; color: var(--ink-soft); padding: 6px 10px; border-bottom: 1px solid var(--edge); white-space: nowrap; }
-.tr-table td { padding: 7px 10px; border-bottom: 1px solid var(--edge); white-space: nowrap; }
-.tr-table tbody tr { cursor: pointer; }
-.tr-table tbody tr:hover { background: color-mix(in srgb, var(--paper) 90%, var(--grid-major)); }
-.tr-table tbody tr[aria-selected="true"] { background: color-mix(in srgb, var(--paper) 82%, var(--grid-major)); }
-.tr-table .num { text-align: right; }
-.tr-table .route { font-weight: 600; }
-.tr-table .tag { color: var(--live); margin-left: 6px; font-weight: 400; }
-.tr-table canvas { width: 120px; height: 26px; }
-.tr-scroll { overflow-x: auto; }
-.tr-detail { padding: 12px 16px 16px; border-top: 1px solid var(--edge); }
-.tr-detail header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 6px; }
-.tr-detail h3 { margin: 0; font-size: 1rem; font-weight: 600; }
-.tr-detail .dl { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
-#trChart { height: 220px; }
-.xv { color: var(--x); } .yv { color: var(--y); } .zv { color: var(--z); }
-
 footer { color: var(--ink-soft); padding-top: 6px; }
 
 @media (max-width: 900px) {
@@ -239,8 +218,6 @@ footer { color: var(--ink-soft); padding-top: 6px; }
   #line .where { font-size: 1.7rem; }
   .move-body { grid-template-columns: 1fr; }
   .move-body > figure + figure { border-left: 0; }
-  #accel canvas { height: 200px; }
-  #gyro canvas { height: 150px; }
   .legend { margin-left: 0; width: 100%; }
 }
 </style>
@@ -286,27 +263,6 @@ footer { color: var(--ink-soft); padding-top: 6px; }
     </div>
   </section>
 
-  <section class="sheet" id="transits">
-    <header><h2>Przejazdy i drgania</h2><span class="unit">ostatnie 12, kliknij wiersz, aby zobaczyć przebieg</span></header>
-    <div class="tr-scroll">
-      <table class="tr-table">
-        <thead><tr>
-          <th>Przejazd</th><th class="num">Odległość</th><th class="num">Czas</th><th class="num">Rampa</th>
-          <th class="num">RMS X</th><th class="num">RMS Y</th><th class="num">RMS Z</th><th class="num">Szczyt</th><th>Przebieg</th>
-        </tr></thead>
-        <tbody id="trBody"></tbody>
-      </table>
-    </div>
-    <p class="empty" id="trEmpty" style="padding: 10px 16px 14px">Pierwszy przejazd pojawi się tu po 15 s postoju na kolejnym stole.</p>
-    <div class="tr-detail" id="trDetail" hidden>
-      <header>
-        <h3 id="trTitle"></h3><span class="unit">przyspieszenie bez grawitacji, m/s², zakres min–maks w czasie</span>
-        <span class="dl"><button id="csvEnv">Pobierz obwiednię CSV</button><button id="csvRaw">Pobierz próbki 200 Hz CSV</button></span>
-      </header>
-      <canvas id="trChart"></canvas>
-    </div>
-  </section>
-
   <div class="tools">
     <div class="seg" role="group" aria-label="Długość okna">
       <button data-win="5">5 s</button><button data-win="10" aria-pressed="true">10 s</button><button data-win="30">30 s</button>
@@ -314,21 +270,6 @@ footer { color: var(--ink-soft); padding-top: 6px; }
     <button id="pause">Wstrzymaj</button>
     <label class="check"><input type="checkbox" id="dc"> Pokaż same drgania (bez grawitacji i offsetu)</label>
   </div>
-
-  <section class="sheet" id="accel">
-    <header>
-      <h2>Przyspieszenie</h2><span class="unit">m/s²</span>
-      <span class="legend"><span><i style="background:var(--x)"></i>X</span><span><i style="background:var(--y)"></i>Y</span><span><i style="background:var(--z)"></i>Z</span></span>
-    </header>
-    <canvas></canvas>
-  </section>
-
-  <section class="sheet" id="gyro">
-    <header>
-      <h2>Prędkość kątowa</h2><span class="unit">°/s, offset zera odjęty</span>
-    </header>
-    <canvas></canvas>
-  </section>
 
   <section class="sheet" id="move">
     <header><h2>Ostatni ruch</h2><span class="unit" id="moveNo"></span></header>
@@ -391,129 +332,6 @@ function setupCanvas(cv) {
   return { ctx, w: r.width, h: r.height };
 }
 
-// Rolling chart: newest at the right, each axis ends in a pen with its value.
-const CAP = 200 * 90; // 90 s: a whole transit plus the 15 s until it is confirmed.
-class Strip {
-  constructor(el, decimals, minSpan) {
-    this.cv = el.querySelector("canvas");
-    this.d = decimals; this.minSpan = minSpan;
-    this.t = new Float64Array(CAP);
-    this.v = [new Float32Array(CAP), new Float32Array(CAP), new Float32Array(CAP)];
-    this.head = 0; this.n = 0;
-    this.lo = -1; this.hi = 1;
-  }
-  push(t, a, b, c) {
-    const i = this.head;
-    this.t[i] = t; this.v[0][i] = a; this.v[1][i] = b; this.v[2][i] = c;
-    this.head = (i + 1) % CAP; if (this.n < CAP) this.n++;
-  }
-  clear() { this.n = 0; }
-  // Index range [first, last] of samples with t0 <= t <= t1, or null if the
-  // buffer does not reach back to t0.
-  range(t0, t1) {
-    if (!this.n) return null;
-    const oldest = (this.head - this.n + CAP) % CAP;
-    if (this.t[oldest] > t0) return null;
-    const out = [];
-    for (let k = 0; k < this.n; k++) {
-      const i = (oldest + k) % CAP;
-      if (this.t[i] >= t0 && this.t[i] <= t1) out.push(i);
-    }
-    return out;
-  }
-  draw(now, win, removeDc) {
-    const { ctx, w, h } = setupCanvas(this.cv);
-    const padL = 44, padR = 86, padT = 10, padB = 22;
-    const pw = w - padL - padR, ph = h - padT - padB;
-    ctx.clearRect(0, 0, w, h);
-    // Visible samples, newest first.
-    const idx = [];
-    for (let k = 0; k < this.n; k++) {
-      const i = (this.head - 1 - k + CAP) % CAP;
-      if (now - this.t[i] > win) break;
-      idx.push(i);
-    }
-    const mean = [0, 0, 0];
-    if (removeDc && idx.length) for (let a = 0; a < 3; a++) { let s = 0; for (const i of idx) s += this.v[a][i]; mean[a] = s / idx.length; }
-    // Scale follows the data, eased so it does not jump.
-    let lo = Infinity, hi = -Infinity;
-    for (let a = 0; a < 3; a++) for (const i of idx) { const v = this.v[a][i] - mean[a]; if (v < lo) lo = v; if (v > hi) hi = v; }
-    if (!idx.length) { lo = -this.minSpan / 2; hi = this.minSpan / 2; }
-    const mid = (lo + hi) / 2, span = Math.max(hi - lo, this.minSpan) * 1.15;
-    const tLo = mid - span / 2, tHi = mid + span / 2;
-    // Widen at once (nothing gets clipped), narrow slowly (no jumping).
-    this.lo = tLo < this.lo ? tLo : this.lo + (tLo - this.lo) * 0.08;
-    this.hi = tHi > this.hi ? tHi : this.hi + (tHi - this.hi) * 0.08;
-    const y = v => padT + (this.hi - v) / (this.hi - this.lo) * ph;
-    const x = t => padL + pw - (now - t) / win * pw;
-    // Grid: values at a 1-2-5 step, time every second (every 5 s on a 30 s window).
-    ctx.font = `13px ${C.font}`; ctx.textBaseline = "middle"; ctx.lineWidth = 1;
-    const step = nice((this.hi - this.lo) / 5);
-    ctx.fillStyle = C["ink-soft"]; ctx.textAlign = "right";
-    for (let v = Math.ceil(this.lo / step) * step; v <= this.hi; v += step) {
-      const yy = Math.round(y(v)) + 0.5;
-      ctx.strokeStyle = Math.abs(v) < step / 2 ? C["grid-major"] : C.grid;
-      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(padL + pw, yy); ctx.stroke();
-      ctx.fillText(tick(v, step), padL - 6, yy);
-    }
-    const tStep = [1, 2, 5, 10].find(s => s * pw / win >= 52) || 10; // Labels at least 52 px apart.
-    ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
-    for (let s = 0; s <= win; s += tStep) {
-      const xx = Math.round(padL + pw - s / win * pw) + 0.5;
-      ctx.strokeStyle = C.grid;
-      ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + ph); ctx.stroke();
-      ctx.fillText(s ? `−${s} s` : "teraz", xx, h - 6);
-    }
-    if (!idx.length) {
-      ctx.fillStyle = C["ink-soft"]; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText("Czekam na próbki z płytki", padL + pw / 2, padT + ph / 2);
-      return;
-    }
-    // Traces: per pixel column min/max, so 6000 samples stay cheap.
-    const pens = [];
-    ctx.save();
-    ctx.beginPath(); ctx.rect(padL, padT, pw, ph); ctx.clip();
-    ctx.lineWidth = 1.5; ctx.lineJoin = "round";
-    for (let a = 0; a < 3; a++) {
-      ctx.strokeStyle = C[AX[a]];
-      ctx.beginPath();
-      let col = null, mn = 0, mx = 0, first = true;
-      const flush = () => {
-        if (col === null) return;
-        if (first) { ctx.moveTo(col, y(mx)); first = false; } else ctx.lineTo(col, y(mx));
-        ctx.lineTo(col, y(mn));
-      };
-      for (let j = idx.length - 1; j >= 0; j--) {
-        const i = idx[j], v = this.v[a][i] - mean[a];
-        const c = Math.round(x(this.t[i]) * 2) / 2;
-        if (c !== col) { flush(); col = c; mn = mx = v; } else { if (v < mn) mn = v; if (v > mx) mx = v; }
-      }
-      flush();
-      ctx.stroke();
-      const last = this.v[a][idx[0]] - mean[a];
-      pens.push({ a, v: last, raw: this.v[a][idx[0]], y: y(last) });
-    }
-    ctx.restore();
-    // Pens: a nib at the trace end and the value beside it, pushed apart.
-    pens.sort((p, q) => p.y - q.y);
-    const gap = 19, top = padT + 8, bottom = padT + ph - 8;
-    for (let i = 0; i < pens.length; i++) pens[i].ly = Math.min(Math.max(pens[i].y, top + i * gap), bottom - (pens.length - 1 - i) * gap);
-    for (let i = 1; i < pens.length; i++) if (pens[i].ly - pens[i - 1].ly < gap) pens[i].ly = pens[i - 1].ly + gap;
-    const xe = padL + pw;
-    ctx.font = `600 15px ${C.font}`; ctx.textAlign = "left"; ctx.textBaseline = "middle";
-    for (const p of pens) {
-      const col = C[AX[p.a]];
-      const py = Math.min(Math.max(p.y, padT), padT + ph);
-      ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(xe, py); ctx.lineTo(xe + 10, p.ly); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(xe - 1, py); ctx.lineTo(xe + 6, py - 4); ctx.lineTo(xe + 6, py + 4); ctx.closePath(); ctx.fill();
-      ctx.fillText(fmt(removeDc ? p.v : p.raw, this.d), xe + 13, p.ly);
-    }
-  }
-}
-
-const accel = new Strip(document.getElementById("accel"), 2, 0.5);
-const gyro = new Strip(document.getElementById("gyro"), 1, 4);
 let win = 10, paused = false, removeDc = false, frozenAt = 0, latestT = 0;
 
 document.querySelectorAll("[data-win]").forEach(b => b.addEventListener("click", () => {
@@ -539,7 +357,6 @@ function connect() {
     if (m.t === "s") onSamples(m);
     else if (m.t === "m") onMove(m);
     else if (m.t === "ln") onLine(m);
-    else if (m.t === "tr") onTransit(m);
   };
   ws.onclose = () => { setLink(false, "Brak połączenia z płytką, ponawiam…"); setTimeout(connect, 1500); };
   ws.onerror = () => ws.close();
@@ -555,8 +372,6 @@ function onSamples(m) {
   else setLink(true, `Na żywo, ${Math.round(m.hz)} Hz`);
   for (const r of m.r) {
     sampleT += (r[0] > 0 && r[0] < 100000 ? r[0] : 5000) / 1e6;
-    accel.push(sampleT, r[1], r[2], r[3]);
-    gyro.push(sampleT, r[4], r[5], r[6]);
   }
   latestT = sampleT;
   meterState = m.st;
@@ -1032,140 +847,12 @@ $("forget").addEventListener("click", () => {
   if (confirm("Usunąć odciski Wi-Fi wszystkich stołów? Powstaną od nowa przy kolejnych postojach.") && ws && ws.readyState === 1) ws.send("forgetwifi");
 });
 
-// ---- Transits and their vibration ----
-const transits = new Map();
-let trSel = null;
-function onTransit(m) {
-  const old = transits.get(m.id);
-  if (old) m.raw = old.raw;
-  else {
-    // The table is confirmed 15 s after the stop, so the ride ended then.
-    const t1 = sampleT - 15, t0 = t1 - m.dur;
-    const idx = accel.range(t0 - 0.2, t1);
-    m.raw = idx && idx.length ? idx.map(i => [accel.t[i] - t0, accel.v[0][i], accel.v[1][i], accel.v[2][i], gyro.v[0][i], gyro.v[1][i], gyro.v[2][i]]) : null;
-  }
-  transits.set(m.id, m);
-  while (transits.size > 12) transits.delete(transits.keys().next().value);
-  renderTransits();
-}
-const tableLabel = s => (s < 0 ? "?" : s + 1);
-function renderTransits() {
-  const list = [...transits.values()].reverse();
-  $("trEmpty").hidden = list.length > 0;
-  $("trBody").innerHTML = list.map(t => {
-    const pk = Math.max(...t.pk);
-    return `<tr data-id="${t.id}" tabindex="0" aria-selected="${t.id === trSel}">` +
-      `<td class="route">${tableLabel(t.from)} → ${tableLabel(t.to)}${t.carried ? '<span class="tag">przeniesiony, stół z Wi-Fi</span>' : t.wifi ? '<span class="tag">poprawione przez Wi-Fi</span>' : ""}</td>` +
-      `<td class="num">${num(t.d)} m ${arrow(t.dir)}</td><td class="num">${num(t.dur)} s</td><td class="num">${t.ramp.toFixed(2).replace(".", ",")}</td>` +
-      `<td class="num xv">${t.rms[0].toFixed(2).replace(".", ",")}</td><td class="num yv">${t.rms[1].toFixed(2).replace(".", ",")}</td>` +
-      `<td class="num zv">${t.rms[2].toFixed(2).replace(".", ",")}</td><td class="num">${pk.toFixed(2).replace(".", ",")}</td>` +
-      `<td><canvas data-spark="${t.id}"></canvas></td></tr>`;
-  }).join("");
-  document.querySelectorAll("#trBody tr").forEach(r => {
-    const pick = () => { trSel = +r.dataset.id; renderTransits(); };
-    r.addEventListener("click", pick);
-    r.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
-  });
-  document.querySelectorAll("[data-spark]").forEach(cv => spark(cv, transits.get(+cv.dataset.spark)));
-  renderTransitDetail();
-}
-// Largest |acceleration| over time, all axes: the shape of the ride.
-function spark(cv, t) {
-  const { ctx, w, h } = setupCanvas(cv);
-  ctx.clearRect(0, 0, w, h);
-  const bins = t.env.length / 6;
-  if (!bins) return;
-  let peak = 0.01;
-  const mag = [];
-  for (let b = 0; b < bins; b++) {
-    let m = 0;
-    for (let a = 0; a < 6; a++) m = Math.max(m, Math.abs(t.env[b * 6 + a]) / 100);
-    mag.push(m);
-    peak = Math.max(peak, m);
-  }
-  ctx.fillStyle = C["ink-soft"];
-  ctx.beginPath();
-  ctx.moveTo(0, h);
-  mag.forEach((m, b) => ctx.lineTo(b / Math.max(1, bins - 1) * w, h - m / peak * (h - 2)));
-  ctx.lineTo(w, h);
-  ctx.fill();
-}
-function renderTransitDetail() {
-  const t = transits.get(trSel), box = $("trDetail");
-  box.hidden = !t;
-  if (!t) return;
-  $("trTitle").textContent = `Stół ${tableLabel(t.from)} → ${tableLabel(t.to)}, ${num(t.d)} m w ${num(t.dur)} s`;
-  $("csvRaw").disabled = !t.raw;
-  $("csvRaw").title = t.raw ? "" : "Strona nie była otwarta przez cały przejazd";
-  const { ctx, w, h } = setupCanvas($("trChart"));
-  const padL = 44, padR = 12, padT = 8, padB = 22, pw = w - padL - padR, ph = h - padT - padB;
-  ctx.clearRect(0, 0, w, h);
-  const bins = t.env.length / 6;
-  let peak = 0.2;
-  for (const v of t.env) peak = Math.max(peak, Math.abs(v) / 100);
-  const step = nice(peak / 2), range = Math.ceil(peak / step - 1e-9) * step;
-  const y = v => padT + (range - v) / (2 * range) * ph, x = b => padL + (b + 0.5) / bins * pw;
-  ctx.font = `13px ${C.font}`; ctx.lineWidth = 1; ctx.fillStyle = C["ink-soft"]; ctx.textAlign = "right"; ctx.textBaseline = "middle";
-  for (let v = -range; v <= range + 1e-9; v += step) {
-    const yy = Math.round(y(v)) + 0.5;
-    ctx.strokeStyle = Math.abs(v) < 1e-9 ? C["grid-major"] : C.grid;
-    ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(padL + pw, yy); ctx.stroke();
-    ctx.fillText(tick(v, step), padL - 6, yy);
-  }
-  const total = bins * t.bin, tStep = nice(total / 6);
-  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
-  for (let s = 0; s <= total + 1e-9; s += tStep) ctx.fillText(`${num(s)} s`, padL + s / total * pw, h - 6);
-  // One translucent band per axis (min to max in each time step).
-  for (let a = 0; a < 3; a++) {
-    ctx.fillStyle = C[AX[a]];
-    ctx.globalAlpha = 0.28;
-    ctx.beginPath();
-    for (let b = 0; b < bins; b++) ctx.lineTo(x(b), y(t.env[b * 6 + 3 + a] / 100));
-    for (let b = bins - 1; b >= 0; b--) ctx.lineTo(x(b), y(t.env[b * 6 + a] / 100));
-    ctx.closePath();
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = C[AX[a]];
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    for (let b = 0; b < bins; b++) ctx.lineTo(x(b), y((t.env[b * 6 + a] + t.env[b * 6 + 3 + a]) / 200));
-    ctx.stroke();
-  }
-}
-function download(name, text) {
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-$("csvEnv").addEventListener("click", () => {
-  const t = transits.get(trSel);
-  if (!t) return;
-  let csv = "t_s;x_min;x_max;y_min;y_max;z_min;z_max\n";
-  for (let b = 0; b < t.env.length / 6; b++) {
-    const e = i => (t.env[b * 6 + i] / 100).toFixed(2);
-    csv += [(b * t.bin).toFixed(3), e(0), e(3), e(1), e(4), e(2), e(5)].join(";") + "\n";
-  }
-  download(`przejazd_${tableLabel(t.from)}-${tableLabel(t.to)}_obwiednia.csv`, csv);
-});
-$("csvRaw").addEventListener("click", () => {
-  const t = transits.get(trSel);
-  if (!t || !t.raw) return;
-  let csv = "t_s;ax_m_s2;ay_m_s2;az_m_s2;gx_deg_s;gy_deg_s;gz_deg_s\n";
-  for (const r of t.raw) csv += r.map((v, i) => v.toFixed(i ? 3 : 4)).join(";") + "\n";
-  download(`przejazd_${tableLabel(t.from)}-${tableLabel(t.to)}_200Hz.csv`, csv);
-});
-
 function frame(ts) {
   animateLine(ts);
-  const now = paused ? frozenAt : latestT;
-  accel.draw(now, win, removeDc);
-  gyro.draw(now, win, removeDc);
   if (drawProgress < 1) { drawProgress = Math.min(1, (ts - animStart) / 700); paintMove(); }
   requestAnimationFrame(frame);
 }
-window.addEventListener("resize", () => { paintMove(); renderTransits(); });
+window.addEventListener("resize", () => { paintMove(); });
 paintMove();
 connect();
 requestAnimationFrame(frame);
