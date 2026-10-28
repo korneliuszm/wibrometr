@@ -112,4 +112,13 @@ constexpr bool mpuDecodes() {
 }
 static_assert(mpuDecodes(), "MPU6050 samples must decode to m/s2 with the right sign");
 static_assert(mpu6050::lsbPerG(0) == 16384.0f && mpu6050::lsbPerG(3) == 2048.0f, "AFS_SEL scales");
+constexpr bool gyroDecodes() {
+  const uint8_t raw[6] = {0x00, 0x83, 0xFF, 0x7D, 0x00, 0x00}; // X = +131, Y = -131 LSB.
+  const Accel w = mpu6050::decodeGyro(raw, 1);                  // +-500 deg/s: 65.5 LSB per deg/s.
+  const float want = 2 * mpu6050::kRadPerDeg;
+  const auto close = [](float x, float y) { return x - y < 1e-5f && y - x < 1e-5f; };
+  return close(w.x, want) && close(w.y, -want) && close(w.z, 0);
+}
+static_assert(gyroDecodes(), "MPU6050 gyro samples must decode to rad/s with the right sign");
+static_assert(mpu6050::lsbPerDps(0) == 131.0f && mpu6050::lsbPerDps(3) == 16.375f, "FS_SEL scales");
 static_assert(mpu6050::be16(0x7F, 0xFF) == 32767 && mpu6050::be16(0x80, 0x00) == -32768, "int16 limits");

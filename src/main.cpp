@@ -12,6 +12,14 @@
 #include "StrokeCounter.h"
 #include "Mpu6050.h"
 #include "AccelScreen.h"
+#include "GyroScreen.h"
+#include "Mpu6050Decode.h"
+#include "Displacement.h"
+#include "DisplacementScreen.h"
+#include "WebLink.h"
+#include "LineTracker.h"
+#include "WifiScan.h"
+#include <Preferences.h>
 #include "indoor_positioning/IndoorPositioning.h"
 #include "NavigationScreen.h"
 #include "UiTheme.h"
@@ -42,18 +50,20 @@ Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(240, 135);
 SignalHistory<bins> history;
 Mpu6050 mpu;
-enum Screen { AccelScreen, TimeScreen, FftX, FftY, FftZ, StrokeScreen, NavScreen, BatteryScreen };
+enum Screen { LineScreen, AccelScreen, GyroScreen, DispScreen, DispPlot, DispPath, TimeScreen, FftX, FftY, FftZ,
+              StrokeScreen, NavScreen, WebScreen, BatteryScreen };
 // Screens of the enabled features, in BOOT order; battery is always last.
-constexpr int countScreens() { return 1 + (imuEnabled ? 5 : 0) + ipsEnabled + 1; }
+constexpr int countScreens() { return 6 + (imuEnabled ? 5 : 0) + ipsEnabled + 2; }
 constexpr int screenCount = countScreens();
 struct ScreenList {
   Screen s[screenCount] = {};
   constexpr ScreenList() {
     int n = 0;
-    s[n++] = AccelScreen;
+    for (Screen x : {LineScreen, AccelScreen, GyroScreen, DispScreen, DispPlot, DispPath}) s[n++] = x;
     if (imuEnabled)
       for (Screen x : {TimeScreen, FftX, FftY, FftZ, StrokeScreen}) s[n++] = x;
     if (ipsEnabled) s[n++] = NavScreen;
+    s[n++] = WebScreen;
     s[n] = BatteryScreen;
   }
 };
@@ -67,6 +77,95 @@ uint32_t lastNavSignature = 0;
 bool navDrawn = false;
 SampleWindow<fftSize> window;
 StrokeCounter strokes; // Hand strokes in any direction; fed regardless of pause.
+// Large objects live in PSRAM: created on first use (after PSRAM is up, i.e.
+// not during static initialisation); malloc puts blocks over 4 KB there.
+// The sensor runs at 1 kHz. The hand-move meter, the page stream and the
+// analysis screens are built for 200 Hz: they get means of 5 samples, which
+// also keeps faster shaking from folding into their band.
+struct BlockMean {
+  static constexpr int n = int(Mpu6050::kSampleRateHz / 200);
+  Accel sa{}, sw{};
+  int count = 0;
+  // True when a mean is ready: a, w become the means, us the last time.
+  bool add(Accel &a, Accel &w, uint32_t &) {
+    sa = {sa.x + a.x, sa.y + a.y, sa.z + a.z};
+    sw = {sw.x + w.x, sw.y + w.y, sw.z + w.z};
+    if (++count < n) return false;
+    a = {sa.x / n, sa.y / n, sa.z / n};
+    w = {sw.x / n, sw.y / n, sw.z / n};
+    clear();
+    return true;
+  }
+  void clear() { sa = sw = {}; count = 0; }
+};
+BlockMean slow;
+DisplacementMeter &displacement() { // Rest-to-rest moves; always fed.
+  static DisplacementMeter *m = new DisplacementMeter();
+  return *m;
+}
+uint32_t movesLogged = 0;
+// Position on the roller line; what it learns survives power cycles (NVS).
+line::Tracker &tracker() {
+  static line::Tracker *t = new line::Tracker();
+  return *t;
+}
+Preferences prefs;
+void saveLearned() {
+  prefs.putBytes("learned", &tracker().learned, sizeof tracker().learned);
+}
+void loadLearned() {
+  // ~5 KB: read straight into the tracker, undone if it is not a valid copy.
+  line::Learned &l = tracker().learned;
+  if (prefs.getBytesLength("learned") != sizeof l || prefs.getBytes("learned", &l, sizeof l) != sizeof l ||
+      l.version != line::Learned::currentVersion)
+    tracker().forgetAll();
+}
+// Two buffers in turn: one printf may name two tables.
+const char *tableName(int s) {
+  static char text[2][8];
+  static int next = 0;
+  if (s < 0) return "?";
+  char *out = text[next++ & 1];
+  snprintf(out, 8, "%d", s + 1);
+  return out;
+}
+void showNotice(const char *text, uint32_t now);
+// Wi-Fi scans the tracker asks for, finished transits, saving what was learned.
+void serviceLine(uint32_t now) {
+  if (!ipsEnabled && tracker().scanWanted() && !wifiscan::busy()) {
+    tracker().scanStarted();
+    wifiscan::start();
+    Serial.println("line: parked, Wi-Fi fingerprint scan");
+  }
+  wifiscan::poll();
+  line::Fingerprint scan;
+  if (wifiscan::take(scan)) {
+    tracker().applyScan(scan);
+    Serial.printf("line: %d access points, table %s%s%s\n", scan.count,
+                  tracker().known() ? tableName(tracker().station()) : "?",
+                  tracker().lastCorrected() ? " (set by Wi-Fi)" : "", tracker().known() ? "" : ", unknown");
+    if (tracker().lastCorrected()) showNotice("STOL USTALONY PRZEZ WI-FI", now);
+    weblink::publishLine(tracker());
+  }
+  if (tracker().newTransit()) {
+    const line::Transit &t = tracker().transit(tracker().transitCount() - 1);
+    Serial.printf("transit %lu: table %s -> %s, %.2f m at %+.0f deg, %.1f s, ramp %.2f m/s2, vib rms %.2f %.2f %.2f m/s2\n",
+                  (unsigned long)t.id, tableName(t.from), tableName(t.to), t.distance, t.floorDeg, t.durationS, t.ramp, t.rms[0],
+                  t.rms[1], t.rms[2]);
+    weblink::publishTransit(t);
+    weblink::publishLine(tracker());
+  }
+  if (tracker().newTurn()) {
+    Serial.printf("line: turned %+.0f deg (turntable), heading %+.0f deg\n", tracker().lastTurn() * 57.29578f,
+                  tracker().heading() * 57.29578f);
+    showNotice(tracker().lastTurn() > 0 ? "OBROT W LEWO" : "OBROT W PRAWO", now);
+  }
+  if (tracker().learnedChanged()) saveLearned();
+}
+// Gyro screen: newest rate (rad/s), smoothed readout and angle since zeroing (deg).
+Accel latestGyro{}, gyroShown{}, gyroAngle{};
+uint32_t gyroUs = 0;
+bool gyroPrimed = false;
 float spectrum[fftSize / 2 + 1];
 // Feather 5483 carries a MAX17048 (newer) or LC709203F (older) fuel gauge.
 enum class Gauge { None, Max17048, Lc709203f };
@@ -78,7 +177,7 @@ struct BatteryInfo { Gauge gauge = Gauge::None; bool valid = false; float volts 
 BatteryInfo battery;
 portMUX_TYPE batteryMux = portMUX_INITIALIZER_UNLOCKED;
 enum class Kind { Sample, Connecting, Waiting };
-struct Event { Kind kind; uint32_t ms; uint32_t us; Accel value; };
+struct Event { Kind kind; uint32_t ms; uint32_t us; Accel value, gyro; };
 QueueHandle_t events;
 std::atomic<uint32_t> dropped{0};
 bool paused = false, haveSample = false, zeroed = false;
@@ -92,8 +191,8 @@ const char *workerState = "SZUKAM MPU6050";
 uint32_t noticeUntil = 0;
 const char *notice = "";
 
-void emit(Kind kind, Accel value = {}, uint32_t us = 0) {
-  Event event{kind, millis(), us, value};
+void emit(Kind kind, Accel value = {}, uint32_t us = 0, Accel gyro = {}) {
+  Event event{kind, millis(), us, value, gyro};
   if (xQueueSend(events, &event, 0) != pdTRUE) ++dropped;
 }
 
@@ -154,7 +253,7 @@ void IRAM_ATTR onMpuInt() {
 
 // The only task that touches Wire (MPU6050 and the battery gauge). It reads one
 // sample per data-ready interrupt; if INT never fires (wire missing) it falls
-// back to polling every 5 ms so the readout still works.
+// back to polling every 1 ms so the readout still works.
 void sensorTask(void *) {
   bool ready = false, intSeen = false;
   int errors = 0, timeouts = 0;
@@ -172,8 +271,8 @@ void sensorTask(void *) {
                         mpu.whoAmI(), mpu.whoAmI() == 0x68 ? "" : " (clone?)", Mpu6050::kSampleRateHz);
           // INT is latched: one read clears it, so the first data-ready after
           // attaching is a clean rising edge.
-          Accel discard;
-          mpu.read(discard);
+          Accel discard, discardGyro;
+          mpu.read(discard, discardGyro);
           ulTaskNotifyTake(pdTRUE, 0); // Drop stale notifications.
           attachInterrupt(mpuIntPin, onMpuInt, RISING);
           ready = true;
@@ -189,7 +288,7 @@ void sensorTask(void *) {
       vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
-    const uint32_t waitMs = intSeen ? 100 : timeouts >= 2 ? 5 : 50;
+    const uint32_t waitMs = intSeen ? 100 : timeouts >= 2 ? 1 : 50;
     const bool signalled = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs)) > 0;
     uint32_t us = micros();
     if (signalled) {
@@ -200,12 +299,12 @@ void sensorTask(void *) {
     } else if (intSeen || ++timeouts == 2) {
       intSeen = false;
       timeouts = 2;
-      Serial.println("MPU6050: no INT (check INT -> A5); polling every 5 ms instead");
+      Serial.println("MPU6050: no INT (check INT -> A5); polling every 1 ms instead");
     }
-    Accel a;
-    if (mpu.read(a)) {
+    Accel a, w;
+    if (mpu.read(a, w)) {
       errors = 0;
-      emit(Kind::Sample, a, us);
+      emit(Kind::Sample, a, us, w);
     } else if (++errors >= 20) {
       detachInterrupt(mpuIntPin);
       ready = false;
@@ -280,6 +379,29 @@ void pollButton(uint32_t now) {
             tareSet = true;
             showNotice("TARA USTAWIONA", now);
           } else showNotice("BRAK DANYCH", now);
+        } else {
+          nextScreen();
+        }
+      } else if (screen == LineScreen) {
+        if (duration >= 1000) {
+          tracker().home();
+          showNotice("DETAL NA STOLE 1", now);
+          weblink::publishLine(tracker());
+        } else {
+          nextScreen();
+        }
+      } else if (screen == GyroScreen) {
+        if (duration >= 1000) {
+          gyroAngle = {};
+          showNotice("KAT WYZEROWANY", now);
+        } else {
+          nextScreen();
+        }
+      } else if (screen == DispScreen || screen == DispPlot || screen == DispPath) {
+        if (duration >= 1000) {
+          displacement().resetTotal();
+          movesLogged = 0;
+          showNotice("SUMA WYZEROWANA", now);
         } else {
           nextScreen();
         }
@@ -453,6 +575,115 @@ void drawStrokes(uint32_t now) {
   canvas.setTextColor(muted);
   canvas.printf("prog %.2f m/s   szczyt %.2f m/s", strokes.threshold(), strokes.envelope());
 }
+// Tables as boxes along the line, the part as a marker between them.
+void drawLine(uint32_t now) {
+  drawHeader(now, "LINIA", ST77XX_WHITE);
+  const int n = tracker().learned.stations;
+  const auto phase = tracker().phase();
+  const bool moving = phase == line::Tracker::Phase::Moving && !tracker().arrived();
+  canvas.setTextSize(3);
+  canvas.setCursor(0, 14);
+  if (!fresh(now)) {
+    canvas.setTextSize(1);
+    label(0, 18, ST77XX_YELLOW, workerState);
+  } else if (tracker().carrying() && !tracker().arrived()) {
+    canvas.setTextColor(ST77XX_YELLOW);
+    canvas.print("NIESIONY");
+  } else if (!tracker().known()) {
+    canvas.setTextColor(ST77XX_YELLOW);
+    canvas.print(tracker().lost() == line::Tracker::Lost::Carried ? "PRZENIES." : "STOL ?");
+  } else if (moving) {
+    canvas.setTextColor(ST77XX_YELLOW);
+    canvas.printf("%d>%d", tracker().station() + 1, tracker().station() + 1 + tracker().direction());
+  } else {
+    canvas.setTextColor(ST77XX_WHITE);
+    canvas.printf("STOL %d", (tracker().arrived() ? int(lroundf(tracker().position())) : tracker().station()) + 1);
+  }
+  canvas.setTextSize(1);
+  canvas.setCursor(150, 16);
+  canvas.setTextColor(muted);
+  canvas.printf("z %d stolow", n);
+  canvas.setCursor(150, 28);
+  if (moving) canvas.printf("%.1f m", tracker().liveDistance());
+  else if (phase != line::Tracker::Phase::Settling) {
+    const int s = int(tracker().phaseS());
+    canvas.printf("postoj %d:%02d", s / 60, s % 60);
+  }
+  // Heading on the floor (0 = as at table 1) and a turn in progress.
+  canvas.setCursor(150, 40);
+  if (tracker().turning()) {
+    canvas.setTextColor(ST77XX_YELLOW);
+    canvas.printf("obrot %+.0f st", tracker().turnSoFar() * 57.29578f);
+  } else if (tracker().headingKnown()) {
+    canvas.setTextColor(muted);
+    canvas.printf("kurs %+.0f st", tracker().heading() * 57.29578f);
+  }
+  // Track: tables evenly spread, the part at its fractional position.
+  const int y = 58, x0 = 10, x1 = 230;
+  canvas.drawFastHLine(x0, y + 10, x1 - x0, muted);
+  const float span = float(x1 - x0) / (n - 1);
+  for (int s = 0; s < n; ++s) {
+    const int x = x0 + int(lroundf(s * span));
+    const bool here = tracker().known() && !moving && s == tracker().station();
+    const bool fp = tracker().learned.fp[s].count > 0;
+    canvas.fillRect(x - 8, y, 17, 9, here ? ST77XX_GREEN : (fp ? grid : bg));
+    canvas.drawRect(x - 8, y, 17, 9, here ? ST77XX_GREEN : muted);
+    if (n <= 10 || s % 2 == 0) {
+      canvas.setCursor(x - (s >= 9 ? 5 : 2), y + 14);
+      canvas.setTextColor(here ? ST77XX_GREEN : muted);
+      canvas.printf("%d", s + 1);
+    }
+  }
+  if (tracker().known() && fresh(now)) {
+    const int px = x0 + int(lroundf(tracker().position() * span));
+    const uint16_t c = moving ? ST77XX_YELLOW : ST77XX_WHITE;
+    canvas.fillTriangle(px - 6, y - 12, px + 6, y - 12, px, y - 3, c);
+  }
+  // Wi-Fi fingerprint progress.
+  canvas.setCursor(0, 92);
+  const float wait = tracker().untilPark();
+  if (wifiscan::busy()) label(0, 92, ST77XX_YELLOW, "skan Wi-Fi (odcisk stolu)...");
+  else if (wait >= 0) {
+    canvas.setTextColor(muted);
+    canvas.printf("odcisk Wi-Fi za %.0f s", ceilf(wait));
+  } else {
+    int fps = 0;
+    for (int s = 0; s < n; ++s) fps += tracker().learned.fp[s].count > 0;
+    canvas.setTextColor(muted);
+    canvas.printf("odciski Wi-Fi %d/%d  przejazdy %d%s", fps, n, tracker().transitCount(),
+                  tracker().lastCorrected() ? "  stol z Wi-Fi" : "");
+  }
+  // Ride detector against its threshold, which follows the shaking.
+  canvas.setCursor(0, 106);
+  const bool over = tracker().activity() > tracker().startThreshold();
+  canvas.setTextColor(over ? ST77XX_YELLOW : muted);
+  canvas.printf("ruch %.3f / prog %.3f m/s  drg %.2f", tracker().activity(), tracker().startThreshold(),
+                tracker().shaking());
+}
+void drawWeb(uint32_t now) {
+  drawHeader(now, "WYKRESY W PRZEGLADARCE", ST77XX_WHITE);
+  label(0, 18, muted, "1. Polacz sie z siecia Wi-Fi:");
+  canvas.setTextSize(2);
+  canvas.setTextColor(ST77XX_WHITE);
+  canvas.setCursor(0, 30);
+  canvas.print(weblink::ssid);
+  canvas.setTextSize(1);
+  canvas.setCursor(0, 50);
+  canvas.setTextColor(muted);
+  canvas.print("haslo: ");
+  canvas.setTextColor(ST77XX_WHITE);
+  canvas.print(weblink::password);
+  label(0, 68, muted, "2. Otworz w przegladarce:");
+  canvas.setTextSize(2);
+  canvas.setTextColor(ST77XX_GREEN);
+  canvas.setCursor(0, 80);
+  canvas.printf("http://%s", weblink::address());
+  canvas.setTextSize(1);
+  canvas.setCursor(0, 106);
+  const int n = weblink::clients();
+  canvas.setTextColor(n ? ST77XX_GREEN : muted);
+  if (n) canvas.printf("otwarte strony: %d", n); else canvas.print("brak otwartych stron");
+}
 void drawBattery(uint32_t now) {
   drawHeader(now, "AKUMULATOR", ST77XX_WHITE);
   BatteryInfo b;
@@ -514,6 +745,27 @@ void drawAccel(uint32_t now) {
   drawAccelScreen(canvas, state);
 }
 
+// Rates without the offset measured at rest, smoothed like the XYZ readout.
+void drawGyro(uint32_t now) {
+  GyroScreenState state;
+  state.live = fresh(now);
+  if (state.live) {
+    const float k = 0.3f, toDeg = 1 / mpu6050::kRadPerDeg;
+    const Accel b = displacement().gyroBias();
+    const Accel in{(latestGyro.x - b.x) * toDeg, (latestGyro.y - b.y) * toDeg, (latestGyro.z - b.z) * toDeg};
+    gyroShown = {gyroShown.x + k * (in.x - gyroShown.x), gyroShown.y + k * (in.y - gyroShown.y),
+                 gyroShown.z + k * (in.z - gyroShown.z)};
+  }
+  state.rate = gyroShown;
+  state.angle = gyroAngle;
+  state.biasKnown = displacement().biasKnown();
+  state.rateHz = actualHz;
+  state.status = workerState;
+  state.screenPos = screenPos;
+  state.screenCount = screenCount;
+  drawGyroScreen(canvas, state);
+}
+
 NavScreenState navState(uint32_t now) {
   NavScreenState n;
   n.progress = positioning.getCalibrationProgress();
@@ -541,13 +793,35 @@ void draw(uint32_t now) {
     return;
   }
   canvas.fillScreen(bg);
+  const bool dispScreen = screen == DispScreen || screen == DispPlot || screen == DispPath;
   if (screen == TimeScreen) drawTime(now);
+  else if (screen == LineScreen) drawLine(now);
   else if (screen == AccelScreen) drawAccel(now);
+  else if (screen == GyroScreen) drawGyro(now);
+  else if (dispScreen) {
+    DisplacementScreenState state;
+    state.meter = &displacement();
+    state.live = fresh(now);
+    state.status = workerState;
+    state.rateHz = actualHz;
+    state.screenPos = screenPos;
+    state.screenCount = screenCount;
+    if (screen == DispScreen) drawDisplacementScreen(canvas, state);
+    else if (screen == DispPlot) drawDisplacementPlot(canvas, state);
+    else drawDisplacementPath(canvas, state);
+  }
   else if (screen == StrokeScreen) drawStrokes(now);
   else if (screen == BatteryScreen) drawBattery(now);
+  else if (screen == WebScreen) drawWeb(now);
   else drawSpectrum(now, screen - FftX);
   if (buttonStable && screen == AccelScreen) {
     label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? (tareSet ? "PUSC: WYLACZ TARE" : "PUSC: USTAW TARE") : "PUSC: NASTEPNY EKRAN");
+  } else if (buttonStable && screen == LineScreen) {
+    label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? "PUSC: DETAL NA STOLE 1" : "PUSC: NASTEPNY EKRAN");
+  } else if (buttonStable && screen == GyroScreen) {
+    label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? "PUSC: ZERUJ KAT" : "PUSC: NASTEPNY EKRAN");
+  } else if (buttonStable && dispScreen) {
+    label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? "PUSC: ZERUJ SUME" : "PUSC: NASTEPNY EKRAN");
   } else if (buttonStable && screen == StrokeScreen) {
     label(0, 125, ST77XX_YELLOW, now - buttonDown >= 1000 ? "PUSC: NASTEPNY EKRAN" : "PUSC: SKASUJ LICZNIK");
   } else if (buttonStable) {
@@ -557,6 +831,9 @@ void draw(uint32_t now) {
   } else if (int32_t(noticeUntil - now) > 0)
     label(0, 125, ST77XX_YELLOW, notice);
   else if (screen == AccelScreen) label(0, 125, muted, "BOOT: ekran / 1s: tara");
+  else if (screen == LineScreen) label(0, 125, muted, "BOOT: ekran / 1s: detal na stole 1");
+  else if (screen == GyroScreen) label(0, 125, muted, "BOOT: ekran / 1s: zeruj kat");
+  else if (dispScreen) label(0, 125, muted, "BOOT: ekran / 1s: zeruj sume");
   else if (screen == StrokeScreen) label(0, 125, muted, "BOOT: kasuj / 1s: nastepny ekran");
   else if (!imuEnabled) label(0, 125, muted, "BOOT: nastepny ekran");
   else label(0, 125, muted, "BOOT: ekran / 1s:pauza / 3s:zero");
@@ -589,12 +866,20 @@ void setup() {
   }
   binStart = lastFrame = rateStart = millis();
   draw(millis());
+  prefs.begin("line");
+  loadLearned();
   if (ipsEnabled) positioning.begin();
-  events = xQueueCreate(256, sizeof(Event));
+  else weblink::begin(); // The positioning prototype owns the radio when enabled.
+  events = xQueueCreate(1024, sizeof(Event)); // ~1 s at 1 kHz: rides out a Wi-Fi scan or a slow frame.
   if (!events || xTaskCreate(sensorTask, "MPU6050", 8192, nullptr, 1, &sensorHandle) != pdPASS) {
     workerState = "BLAD PAMIECI / TASK";
+    Serial.printf("sensor task/queue: no memory (internal free %u B)\n",
+                  unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
     return;
   }
+  Serial.printf("memory free: internal %u B (largest %u B), PSRAM %u B\n",
+                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)), unsigned(ESP.getFreePsram()));
 }
 
 void loop() {
@@ -608,20 +893,52 @@ void loop() {
         haveSample = true;
         ++sampleCount;
         workerState = "BRAK DANYCH";
+        latestGyro = e.gyro;
+        // Angle per axis: bias-free rate integrated (exact for a turn about one axis).
+        if (gyroPrimed && uint32_t(e.us - gyroUs) < 50000 && displacement().biasKnown()) {
+          const float dt = (e.us - gyroUs) * 1e-6f / mpu6050::kRadPerDeg;
+          const Accel b = displacement().gyroBias();
+          gyroAngle = {gyroAngle.x + (e.gyro.x - b.x) * dt, gyroAngle.y + (e.gyro.y - b.y) * dt,
+                       gyroAngle.z + (e.gyro.z - b.z) * dt};
+        }
+        gyroUs = e.us;
+        gyroPrimed = true;
+        tracker().add(e.value, e.gyro, e.us); // Full 1 kHz: ride integration and vibration.
+        Accel a = e.value, w = e.gyro;
+        uint32_t us = e.us;
+        if (!slow.add(a, w, us)) continue;  // The rest runs on 200 Hz block means.
+        displacement().add(a, w, us);
+        {
+          const float toDeg = 1 / mpu6050::kRadPerDeg;
+          const Accel b = displacement().gyroBias();
+          weblink::addSample(a, {(w.x - b.x) * toDeg, (w.y - b.y) * toDeg, (w.z - b.z) * toDeg}, us);
+        }
+        if (displacement().moves() != movesLogged) {
+          movesLogged = displacement().moves();
+          weblink::publishMove(displacement());
+          const auto &mv = displacement().last();
+          Serial.printf("move %lu: dx=%+.1f dy=%+.1f dz=%+.1f cm, %.2f s, vmax %.2f m/s, turn %.1f deg%s\n",
+                        (unsigned long)movesLogged, 100 * mv.d[0], 100 * mv.d[1], 100 * mv.d[2],
+                        mv.durationS, mv.peakSpeed, mv.rotationDeg, mv.tilted ? ", TILTED" : "");
+        }
         if (imuEnabled) {
           strokes.setBiasTau(1.0f); // Plain accelerometer: gravity must be filtered out.
-          strokes.add(e.value, e.us);
+          strokes.add(a, us);
           if (!paused) {
-            history.add(e.value);
+            history.add(a);
             // A gap in reports would smear the spectrum: start a new window.
-            if (window.size() && uint32_t(e.us - window.newestUs()) > fftGapMs * 1000)
+            if (window.size() && uint32_t(us - window.newestUs()) > fftGapMs * 1000)
               window.clear();
-            window.add(e.value, e.us);
+            window.add(a, us);
           }
         }
       } else {
         history.discardPending();
         strokes.breakSignal();
+        displacement().breakSignal();
+        tracker().breakSignal();
+        slow.clear();
+        gyroPrimed = false;
         haveSample = false;
         workerState = e.kind == Kind::Connecting ? "LACZENIE MPU6050" : "BRAK MPU6050 (I2C 0x68/0x69)";
       }
@@ -630,6 +947,37 @@ void loop() {
   uint32_t now = millis();
   advanceTo(now);
   pollButton(now);
+  serviceLine(now);
+  weblink::loop(now, displacement(), tracker(), actualHz, fresh(now), wifiscan::busy());
+  int arg = 0;
+  switch (weblink::takeCommand(arg)) {
+    case weblink::Command::ResetTotals:
+      displacement().resetTotal();
+      movesLogged = 0;
+      showNotice("SUMA WYZEROWANA ZE STRONY", now);
+      break;
+    case weblink::Command::Home:
+      tracker().home();
+      showNotice("STOL 1 USTAWIONY ZE STRONY", now);
+      weblink::publishLine(tracker());
+      break;
+    case weblink::Command::Stations:
+      tracker().setStations(arg);
+      saveLearned();
+      weblink::publishLine(tracker());
+      break;
+    case weblink::Command::ForgetWifi:
+      tracker().forgetWifi();
+      saveLearned();
+      weblink::publishLine(tracker());
+      break;
+    case weblink::Command::ForgetAll:
+      tracker().forgetAll();
+      saveLearned();
+      weblink::publishLine(tracker());
+      break;
+    case weblink::Command::None: break;
+  }
   // Scan only while the map is shown (or a calibration runs from it).
   if (ipsEnabled) {
     if (screen == NavScreen) positioning.startPositioning();
@@ -643,7 +991,13 @@ void loop() {
     Serial.printf("rate=%.1f Hz, drops=%lu, state=%s\n",
                   actualHz, (unsigned long)dropped.load(), fresh(now) ? "live" : workerState);
     if (fresh(now))
+    {
       Serial.printf("accel_xyz=%.3f,%.3f,%.3f m/s2\n", latest.x, latest.y, latest.z);
+      const float toDeg = 1 / mpu6050::kRadPerDeg;
+      const Accel b = displacement().gyroBias();
+      Serial.printf("gyro_xyz=%.2f,%.2f,%.2f deg/s (bias %.2f,%.2f,%.2f)\n", latestGyro.x * toDeg,
+                    latestGyro.y * toDeg, latestGyro.z * toDeg, b.x * toDeg, b.y * toDeg, b.z * toDeg);
+    }
   }
   if (uint32_t(now - lastFrame) >= binMs) { lastFrame = now; draw(now); }
   delay(1);
