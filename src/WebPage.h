@@ -74,20 +74,12 @@ body {
 .state.moving { color: var(--amber); font-weight: 600; }
 .state.alert { color: var(--warn); }
 
-.tools { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; padding: 0 0 12px; }
-.seg { display: inline-flex; border: 1px solid var(--grid-major); border-radius: 4px; overflow: hidden; }
-.seg button { border: 0; border-right: 1px solid var(--grid-major); border-radius: 0; }
-.seg button:last-child { border-right: 0; }
-.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 button {
   font: inherit; font-stretch: inherit; color: var(--ink); background: var(--paper);
   border: 1px solid var(--grid-major); border-radius: 4px; padding: 6px 12px; cursor: pointer;
 }
 button:hover { background: color-mix(in srgb, var(--paper) 80%, var(--grid-major)); }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-label.check { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
-input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--ink); margin: 0; }
-.tools .hint { color: var(--ink-soft); }
 
 /* Chart paper. */
 .sheet { background: var(--paper); border: 1px solid var(--edge); border-radius: 3px; margin-bottom: 14px; }
@@ -263,14 +255,6 @@ footer { color: var(--ink-soft); padding-top: 6px; }
     </div>
   </section>
 
-  <div class="tools">
-    <div class="seg" role="group" aria-label="Długość okna">
-      <button data-win="5">5 s</button><button data-win="10" aria-pressed="true">10 s</button><button data-win="30">30 s</button>
-    </div>
-    <button id="pause">Wstrzymaj</button>
-    <label class="check"><input type="checkbox" id="dc"> Pokaż same drgania (bez grawitacji i offsetu)</label>
-  </div>
-
   <section class="sheet" id="move">
     <header><h2>Ostatni ruch</h2><span class="unit" id="moveNo"></span></header>
     <div class="move-body">
@@ -332,19 +316,6 @@ function setupCanvas(cv) {
   return { ctx, w: r.width, h: r.height };
 }
 
-let win = 10, paused = false, removeDc = false, frozenAt = 0, latestT = 0;
-
-document.querySelectorAll("[data-win]").forEach(b => b.addEventListener("click", () => {
-  win = +b.dataset.win;
-  document.querySelectorAll("[data-win]").forEach(o => o.setAttribute("aria-pressed", o === b));
-}));
-const pauseBtn = document.getElementById("pause");
-pauseBtn.addEventListener("click", () => {
-  paused = !paused; frozenAt = latestT;
-  pauseBtn.textContent = paused ? "Wznów" : "Wstrzymaj";
-});
-document.getElementById("dc").addEventListener("change", e => { removeDc = e.target.checked; });
-
 // Connection.
 let ws = null, lastMsg = 0, sampleT = 0;
 const linkEl = document.getElementById("link"), linkText = document.getElementById("linkText");
@@ -373,7 +344,6 @@ function onSamples(m) {
   for (const r of m.r) {
     sampleT += (r[0] > 0 && r[0] < 100000 ? r[0] : 5000) / 1e6;
   }
-  latestT = sampleT;
   meterState = m.st;
   // The bar shows the line: standing, riding or turning.
   const ln = m.ln;
