@@ -23,6 +23,7 @@
 #include "indoor_positioning/IndoorPositioning.h"
 #include "NavigationScreen.h"
 #include "UiTheme.h"
+#include "UsbStorage.h"
 
 namespace {
 // MPU6050 accelerometer on I2C (SDA = GPIO42, SCL = GPIO41, the Feather's own
@@ -863,6 +864,17 @@ void setup() {
     tft.setTextColor(ST77XX_RED);
     tft.print("Brak RAM dla wykresu");
     while (true) delay(1000);
+  }
+  if (storage::begin()) {
+    line::StationConfig cfg;
+    if (storage::readConfig(cfg)) {
+      tracker().applyStationConfig(cfg);
+      Serial.println("config.csv: loaded, CSV is authoritative");
+    } else {
+      Serial.println("config.csv: not found or invalid, auto-learning as before");
+    }
+  } else {
+    Serial.println("USB storage: FFat.begin failed");
   }
   binStart = lastFrame = rateStart = millis();
   draw(millis());
