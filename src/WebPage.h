@@ -687,6 +687,26 @@ $("reset").addEventListener("click", () => {
 
 // ---- Line: tables, the car, Wi-Fi fingerprints ----
 const SVGNS = "http://www.w3.org/2000/svg";
+// Station positions in METRES, station 0 at the origin (no pixel scale
+// applied here — the caller scales for drawing). `gaps[i]` is the
+// distance (m) from station i to i+1, `gdirDeg[i]` its floor direction in
+// degrees CCW (0 = +X), or null when not yet known — treated as 0 deg,
+// which reproduces today's straight horizontal line exactly (no special
+// fallback branch: CSV-authoritative and auto-learned gdir use this same
+// formula).
+function stationPositions(gaps, gdirDeg) {
+  const pos = [{ x: 0, y: 0 }];
+  for (let i = 0; i < gaps.length; i++) {
+    const deg = gdirDeg[i] ?? 0;
+    const rad = deg * Math.PI / 180;
+    const prev = pos[i];
+    pos.push({
+      x: prev.x + gaps[i] * Math.cos(rad),
+      y: prev.y + gaps[i] * Math.sin(rad), // CCW-positive => +Y in this metres-space (Task 2 flips for SVG's y-down screen).
+    });
+  }
+  return pos;
+}
 function el(tag, attrs, parent) {
   const e = document.createElementNS(SVGNS, tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]);
