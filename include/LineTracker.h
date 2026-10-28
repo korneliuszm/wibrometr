@@ -423,6 +423,11 @@ public:
   }
   int direction() const { return phase_ == Phase::Moving ? direction(flat(p_)) : 0; }
   float gap(int i) const { return learned.gap[i] > 0 ? learned.gap[i] : 0; }
+  // Largest RMS vibration (m/s2, high-passed) recorded on any ride that
+  // arrived at station `s`, per axis (0=X,1=Y,2=Z). 0 until a ride arrives.
+  float stationVib(int s, int axis) const {
+    return s >= 0 && s < maxStations && axis >= 0 && axis < 3 ? stationVibMax_[s][axis] : 0;
+  }
   const Fingerprint &lastScan() const { return lastScan_; }
   float score(int s) const { return score_[s]; }
   bool lastCorrected() const { return corrected_; }
@@ -508,6 +513,7 @@ private:
   bool binOpen_ = false;
   Fingerprint lastScan_{};
   float score_[maxStations] = {};
+  float stationVibMax_[maxStations][3] = {};
   bool configAuthoritative_ = false;
   StationRow stationRow_[maxStations];
   static float directionAngle(Direction d) {
@@ -920,6 +926,7 @@ private:
         t.rms[i] = n_ ? float(std::sqrt(sq_[i] / n_)) : 0;
         t.peak[i] = peak_[i];
       }
+      if (known_) for (int i = 0; i < 3; ++i) stationVibMax_[station_][i] = std::max(stationVibMax_[station_][i], t.rms[i]);
       // Up to the stop only, merged down to `envBins`.
       int used = int(T / (workBinS * perBin_)) + 1;
       used = used > work_ ? work_ : used;

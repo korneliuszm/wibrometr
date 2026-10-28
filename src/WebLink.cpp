@@ -184,6 +184,10 @@ void publishLine(const line::Tracker &t) {
     if (t.learned.gapDirKnown[i]) n += snprintf(lineText + n, room - n, "%s%.1f", i ? "," : "", t.learned.gapDir[i] * 57.29578f);
     else n += snprintf(lineText + n, room - n, "%snull", i ? "," : "");
   }
+  n += snprintf(lineText + n, room - n, "],\"vib\":[");
+  for (int s = 0; s < stations; ++s)
+    n += snprintf(lineText + n, room - n, "%s[%.3f,%.3f,%.3f]", s ? "," : "",
+                  t.stationVib(s, 0), t.stationVib(s, 1), t.stationVib(s, 2));
   n += snprintf(lineText + n, room - n, "],\"fp\":[");
   for (int s = 0; s < stations && n < room - 600; ++s) {
     if (s) lineText[n++] = ',';

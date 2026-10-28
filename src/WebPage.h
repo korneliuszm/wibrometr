@@ -147,6 +147,7 @@ button.quiet:hover { color: var(--warn); background: transparent; }
 .st-empty { fill: var(--ink-soft); font-size: 11px; }
 .st-bar { fill: var(--ink-soft); opacity: 0.55; }
 .st.here .st-bar { fill: var(--ink); opacity: 0.85; }
+.vib-bar { opacity: 0.9; }
 .band { fill: var(--grid-major); }
 .rollers { stroke: var(--ink-soft); stroke-width: 6; stroke-dasharray: 2 9; }
 .dim { stroke: var(--ink-soft); stroke-width: 1; }
@@ -847,6 +848,22 @@ function renderTables() {
       const h = Math.max(1.5, (v + 95) / 65 * 32);
       el("rect", { class: "st-bar", x: x0 + i * bw + 0.3, y: 152 - h, width: Math.max(1, bw - 0.6), height: h }, r.bars);
     });
+    const VIB_SCALE = 2.0; // m/s2 RMS at "full bar" — placeholder ceiling, retune from real recordings.
+    // ponytail: VIB_SCALE is a hardcoded constant, not computed from data —
+    // the spec explicitly says thresholds aren't established yet; retune this
+    // one number once real transit RMS values are in from real hardware runs,
+    // no code change needed elsewhere since every tile reads the same constant.
+    const vib = (lineInfo.vib && lineInfo.vib[s]) || [0, 0, 0];
+    const vibColors = ["var(--x)", "var(--y)", "var(--z)"];
+    const { p } = r; // Per-table position stored on refs.st[s].p since Task 2.
+    const bw2 = 6, gap2 = 2, x0b = p.x - (bw2 * 3 + gap2 * 2) / 2;
+    vib.forEach((v, i) => {
+      const h = Math.max(1, Math.min(28, (v / VIB_SCALE) * 28));
+      el("rect", { class: "vib-bar", x: x0b + i * (bw2 + gap2), y: p.y + 30 - h, width: bw2, height: h, fill: vibColors[i] }, r.bars);
+    });
+    const maxVib = Math.max(...vib) / VIB_SCALE;
+    r.g.querySelector(".st-frame").setAttribute("fill",
+      `color-mix(in srgb, var(--paper) ${Math.round(100 - Math.min(1, maxVib) * 70)}%, var(--warn))`);
   });
   refs.dims.forEach((t, i) => {
     const g = lineInfo.gaps[i] || 0;

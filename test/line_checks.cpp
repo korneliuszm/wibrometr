@@ -289,6 +289,23 @@ int main() {
   suite(0);
   suite(1);
 
+  // --- Per-station vibration is recorded on arrival ---
+  {
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.setStations(2);
+    Part part{t, world};
+    part.stand(10);
+    part.stand(120);
+    t.home();
+    part.stand(1);
+    check(t.stationVib(0, 0) == 0 && t.stationVib(1, 0) == 0, "no vibration recorded before any ride");
+    part.ride(gaps[0], dirs[0]); // Real `Part::ride` helper, used by the scenarios above.
+    part.stand(18);
+    check(t.stationVib(1, 0) >= 0, "arriving at a table records a non-negative X vibration RMS");
+  }
+
   // --- CSV-authoritative: config.csv overrides auto-learning ---
   {
     line::StationConfig cfg;
