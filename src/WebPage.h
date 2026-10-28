@@ -717,8 +717,19 @@ const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;",
 const macShort = b => b.slice(6).match(/../g).join(":");
 const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const similarity = dB => (dB >= 0 ? Math.max(0, Math.min(1, 1 - dB / 25)) : 0); // Mean |ΔRSSI| to 0..1.
-const U = 140, M = 80, H = 214, ROAD = 104; // Table spacing, margin, height, top of the rollers.
-const sx = s => M + s * U;
+const M = 80, TABLE_H = 128, TABLE_W = 92; // Table box size, px; unchanged from today's frame.
+const SCALE = 14; // px per metre.
+let stationPos = [{ x: 0, y: 0 }]; // Recomputed in buildScene() from lineInfo.
+function pos(s) { return stationPos[Math.max(0, Math.min(stationPos.length - 1, s))]; }
+// Fractional station index -> 2D point, for the car's live position.
+function posAt(t) {
+  const a = pos(Math.floor(t)), b = pos(Math.ceil(t)), f = t - Math.floor(t);
+  return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
+}
+function segDeg(s) { // Floor direction (deg) of the segment ahead of station s, for car rotation.
+  const gdir = (lineInfo && lineInfo.gdir && lineInfo.gdir[s]) ?? 0;
+  return gdir;
+}
 const scene = $("scene");
 let lineInfo = null, lst = null, selected = -1, sceneN = 0, refs = {};
 let carX = null, carDir = 1, wheelAngle = 0, rollerShift = 0, lastFrameTs = 0;
@@ -726,35 +737,50 @@ let carX = null, carDir = 1, wheelAngle = 0, rollerShift = 0, lastFrameTs = 0;
 function buildScene(n) {
   sceneN = n;
   scene.innerHTML = "";
-  const W = 2 * M + U * (n - 1);
-  scene.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const gaps = lineInfo ? lineInfo.gaps.slice(0, n - 1) : new Array(Math.max(0, n - 1)).fill(0);
+  const gdir = lineInfo ? lineInfo.gdir.slice(0, n - 1) : new Array(Math.max(0, n - 1)).fill(null);
+  const metresPos = stationPositions(gaps.map(g => g > 0 ? g : 6.5), gdir);
+  // IMPORTANT: Y is negated here (M - ...), not added — stationPositions()
+  // returns standard math CCW metres (same convention as arrow()/needle
+  // rotation), but SVG y grows downward, so the sign must flip here or the
+  // whole layout renders mirrored vs. the car's needle/compass.
+  stationPos = metresPos.map(p => ({ x: M + p.x * SCALE, y: M - p.y * SCALE }));
+  const xs = stationPos.map(p => p.x), ys = stationPos.map(p => p.y);
+  const pad = Math.max(TABLE_W, TABLE_H) / 2 + 50; // Room for table frames and the car sprite above them.
+  const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
+  const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
+  scene.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
   refs = { st: [], dims: [], match: [] };
   // Tables: frames the line runs through; each carries its Wi-Fi barcode.
   for (let s = 0; s < n; s++) {
+    const p = stationPos[s];
     const g = el("g", { class: "st" }, scene);
-    el("rect", { class: "st-frame", x: sx(s) - 46, y: 30, width: 92, height: 128, rx: 4 }, g);
-    el("text", { class: "st-name", x: sx(s) - 38, y: 50 }, g).textContent = `Stół ${s + 1}`;
+    el("rect", { class: "st-frame", x: p.x - TABLE_W / 2, y: p.y - TABLE_H / 2, width: TABLE_W, height: TABLE_H, rx: 4 }, g);
+    el("text", { class: "st-name", x: p.x - TABLE_W / 2 + 8, y: p.y - TABLE_H / 2 + 20 }, g).textContent = `Stół ${s + 1}`;
     const bars = el("g", { class: "st-bars" }, g);
-    const empty = el("text", { class: "st-empty", x: sx(s), y: 142, "text-anchor": "middle" }, g);
+    const empty = el("text", { class: "st-empty", x: p.x, y: p.y + 12, "text-anchor": "middle" }, g);
     empty.textContent = "bez odcisku";
     g.addEventListener("click", () => { selected = selected === s ? -1 : s; renderFingerprint(); markTables(); });
-    refs.st.push({ g, bars, empty });
+    refs.st.push({ g, bars, empty, p });
   }
-  // Roller conveyor.
-  el("rect", { class: "band", x: 10, y: ROAD, width: W - 20, height: 10, rx: 5 }, scene);
-  refs.rollers = el("line", { class: "rollers", x1: 14, y1: ROAD + 5, x2: W - 14, y2: ROAD + 5 }, scene);
-  // Spacings as dimension lines.
+  // Roller conveyor: one short band + dimension line per segment, each
+  // rotated to that segment's floor direction (today's single straight
+  // band only worked because the line was always drawn straight).
   for (let s = 0; s < n - 1; s++) {
-    const y = 178, a = sx(s) + 4, b = sx(s + 1) - 4;
-    el("line", { class: "dim", x1: a, y1: y, x2: b, y2: y }, scene);
-    el("line", { class: "dim", x1: a, y1: y - 5, x2: a, y2: y + 5 }, scene);
-    el("line", { class: "dim", x1: b, y1: y - 5, x2: b, y2: y + 5 }, scene);
-    refs.dims.push(el("text", { class: "dim-text", x: (a + b) / 2, y: y - 6, "text-anchor": "middle" }, scene));
+    const a = stationPos[s], b = stationPos[s + 1];
+    const deg = segDeg(s);
+    el("line", { class: "rollers", x1: a.x, y1: a.y, x2: b.x, y2: b.y }, scene);
+    el("rect", { class: "band", x: a.x - 5, y: a.y - 5, width: Math.hypot(b.x - a.x, b.y - a.y) + 10, height: 10,
+                 rx: 5, transform: `rotate(${-deg} ${a.x} ${a.y})` }, scene);
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    refs.dims.push(el("text", { class: "dim-text", x: mid.x, y: mid.y - 10, "text-anchor": "middle",
+                                transform: `rotate(${-deg} ${mid.x} ${mid.y})` }, scene));
   }
   // How much the last scan looks like each table.
   for (let s = 0; s < n; s++) {
-    el("rect", { class: "match", x: sx(s) - 30, y: 197, width: 60, height: 6, rx: 3 }, scene);
-    refs.match.push(el("rect", { class: "match-fill", x: sx(s) - 30, y: 197, width: 0, height: 6, rx: 3 }, scene));
+    const p = stationPos[s];
+    el("rect", { class: "match", x: p.x - 30, y: p.y + 40, width: 60, height: 6, rx: 3 }, scene);
+    refs.match.push(el("rect", { class: "match-fill", x: p.x - 30, y: p.y + 40, width: 0, height: 6, rx: 3 }, scene));
   }
   // The part: a small car on the rollers; above it the stop timer or Wi-Fi.
   const car = el("g", { class: "car" }, scene);
@@ -814,7 +840,7 @@ function renderTables() {
     r.empty.style.display = fp.length ? "none" : "";
     r.bars.innerHTML = "";
     if (!fp.length) return;
-    const map = new Map(fp), x0 = sx(s) - 40, bw = 80 / Math.max(order.length, 1);
+    const map = new Map(fp), x0 = pos(s).x - 40, bw = 80 / Math.max(order.length, 1);
     order.forEach((b, i) => {
       const v = map.get(b);
       if (v === undefined) return;
@@ -957,14 +983,15 @@ function animateLine(ts) {
   const dt = lastFrameTs ? Math.min(0.1, (ts - lastFrameTs) / 1000) : 0;
   lastFrameTs = ts;
   if (!refs.car || !lst) return;
-  const target = sx(Math.max(0, Math.min(sceneN - 1, lst.pos)));
+  const target = posAt(Math.max(0, Math.min(sceneN - 1, lst.pos)));
   const before = carX ?? target;
-  carX = carX === null || reduceMotion ? target : carX + (target - carX) * Math.min(1, dt * 4);
-  const dx = carX - before, moving = lst.ph === "move" && !lst.arr;
+  const k = Math.min(1, dt * 4);
+  carX = carX === null || reduceMotion ? target : { x: before.x + (target.x - before.x) * k, y: before.y + (target.y - before.y) * k };
+  const dx = Math.hypot(carX.x - before.x, carX.y - before.y), moving = lst.ph === "move" && !lst.arr;
   if (moving && lst.dir) carDir = lst.dir;
   wheelAngle += dx / 7.5 * 57.3;
   rollerShift -= dx;
-  refs.car.setAttribute("transform", `translate(${carX.toFixed(1)},${ROAD})`);
+  refs.car.setAttribute("transform", `translate(${carX.x.toFixed(1)},${carX.y.toFixed(1)}) rotate(${-segDeg(Math.floor(lst.pos))})`);
   refs.body.setAttribute("transform", carDir < 0 ? "scale(-1,1)" : "");
   refs.wheels.forEach(h => h.setAttribute("transform", `rotate(${wheelAngle.toFixed(1)})`));
   refs.rollers.style.strokeDashoffset = rollerShift.toFixed(1);
