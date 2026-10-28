@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <string>
 #include "LineTracker.h"
 
 namespace {
@@ -287,5 +288,76 @@ void suite(float shake) {
 int main() {
   suite(0);
   suite(1);
+
+  // --- Per-station vibration is recorded on arrival ---
+  {
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.setStations(2);
+    Part part{t, world};
+    part.stand(10);
+    part.stand(120);
+    t.home();
+    part.stand(1);
+    check(t.stationVib(0, 0) == 0 && t.stationVib(1, 0) == 0, "no vibration recorded before any ride");
+    part.ride(gaps[0], dirs[0]); // Real `Part::ride` helper, used by the scenarios above.
+    part.stand(18);
+    check(t.stationVib(1, 0) >= 0, "arriving at a table records a non-negative X vibration RMS");
+  }
+
+  // --- CSV-authoritative: config.csv overrides auto-learning ---
+  {
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "ST01,X+,10,false,true,none,,,\n"
+      "ST02,X+,10,false,true,none,,,\n"; // CSV says 10 m; the simulated ride below is only 6 m.
+    check(line::parseStationConfig(text, cfg), "setup: config parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    check(t.configAuthoritative(), "tracker reports CSV-authoritative after applyStationConfig");
+    check(std::fabs(t.gap(0) - 10.0f) < 1e-3f, "gap(0) comes from CSV, not default");
+    Part part{t, world};
+    part.stand(10); // Settle into Parked.
+    t.home();
+    part.stand(1);
+    part.ride(gaps[0], dirs[0]); // Real `Part::ride` helper; the scenarios' 6 m synthetic gap.
+    part.stand(18);
+    check(std::fabs(t.gap(0) - 10.0f) < 1e-3f,
+          "gap(0) is unchanged by the actual 6 m ride: auto-learning is disabled");
+  }
+
+  // --- RotationZ technological logging fires from the turn event itself
+  // (Tracker::endTurn()), not from finish(): a turn recognised while parked
+  // never reaches finish() (only called from Phase::Moving). ---
+  {
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "ST01,X+,20,false,true,rotation_z,Z,90,\n"
+      "ST02,X+,20,false,true,none,,,\n";
+    check(line::parseStationConfig(text, cfg), "setup: rotation_z station config parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    Part part{t, world};
+    part.stand(10);
+    t.home();
+    part.stand(1);
+    check(t.station() == 0 && t.known(), "setup: at table 1 (rotation_z configured there)");
+    part.turntable(90); // Parked the whole time: turns +90 deg in 10 s, then settles.
+    check(t.newDistanceRow(), "rotation_z: a parked turn produced a distance-log row");
+    const std::string row = t.distanceRowCsv();
+    std::printf("      rotation_z row: %s", row.c_str());
+    check(row.find("technological") != std::string::npos && row.find("rotation_z") != std::string::npos,
+          "rotation_z: row is technological, motion_type rotation_z");
+    check(row.find(",,90.0") != std::string::npos,
+          "rotation_z: measured_angle_deg is ~90 deg, not 0");
+  }
+
   return failures ? 1 : 0;
 }
