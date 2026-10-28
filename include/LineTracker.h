@@ -613,6 +613,24 @@ private:
     turnAt_ = clock_;
     ++turnCount_;
     newTurn_ = true;
+    // A turn finished while parked (turntable rotating a stopped part) never
+    // reaches Tracker::finish() (that only runs after a Moving ride with real
+    // horizontal/vertical displacement). Log RotationZ here instead, at the
+    // point the turn itself completes.
+    if (known_) {
+      if (const StationRow *row = stationRow(station_)) {
+        if (row->motion == Motion::RotationZ) {
+          const MotionResult motionResult = classifyMotion(*row, 0, lastTurn_ * 180 / pi);
+          if (motionResult.valid) {
+            formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
+                               "technological", -1, -1, row->id, motionResult.motion,
+                               "Z", motionResult.measuredDistanceM, motionResult.measuredAngleDeg,
+                               1.0f, motionResult.overRange ? "over_range" : "");
+            newDistanceRow_ = true;
+          }
+        }
+      }
+    }
   }
 
   // Ride detector signals, in the sensor axes now.
@@ -861,13 +879,17 @@ private:
     }
     MotionResult motionResult; // Default: invalid, nothing technological happened.
     if (!ride && !carried && known_ && moved) {
-      if (const StationRow *row = stationRow(station_)) {
-        // Same station before and after: not a transport ride. `ph.z` is the
-        // vertical displacement already separated out of the horizontal `d`
-        // (see the `flat()`/`norm(ph)` split above this point in finish());
-        // `turnSoFar()` is the heading change integrated since the last
-        // stand, in radians.
-        motionResult = classifyMotion(*row, ph.z, turnSoFar() * 180 / pi);
+      if (const StationRow *row = stationRow(station_); row && row->motion != Motion::RotationZ) {
+        // Same station before and after: not a transport ride. `flat()`
+        // split `p` into the horizontal component `ph` (its norm is `d`)
+        // and whatever lies along gravity, which `flat()` removed — that
+        // removed component is the vertical (lift) distance, not `ph.z`
+        // (near-zero by construction: `ph` is perpendicular to gravity).
+        // RotationZ is logged from Tracker::endTurn() instead: a turn at a
+        // parked station almost never satisfies `moved`, and `turnSoFar()`
+        // is already 0 by the time finish() could run anyway.
+        const float verticalM = dot(p, rest_.g) / std::max(norm(rest_.g), 1e-6f);
+        motionResult = classifyMotion(*row, std::fabs(verticalM), 0);
       }
     }
     if (ride && !carried) {
