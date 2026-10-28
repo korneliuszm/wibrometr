@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include "DistanceLog.h"
 #include "MotionClassifier.h"
 #include "SignalHistory.h"
 #include "StationConfig.h"
@@ -444,6 +445,8 @@ public:
   int transitCount() const { return transitCount_; }
   const Transit &transit(int i) const { return transits_[(transitHead_ + maxTransits - transitCount_ + i) % maxTransits]; }
   bool newTransit() { const bool r = newTransit_; newTransit_ = false; return r; }
+  bool newDistanceRow() { const bool r = newDistanceRow_; newDistanceRow_ = false; return r; }
+  const char *distanceRowCsv() const { return distanceRow_; }
   bool learnedChanged() { const bool r = learnedChanged_; learnedChanged_ = false; return r; }
 
   void breakSignal() {
@@ -518,6 +521,8 @@ private:
   }
   Transit transits_[maxTransits];
   int transitHead_ = 0, transitCount_ = 0;
+  char distanceRow_[200] = {};
+  bool newDistanceRow_ = false;
   float lastDistance_ = 0;
   Lost lost_ = Lost::Boot;
   float relocateAt_ = -1;   // When to scan again while the table is unknown; <0: not planned.
@@ -864,6 +869,19 @@ private:
         // stand, in radians.
         motionResult = classifyMotion(*row, ph.z, turnSoFar() * 180 / pi);
       }
+    }
+    if (ride && !carried) {
+      formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
+                         "transport", knownBefore ? from : -1, known_ ? station_ : -1,
+                         "", Motion::None, "", d, 0, slow_ ? 1.0f : 0.5f, "");
+      newDistanceRow_ = true;
+    } else if (motionResult.valid) {
+      const StationRow *row = stationRow(station_);
+      formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
+                         "technological", -1, -1, row ? row->id : "", motionResult.motion,
+                         "Z", motionResult.measuredDistanceM, motionResult.measuredAngleDeg,
+                         1.0f, motionResult.overRange ? "over_range" : "");
+      newDistanceRow_ = true;
     }
     if (ride || carried) {
       Transit &t = transits_[transitHead_];

@@ -156,6 +156,9 @@ void serviceLine(uint32_t now) {
     weblink::publishTransit(t);
     weblink::publishLine(tracker());
   }
+  if (tracker().newDistanceRow()) {
+    storage::appendDistanceRow(tracker().distanceRowCsv());
+  }
   if (tracker().newTurn()) {
     Serial.printf("line: turned %+.0f deg (turntable), heading %+.0f deg\n", tracker().lastTurn() * 57.29578f,
                   tracker().heading() * 57.29578f);
