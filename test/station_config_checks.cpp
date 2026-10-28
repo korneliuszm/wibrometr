@@ -1,5 +1,6 @@
 // test/station_config_checks.cpp
 // g++ -std=c++17 -Iinclude test/station_config_checks.cpp -o scc && ./scc
+#include <cmath>
 #include <cstdio>
 #include "StationConfig.h"
 

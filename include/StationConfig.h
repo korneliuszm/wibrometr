@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include "LineTracker.h" // line::maxStations
 
 namespace line {
 
@@ -22,7 +21,12 @@ struct StationRow {
 };
 
 struct StationConfig {
-  static constexpr int maxRows = maxStations;
+  // Mirrors line::maxStations (LineTracker.h); duplicated so this header
+  // does not need to include LineTracker.h (which would otherwise create a
+  // circular include between StationConfig.h and LineTracker.h). Checked
+  // against the real line::maxStations by a static_assert in LineTracker.h,
+  // once both are visible there.
+  static constexpr int maxRows = 16;
   int count = 0;
   StationRow row[maxRows];
 };

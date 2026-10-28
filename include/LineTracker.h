@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include "SignalHistory.h"
+#include "StationConfig.h"
 
 // Sensor output rate the tracker is built for (the firmware sets it).
 #ifndef LINE_SAMPLE_HZ
@@ -136,8 +137,10 @@ struct Learned {
 };
 
 } // namespace line
-#include "StationConfig.h"
 namespace line {
+
+static_assert(StationConfig::maxRows == maxStations,
+              "StationConfig::maxRows mirrors line::maxStations; keep them equal.");
 
 class Tracker {
 public:
