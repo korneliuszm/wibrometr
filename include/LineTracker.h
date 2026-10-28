@@ -3,7 +3,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include "DistanceLog.h"
+#include "MotionClassifier.h"
 #include "SignalHistory.h"
+#include "StationConfig.h"
 
 // Sensor output rate the tracker is built for (the firmware sets it).
 #ifndef LINE_SAMPLE_HZ
@@ -135,6 +138,12 @@ struct Learned {
   Fingerprint fp[maxStations];
 };
 
+} // namespace line
+namespace line {
+
+static_assert(StationConfig::maxRows == maxStations,
+              "StationConfig::maxRows mirrors line::maxStations; keep them equal.");
+
 class Tracker {
 public:
   static constexpr int restSamples = LINE_SAMPLE_HZ * 3 / 2; // 1.5 s: pre-roll and first estimates.
@@ -185,6 +194,31 @@ public:
   void setStations(int n) {
     learned.stations = n < 2 ? 2 : n > maxStations ? maxStations : n;
     if (station_ >= learned.stations) station_ = learned.stations - 1;
+  }
+  // Loads a parsed config.csv as the authoritative station layout: gaps and
+  // floor directions come from `cfg` and are no longer auto-learned, and
+  // Wi-Fi scans stop correcting the counted station (still scanned and
+  // blended into fingerprints, for the dashboard and distance log).
+  // Call once, at boot, before `home()`.
+  void applyStationConfig(const StationConfig &cfg) {
+    setStations(cfg.count);
+    for (int i = 0; i < cfg.count; ++i) {
+      stationRow_[i] = cfg.row[i];
+      if (i + 1 < cfg.count) {
+        learned.gap[i] = cfg.row[i + 1].distanceM;
+        const float dir = directionAngle(cfg.row[i + 1].direction);
+        learned.gapDir[i] = dir;
+        learned.gapDirKnown[i] = true;
+      }
+    }
+    configAuthoritative_ = true;
+  }
+  bool configAuthoritative() const { return configAuthoritative_; }
+  // Configured row for station `s`, or nullptr if no config.csv was loaded
+  // or `s` is out of range. Used by the motion classifier and distance log
+  // in later tasks.
+  const StationRow *stationRow(int s) const {
+    return configAuthoritative_ && s >= 0 && s < learned.stations ? &stationRow_[s] : nullptr;
   }
   // The body is at table 1 now; its heading there is the floor's 0.
   void home() {
@@ -308,6 +342,7 @@ public:
     }
     corrected_ = false;
     if (!known_) {
+      if (configAuthoritative_) return; // CSV is authoritative: never locate purely from Wi-Fi.
       // Table from Wi-Fi alone (after boot, lost samples or being carried):
       // only a clear match counts; otherwise try again a little later. Scans
       // taken at the same spot are averaged, so close neighbours separate.
@@ -338,7 +373,7 @@ public:
     }
     // Overrule the count only against a table that has its own reference
     // (while learning, the current table has none yet).
-    else if (known_ && best >= 0 && best != station_ && score_[station_] >= 0 &&
+    else if (!configAuthoritative_ && known_ && best >= 0 && best != station_ && score_[station_] >= 0 &&
              bestCost + switchMarginDb < score_[station_]) {
       station_ = best;
       corrected_ = true;
@@ -410,6 +445,8 @@ public:
   int transitCount() const { return transitCount_; }
   const Transit &transit(int i) const { return transits_[(transitHead_ + maxTransits - transitCount_ + i) % maxTransits]; }
   bool newTransit() { const bool r = newTransit_; newTransit_ = false; return r; }
+  bool newDistanceRow() { const bool r = newDistanceRow_; newDistanceRow_ = false; return r; }
+  const char *distanceRowCsv() const { return distanceRow_; }
   bool learnedChanged() { const bool r = learnedChanged_; learnedChanged_ = false; return r; }
 
   void breakSignal() {
@@ -471,8 +508,21 @@ private:
   bool binOpen_ = false;
   Fingerprint lastScan_{};
   float score_[maxStations] = {};
+  bool configAuthoritative_ = false;
+  StationRow stationRow_[maxStations];
+  static float directionAngle(Direction d) {
+    switch (d) {
+      case Direction::XPlus: return 0;
+      case Direction::XMinus: return pi;
+      case Direction::YPlus: return pi / 2;
+      case Direction::YMinus: return -pi / 2;
+    }
+    return 0;
+  }
   Transit transits_[maxTransits];
   int transitHead_ = 0, transitCount_ = 0;
+  char distanceRow_[200] = {};
+  bool newDistanceRow_ = false;
   float lastDistance_ = 0;
   Lost lost_ = Lost::Boot;
   float relocateAt_ = -1;   // When to scan again while the table is unknown; <0: not planned.
@@ -563,6 +613,24 @@ private:
     turnAt_ = clock_;
     ++turnCount_;
     newTurn_ = true;
+    // A turn finished while parked (turntable rotating a stopped part) never
+    // reaches Tracker::finish() (that only runs after a Moving ride with real
+    // horizontal/vertical displacement). Log RotationZ here instead, at the
+    // point the turn itself completes.
+    if (known_) {
+      if (const StationRow *row = stationRow(station_)) {
+        if (row->motion == Motion::RotationZ) {
+          const MotionResult motionResult = classifyMotion(*row, 0, lastTurn_ * 180 / pi);
+          if (motionResult.valid) {
+            formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
+                               "technological", -1, -1, row->id, motionResult.motion,
+                               "Z", motionResult.measuredDistanceM, motionResult.measuredAngleDeg,
+                               1.0f, motionResult.overRange ? "over_range" : "");
+            newDistanceRow_ = true;
+          }
+        }
+      }
+    }
   }
 
   // Ride detector signals, in the sensor axes now.
@@ -796,7 +864,7 @@ private:
     const bool ride = moved && slow_ && !carried;
     if (ride && known_) {
       const int to = targetFor(ph, d);
-      if (std::abs(to - from) == 1) { // Learn this gap: spacing and floor direction.
+      if (std::abs(to - from) == 1 && !configAuthoritative_) { // Learn this gap: spacing and floor direction.
         const int i = to > from ? from : to;
         float &g = learned.gap[i];
         g = g > 0 ? g + 0.5f * (d - g) : d;
@@ -808,6 +876,34 @@ private:
         learnedChanged_ = true;
       }
       station_ = to;
+    }
+    MotionResult motionResult; // Default: invalid, nothing technological happened.
+    if (!ride && !carried && known_ && moved) {
+      if (const StationRow *row = stationRow(station_); row && row->motion != Motion::RotationZ) {
+        // Same station before and after: not a transport ride. `flat()`
+        // split `p` into the horizontal component `ph` (its norm is `d`)
+        // and whatever lies along gravity, which `flat()` removed — that
+        // removed component is the vertical (lift) distance, not `ph.z`
+        // (near-zero by construction: `ph` is perpendicular to gravity).
+        // RotationZ is logged from Tracker::endTurn() instead: a turn at a
+        // parked station almost never satisfies `moved`, and `turnSoFar()`
+        // is already 0 by the time finish() could run anyway.
+        const float verticalM = dot(p, rest_.g) / std::max(norm(rest_.g), 1e-6f);
+        motionResult = classifyMotion(*row, std::fabs(verticalM), 0);
+      }
+    }
+    if (ride && !carried) {
+      formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
+                         "transport", knownBefore ? from : -1, known_ ? station_ : -1,
+                         "", Motion::None, "", d, 0, slow_ ? 1.0f : 0.5f, "");
+      newDistanceRow_ = true;
+    } else if (motionResult.valid) {
+      const StationRow *row = stationRow(station_);
+      formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
+                         "technological", -1, -1, row ? row->id : "", motionResult.motion,
+                         "Z", motionResult.measuredDistanceM, motionResult.measuredAngleDeg,
+                         1.0f, motionResult.overRange ? "over_range" : "");
+      newDistanceRow_ = true;
     }
     if (ride || carried) {
       Transit &t = transits_[transitHead_];
