@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include "MotionClassifier.h"
 #include "SignalHistory.h"
 #include "StationConfig.h"
 
@@ -852,6 +853,17 @@ private:
         learnedChanged_ = true;
       }
       station_ = to;
+    }
+    MotionResult motionResult; // Default: invalid, nothing technological happened.
+    if (!ride && !carried && known_ && moved) {
+      if (const StationRow *row = stationRow(station_)) {
+        // Same station before and after: not a transport ride. `ph.z` is the
+        // vertical displacement already separated out of the horizontal `d`
+        // (see the `flat()`/`norm(ph)` split above this point in finish());
+        // `turnSoFar()` is the heading change integrated since the last
+        // stand, in radians.
+        motionResult = classifyMotion(*row, ph.z, turnSoFar() * 180 / pi);
+      }
     }
     if (ride || carried) {
       Transit &t = transits_[transitHead_];
