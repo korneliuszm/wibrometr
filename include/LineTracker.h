@@ -135,6 +135,10 @@ struct Learned {
   Fingerprint fp[maxStations];
 };
 
+} // namespace line
+#include "StationConfig.h"
+namespace line {
+
 class Tracker {
 public:
   static constexpr int restSamples = LINE_SAMPLE_HZ * 3 / 2; // 1.5 s: pre-roll and first estimates.
@@ -185,6 +189,31 @@ public:
   void setStations(int n) {
     learned.stations = n < 2 ? 2 : n > maxStations ? maxStations : n;
     if (station_ >= learned.stations) station_ = learned.stations - 1;
+  }
+  // Loads a parsed config.csv as the authoritative station layout: gaps and
+  // floor directions come from `cfg` and are no longer auto-learned, and
+  // Wi-Fi scans stop correcting the counted station (still scanned and
+  // blended into fingerprints, for the dashboard and distance log).
+  // Call once, at boot, before `home()`.
+  void applyStationConfig(const StationConfig &cfg) {
+    setStations(cfg.count);
+    for (int i = 0; i < cfg.count; ++i) {
+      stationRow_[i] = cfg.row[i];
+      if (i + 1 < cfg.count) {
+        learned.gap[i] = cfg.row[i + 1].distanceM;
+        const float dir = directionAngle(cfg.row[i + 1].direction);
+        learned.gapDir[i] = dir;
+        learned.gapDirKnown[i] = true;
+      }
+    }
+    configAuthoritative_ = true;
+  }
+  bool configAuthoritative() const { return configAuthoritative_; }
+  // Configured row for station `s`, or nullptr if no config.csv was loaded
+  // or `s` is out of range. Used by the motion classifier and distance log
+  // in later tasks.
+  const StationRow *stationRow(int s) const {
+    return configAuthoritative_ && s >= 0 && s < learned.stations ? &stationRow_[s] : nullptr;
   }
   // The body is at table 1 now; its heading there is the floor's 0.
   void home() {
@@ -308,6 +337,7 @@ public:
     }
     corrected_ = false;
     if (!known_) {
+      if (configAuthoritative_) return; // CSV is authoritative: never locate purely from Wi-Fi.
       // Table from Wi-Fi alone (after boot, lost samples or being carried):
       // only a clear match counts; otherwise try again a little later. Scans
       // taken at the same spot are averaged, so close neighbours separate.
@@ -338,7 +368,7 @@ public:
     }
     // Overrule the count only against a table that has its own reference
     // (while learning, the current table has none yet).
-    else if (known_ && best >= 0 && best != station_ && score_[station_] >= 0 &&
+    else if (!configAuthoritative_ && known_ && best >= 0 && best != station_ && score_[station_] >= 0 &&
              bestCost + switchMarginDb < score_[station_]) {
       station_ = best;
       corrected_ = true;
@@ -471,6 +501,17 @@ private:
   bool binOpen_ = false;
   Fingerprint lastScan_{};
   float score_[maxStations] = {};
+  bool configAuthoritative_ = false;
+  StationRow stationRow_[maxStations];
+  static float directionAngle(Direction d) {
+    switch (d) {
+      case Direction::XPlus: return 0;
+      case Direction::XMinus: return pi;
+      case Direction::YPlus: return pi / 2;
+      case Direction::YMinus: return -pi / 2;
+    }
+    return 0;
+  }
   Transit transits_[maxTransits];
   int transitHead_ = 0, transitCount_ = 0;
   float lastDistance_ = 0;
@@ -796,7 +837,7 @@ private:
     const bool ride = moved && slow_ && !carried;
     if (ride && known_) {
       const int to = targetFor(ph, d);
-      if (std::abs(to - from) == 1) { // Learn this gap: spacing and floor direction.
+      if (std::abs(to - from) == 1 && !configAuthoritative_) { // Learn this gap: spacing and floor direction.
         const int i = to > from ? from : to;
         float &g = learned.gap[i];
         g = g > 0 ? g + 0.5f * (d - g) : d;

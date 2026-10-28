@@ -287,5 +287,30 @@ void suite(float shake) {
 int main() {
   suite(0);
   suite(1);
+
+  // --- CSV-authoritative: config.csv overrides auto-learning ---
+  {
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "ST01,X+,10,false,true,none,,,\n"
+      "ST02,X+,10,false,true,none,,,\n"; // CSV says 10 m; the simulated ride below is only 6 m.
+    check(line::parseStationConfig(text, cfg), "setup: config parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    check(t.configAuthoritative(), "tracker reports CSV-authoritative after applyStationConfig");
+    check(std::fabs(t.gap(0) - 10.0f) < 1e-3f, "gap(0) comes from CSV, not default");
+    Part part{t, world};
+    part.stand(10); // Settle into Parked.
+    t.home();
+    part.stand(1);
+    part.ride(gaps[0], dirs[0]); // Real `Part::ride` helper; the scenarios' 6 m synthetic gap.
+    part.stand(18);
+    check(std::fabs(t.gap(0) - 10.0f) < 1e-3f,
+          "gap(0) is unchanged by the actual 6 m ride: auto-learning is disabled");
+  }
+
   return failures ? 1 : 0;
 }
