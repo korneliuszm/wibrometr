@@ -91,6 +91,20 @@ Kolumny: `timestamp_ms,segment_type,from_station,to_station,station_id,motion_ty
 Ring-buffer jak istniejąca historia przejazdów (ostatni przejazd, bez
 dodatkowej retencji — decyzja odłożona, jak dziś z `last_run.csv`).
 
+## Znane ograniczenie (wykryte w finalnym review, 2026-10-28)
+
+Pomiar dla `station_motion: lift` / `z_transfer` w praktyce **nie jest
+jeszcze logowany**: `finish()` (miejsce wpięcia pomiaru) uruchamia się
+tylko z fazy `Moving`, a wejście w `Moving` i trzymanie `calm` zależą
+wyłącznie od sygnałów horyzontalnych (`hv_`/`ha_`, po odjęciu składowej
+grawitacji) — czysto wertykalny ruch nigdy nie przerywa `Parked`, zgodnie
+z już istniejącym w README stwierdzeniem „ruch pionowy jest pomijany".
+`rotation_z` **działa poprawnie** (naprawione i zweryfikowane — wpięte w
+`endTurn()`, osobny mechanizm detekcji obrotu w postoju, już istniejący).
+Zamknięcie tej luki wymaga nowego detektora ruchu wertykalnego w fazie
+`Parked` (analogicznego do `turning_`/`endTurn()`) — osobne zadanie,
+rozmiarem porównywalne do detektora obrotu.
+
 ## Testy (styl istniejący, `g++ -std=c++17`, bez frameworków)
 
 - `test/station_config_checks.cpp` — parsowanie, błędne wiersze, enumeracje.
