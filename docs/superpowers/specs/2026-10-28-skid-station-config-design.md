@@ -97,3 +97,7 @@ dodatkowej retencji — decyzja odłożona, jak dziś z `last_run.csv`).
 - `test/motion_classifier_checks.cpp` — technologiczny vs transportowy,
   przekroczenie zakresu nie zmienia stacji.
 - `test/distance_log_checks.cpp` — ring-buffer, format wiersza CSV.
+
+## Flash budget (measured 2026-10-28)
+
+Z custom `partitions.csv` (app0 = 0x300000, ffat = 0x80000) i probe USB MSC + FFat: Flash 39.4% (1240875 / 3145728 bytes) — fits comfortably, go.
