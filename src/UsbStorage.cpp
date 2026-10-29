@@ -57,7 +57,10 @@ constexpr const char *kDistancesHeader =
 // exact same partition. Assumes the host/TinyUSB side always issues
 // sector-aligned transfers (offset 0, size a multiple of the FatFs
 // sector size) -- true in every ESP32 USBMSC example seen, but not
-// provable without a real host plugged in.
+// provable without a real host plugged in. The unmount/remount on eject
+// in onStartStop() (drops FatFs's stale "win" sector cache after the
+// host rewrites sectors behind its back) is equally unverified on real
+// hardware for the same reason.
 wl_handle_t wlHandle = WL_INVALID_HANDLE;
 BYTE pdrv = 0xFF;
 WORD sectorSize = 512;
@@ -72,7 +75,30 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buf, uint32_t size) {
 }
 bool onStartStop(uint8_t power, bool start, bool eject) {
   (void)power;
-  mounted.store(start && !eject, std::memory_order_relaxed);
+  const bool wasMounted = mounted.load(std::memory_order_relaxed);
+  const bool nowMounted = start && !eject;
+  mounted.store(nowMounted, std::memory_order_relaxed);
+
+  // Host just released the drive (mounted -> unmounted): firmware is about
+  // to resume readConfig()/appendDistanceRow(). FatFs keeps a per-volume
+  // "win" sector cache in ff.c, filled by the LAST sector *we* touched --
+  // but onRead/onWrite went straight through disk_read()/disk_write() via
+  // ff_diskio_get_pdrv_wl(), bypassing that cache entirely. If the host
+  // rewrote the same sector(s) through raw MSC writes, the cache can still
+  // hold the pre-eject content. Dropping and remounting the volume is the
+  // only way to flush that cache without reaching into ff.c internals.
+  if (wasMounted && !nowMounted) {
+    esp_vfs_fat_spiflash_unmount_rw_wl(kBasePath, wlHandle);
+    esp_vfs_fat_mount_config_t conf = {};
+    conf.format_if_mount_failed = true;
+    conf.max_files = 4;
+    conf.allocation_unit_size = 0;
+    if (esp_vfs_fat_spiflash_mount(kBasePath, kPartitionLabel, &conf, &wlHandle) == ESP_OK) {
+      pdrv = ff_diskio_get_pdrv_wl(wlHandle);
+    } else {
+      pdrv = 0xFF; // Remount failed: park onRead/onWrite rather than touch a half-mounted volume.
+    }
+  }
   return true;
 }
 } // namespace
