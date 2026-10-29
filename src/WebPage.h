@@ -523,8 +523,14 @@ let carX = null, carDir = 1, wheelAngle = 0, rollerShift = 0, lastFrameTs = 0;
 function buildScene(n) {
   sceneN = n;
   scene.innerHTML = "";
-  const gaps = lineInfo ? lineInfo.gaps.slice(0, n - 1) : new Array(Math.max(0, n - 1)).fill(0);
-  const gdir = lineInfo ? lineInfo.gdir.slice(0, n - 1) : new Array(Math.max(0, n - 1)).fill(null);
+  // Normalize to exactly n-1 entries regardless of what lineInfo carries —
+  // the onLineState() emergency-fallback path (see onLineState() below)
+  // builds a line-info object with gaps:[] and no gdir field at all, so a
+  // plain .slice() here would leave both arrays too short (or gdir
+  // undefined) and crash/misrender once n > 1.
+  const need = Math.max(0, n - 1);
+  const gaps = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gaps && lineInfo.gaps[i]) || 0);
+  const gdir = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gdir && lineInfo.gdir[i]) ?? null);
   const metresPos = stationPositions(gaps.map(g => g > 0 ? g : 6.5), gdir);
   // IMPORTANT: Y is negated here (M - ...), not added — stationPositions()
   // returns standard math CCW metres (same convention as arrow()/needle
