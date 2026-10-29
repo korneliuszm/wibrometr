@@ -719,9 +719,18 @@ function renderFacts() {
   ];
   $("lineFacts").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 }
+// Shallow array-equality check (treats missing/undefined as empty), used
+// to detect gaps/gdir changes that need a scene rebuild (see onLine()).
+function arrChanged(a, b) {
+  a = a || []; b = b || [];
+  if (a.length !== b.length) return true;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return true;
+  return false;
+}
 function onLine(m) {
+  const prevGaps = lineInfo && lineInfo.gaps, prevGdir = lineInfo && lineInfo.gdir;
   lineInfo = m;
-  if (sceneN !== m.n) buildScene(m.n); else renderTables();
+  if (sceneN !== m.n || arrChanged(prevGaps, m.gaps) || arrChanged(prevGdir, m.gdir)) buildScene(m.n); else renderTables();
   const sel = $("stations");
   if (sel.options.length === 0) for (let i = 2; i <= 16; i++) sel.add(new Option(String(i), String(i)));
   sel.value = String(m.n);
