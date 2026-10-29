@@ -631,14 +631,23 @@ function renderTables() {
     r.g.classList.toggle("no-fp", !fp.length);
     r.empty.style.display = fp.length ? "none" : "";
     r.bars.innerHTML = "";
-    if (!fp.length) return;
-    const map = new Map(fp), x0 = pos(s).x - 40, bw = 80 / Math.max(order.length, 1);
-    order.forEach((b, i) => {
-      const v = map.get(b);
-      if (v === undefined) return;
-      const h = Math.max(1.5, (v + 95) / 65 * 32);
-      el("rect", { class: "st-bar", x: x0 + i * bw + 0.3, y: 152 - h, width: Math.max(1, bw - 0.6), height: h }, r.bars);
-    });
+    if (fp.length) {
+      const { p } = r;
+      const map = new Map(fp), x0 = p.x - 40, bw = 80 / Math.max(order.length, 1);
+      order.forEach((b, i) => {
+        const v = map.get(b);
+        if (v === undefined) return;
+        const h = Math.max(1.5, (v + 95) / 65 * 32);
+        // y relative to the station's own p.y (not an absolute scene
+        // coordinate) so the bars stay inside their tile on non-horizontal
+        // segments too; 72 keeps the bars at the same spot in the tile as
+        // before on a horizontal line, where p.y was always M (=80).
+        el("rect", { class: "st-bar", x: x0 + i * bw + 0.3, y: p.y + 72 - h, width: Math.max(1, bw - 0.6), height: h }, r.bars);
+      });
+    }
+    // Vibration bars + tile tint are independent of the Wi-Fi fingerprint
+    // (fp) — they must render whenever vib data exists, even on stations
+    // that have no fingerprint yet (see finding 10).
     const VIB_SCALE = 2.0; // m/s2 RMS at "full bar" — placeholder ceiling, retune from real recordings.
     // ponytail: VIB_SCALE is a hardcoded constant, not computed from data —
     // the spec explicitly says thresholds aren't established yet; retune this
