@@ -28,6 +28,8 @@ jobs:
 
   firmware:
     runs-on: ubuntu-latest
+    env:
+      TEMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
