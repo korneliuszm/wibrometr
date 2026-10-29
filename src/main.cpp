@@ -109,6 +109,9 @@ line::Tracker &tracker() {
   static line::Tracker *t = new line::Tracker();
   return *t;
 }
+// config.csv describes the line; without a valid one nothing is tracked.
+bool configOk = false;
+line::ConfigError configErr;
 Preferences prefs;
 void saveLearned() {
   prefs.putBytes("learned", &tracker().learned, sizeof tracker().learned);
@@ -152,12 +155,19 @@ void serviceLine(uint32_t now) {
     Serial.printf("transit %lu: table %s -> %s, %.2f m at %+.0f deg, %.1f s, ramp %.2f m/s2, vib rms %.2f %.2f %.2f m/s2\n",
                   (unsigned long)t.id, tableName(t.from), tableName(t.to), t.distance, t.floorDeg, t.durationS, t.ramp, t.rms[0],
                   t.rms[1], t.rms[2]);
-    weblink::publishTransit(t);
     weblink::publishLine(tracker());
   }
-  if (tracker().newDistanceRow()) {
-    storage::appendLogRow(tracker().distanceRowFile(), tracker().distanceRowCsv());
-    Serial.printf("log %s.csv: %s", tracker().distanceRowFile(), tracker().distanceRowCsv());
+  const char *file = nullptr, *row = nullptr;
+  while (tracker().takeDistanceRow(file, row)) {
+    storage::appendLogRow(file, row);
+    Serial.printf("log %s.csv: %s", file, row);
+  }
+  if (tracker().newRefFix()) {
+    static char text[40];
+    snprintf(text, sizeof text, "KOREKTA: PUNKT ODNIES. %s", tracker().refFixStation());
+    Serial.printf("line: reference point, station set to %s\n", tracker().refFixStation());
+    showNotice(text, now);
+    weblink::publishLine(tracker());
   }
   if (tracker().newTurn()) {
     Serial.printf("line: turned %+.0f deg (turntable), heading %+.0f deg (about Z as shown: right +)\n",
@@ -387,7 +397,7 @@ void pollButton(uint32_t now) {
           nextScreen();
         }
       } else if (screen == LineScreen) {
-        if (duration >= 1000) {
+        if (duration >= 1000 && configOk) {
           tracker().home();
           showNotice("DETAL NA STOLE 1", now);
           weblink::publishLine(tracker());
@@ -582,7 +592,21 @@ void drawStrokes(uint32_t now) {
 // Tables as boxes along the line, the part as a marker between them.
 void drawLine(uint32_t now) {
   drawHeader(now, "LINIA", ST77XX_WHITE);
-  const int n = tracker().learned.stations;
+  if (!configOk) { // Nothing is tracked without the line's description.
+    canvas.setTextSize(2);
+    label(0, 18, ST77XX_RED, "BRAK PRAWIDLOWEJ");
+    label(0, 36, ST77XX_RED, "KONFIGURACJI");
+    canvas.setTextSize(1);
+    canvas.setCursor(0, 60);
+    canvas.setTextColor(ST77XX_YELLOW);
+    if (configErr.line) canvas.printf("config.csv, wiersz %d:", configErr.line);
+    else canvas.print("config.csv:");
+    label(0, 72, ST77XX_YELLOW, configErr.what);
+    label(0, 92, muted, "Wgraj config.csv na dysk USB");
+    label(0, 104, muted, "WIBROMTR i nacisnij RESET.");
+    return;
+  }
+  const int n = tracker().stations();
   const auto phase = tracker().phase();
   const bool moving = phase == line::Tracker::Phase::Moving && !tracker().arrived();
   canvas.setTextSize(3);
@@ -888,14 +912,18 @@ void setup() {
   // run second and silently erase the CSV-applied geometry).
   if (storage::begin()) {
     static line::StationConfig cfg; // ~2 KB with 64 rows: not on the setup stack.
-    if (storage::readConfig(cfg)) {
+    configOk = storage::readConfig(cfg, configErr);
+    if (!configOk) weblink::setConfigProblem(configErr.line, configErr.what);
+    if (configOk) {
       tracker().applyStationConfig(cfg);
-      Serial.println("config.csv: loaded, CSV is authoritative");
+      Serial.printf("config.csv: loaded, %d stations\n", cfg.count);
     } else {
-      Serial.println("config.csv: not found or invalid, auto-learning as before");
+      Serial.printf("config.csv: NOT VALID (line %d: %s) - the line is not tracked\n", configErr.line, configErr.what);
     }
   } else {
-    Serial.println("USB storage: FFat.begin failed");
+    configErr = {0, "pamiec dysku niedostepna"};
+    weblink::setConfigProblem(configErr.line, configErr.what);
+    Serial.println("USB storage: FFat.begin failed - the line is not tracked");
   }
   if (ipsEnabled) positioning.begin();
   else weblink::begin(); // The positioning prototype owns the radio when enabled.
@@ -978,48 +1006,22 @@ void loop() {
   pollButton(now);
   serviceLine(now);
   weblink::loop(now, displacement(), tracker(), actualHz, fresh(now), wifiscan::busy());
-  int arg = 0;
-  switch (weblink::takeCommand(arg)) {
+  switch (weblink::takeCommand()) {
     case weblink::Command::ResetTotals:
       displacement().resetTotal();
       movesLogged = 0;
       showNotice("SUMA WYZEROWANA ZE STRONY", now);
       break;
     case weblink::Command::Home:
+      if (!configOk) break;
       tracker().home();
       showNotice("STOL 1 USTAWIONY ZE STRONY", now);
       weblink::publishLine(tracker());
-      break;
-    case weblink::Command::Stations:
-      // config.csv (if present) owns the station count; the web command
-      // must not override the authoritative CSV geometry.
-      if (!tracker().configAuthoritative()) {
-        tracker().setStations(arg);
-        saveLearned();
-        weblink::publishLine(tracker());
-      } else {
-        showNotice("CONFIG.CSV AUTORYTATYWNY - LICZBA STOLOW BEZ ZMIAN", now);
-      }
       break;
     case weblink::Command::ForgetWifi:
       tracker().forgetWifi();
       saveLearned();
       weblink::publishLine(tracker());
-      break;
-    case weblink::Command::ForgetAll:
-      // Same as above: do not erase CSV-sourced gaps/directions when the
-      // CSV is authoritative. Only the non-CSV-managed Wi-Fi fingerprints
-      // may still be cleared.
-      if (!tracker().configAuthoritative()) {
-        tracker().forgetAll();
-        saveLearned();
-        weblink::publishLine(tracker());
-      } else {
-        tracker().forgetWifi();
-        saveLearned();
-        weblink::publishLine(tracker());
-        showNotice("CONFIG.CSV AUTORYTATYWNY - GEOMETRIA ZACHOWANA", now);
-      }
       break;
     case weblink::Command::None: break;
   }

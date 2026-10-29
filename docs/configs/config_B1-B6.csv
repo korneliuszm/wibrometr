@@ -1,7 +1,7 @@
-station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed
-B1,X+,0,false,true,none,,,
-B2,X+,6.5,false,false,none,,,
-B3,X+,6.5,false,false,none,,,
-B4,X+,6.5,false,false,none,,,
-B5,X+,6.5,false,false,none,,,
-B6,X+,6.5,false,true,none,,,
+station_id,direction,distance_m,wifi_scan,station_motion,motion_axis,motion_range
+B1,X+,0,true,none,,
+B2,X+,6.5,false,none,,
+B3,X+,6.5,false,none,,
+B4,X+,6.5,false,none,,
+B5,X+,6.5,false,none,,
+B6,X+,6.5,true,none,,

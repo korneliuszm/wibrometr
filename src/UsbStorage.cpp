@@ -28,12 +28,12 @@ constexpr const char *kPartitionLabel = "ffat";
 constexpr const char *kConfigPath = "/ffat/config.csv";
 // One file per ride ("B2-B3.csv") and per station's technological motions
 // ("B3_tech.csv"), plus every row in distances_last_run.csv; all with this
-// header, rides fill the last 8 columns.
+// header, rides fill the last 8 columns; declared / delta compare the measured
+// value with config.csv (m, or degrees for a turn).
 constexpr const char *kAllRowsPath = "/ffat/distances_last_run.csv";
-constexpr const char *kAllRowsOldPath = "/ffat/distances_last_run_old.csv";
 constexpr const char *kLogHeader =
   "timestamp_ms,segment_type,from_station,to_station,station_id,motion_type,"
-  "axis,measured_distance_m,measured_angle_deg,confidence,quality_flags,"
+  "axis,measured_distance_m,measured_angle_deg,confidence,quality_flags,declared,delta,"
   "duration_s,ramp_m_s2,rms_x,rms_y,rms_z,peak_x,peak_y,peak_z\n";
 
 // There used to be a separate "/usbdrive.img" file on this same FFat
@@ -125,18 +125,6 @@ bool begin() {
   if (disk_ioctl(pdrv, GET_SECTOR_SIZE, &ss) == RES_OK && ss > 0) sectorSize = ss;
 
 
-  // distances_last_run.csv from before the ride columns: kept aside as
-  // distances_last_run_old.csv, a new one starts with the current header.
-  if (FILE *f = fopen(kAllRowsPath, "r")) {
-    char first[256] = {};
-    const bool same = fgets(first, sizeof first, f) && strcmp(first, kLogHeader) == 0;
-    fclose(f);
-    if (!same) {
-      remove(kAllRowsOldPath);
-      rename(kAllRowsPath, kAllRowsOldPath);
-    }
-  }
-
   msc.vendorID("WIBROMTR");
   msc.productID("SKID LOG");
   msc.productRevision("1.0");
@@ -149,9 +137,11 @@ bool begin() {
   return true;
 }
 
-bool readConfig(line::StationConfig &out) {
+bool readConfig(line::StationConfig &out, line::ConfigError &err) {
+  err = {0, "brak pliku config.csv"};
   FILE *f = fopen(kConfigPath, "rb");
   if (!f) return false;
+  err = {0, "nie da sie odczytac pliku"};
   fseek(f, 0, SEEK_END);
   const long fileSize = ftell(f);
   fseek(f, 0, SEEK_SET);
@@ -160,20 +150,32 @@ bool readConfig(line::StationConfig &out) {
   // A file bigger than the buffer would otherwise be silently truncated
   // (the trailing stations just disappear with no error): reject it
   // outright instead, same as any other invalid config.
-  if (fileSize < 0 || (size_t)fileSize > kBufSize - 1) { fclose(f); return false; }
+  if (fileSize < 0 || (size_t)fileSize > kBufSize - 1) { fclose(f); err.what = "plik za duzy"; return false; }
   std::unique_ptr<char[]> buf(new (std::nothrow) char[kBufSize]);
   if (!buf) { fclose(f); return false; }
   const size_t n = fread(buf.get(), 1, (size_t)fileSize, f);
   fclose(f);
   if (n != (size_t)fileSize) return false; // Read came up short of the file's own size.
   buf[n] = 0;
-  return line::parseStationConfig(buf.get(), out);
+  return line::parseStationConfig(buf.get(), out, &err);
 }
 
 namespace {
 void appendTo(const char *path, const char *csvRow) {
   bool fresh = true;
-  if (FILE *f = fopen(path, "r")) { fresh = false; fclose(f); }
+  if (FILE *f = fopen(path, "r")) {
+    char first[256] = {};
+    const bool same = fgets(first, sizeof first, f) && strcmp(first, kLogHeader) == 0;
+    fclose(f);
+    fresh = false;
+    if (!same) { // Older columns: keep that file aside, start a new one.
+      char old[72];
+      snprintf(old, sizeof old, "%.*s_old.csv", int(strlen(path) - 4), path);
+      remove(old);
+      rename(path, old);
+      fresh = true;
+    }
+  }
   FILE *f = fopen(path, "a");
   if (!f) return;
   if (fresh) fputs(kLogHeader, f);

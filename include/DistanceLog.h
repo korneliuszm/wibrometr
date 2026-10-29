@@ -10,6 +10,7 @@ inline const char *motionName(Motion m) {
   switch (m) {
     case Motion::None: return "";
     case Motion::Lift: return "lift";
+    case Motion::RpsSeat: return "RPS_seat";
     case Motion::RotationZ: return "rotation_z";
     case Motion::ZTransfer: return "z_transfer";
     case Motion::Compound: return "compound";
@@ -20,12 +21,16 @@ inline const char *motionName(Motion m) {
 // Formats one log row (see logFileName() for its file) into `buf` (NUL-terminated,
 // truncated if `bufSize` is too small). Columns: timestamp_ms,segment_type,
 // from_station,to_station,station_id,motion_type,axis,measured_distance_m,
-// measured_angle_deg,confidence,quality_flags
+// measured_angle_deg,confidence,quality_flags,declared,delta
+// `declared` is what config.csv says for the same thing (metres, or degrees
+// for a turn) and `delta` is measured minus declared, both in the unit of the
+// measured value of the row; both stay empty when `declared` is 0 (no config,
+// or the value is not set there).
 inline void formatDistanceRow(char *buf, size_t bufSize, uint32_t timestampMs,
                                const char *segmentType, int from, int to,
                                const char *stationId, Motion motion, const char *axis,
                                float measuredDistanceM, float measuredAngleDeg,
-                               float confidence, const char *qualityFlags) {
+                               float confidence, const char *qualityFlags, float declared = 0) {
   char fromStr[4] = "", toStr[4] = "";
   if (from >= 0) std::snprintf(fromStr, sizeof(fromStr), "%d", from);
   if (to >= 0) std::snprintf(toStr, sizeof(toStr), "%d", to);
@@ -33,9 +38,14 @@ inline void formatDistanceRow(char *buf, size_t bufSize, uint32_t timestampMs,
   if (measuredDistanceM != 0 || motion == Motion::None)
     std::snprintf(distStr, sizeof(distStr), "%.3f", measuredDistanceM);
   if (measuredAngleDeg != 0) std::snprintf(angleStr, sizeof(angleStr), "%.3f", measuredAngleDeg);
-  std::snprintf(buf, bufSize, "%u,%s,%s,%s,%s,%s,%s,%s,%s,%.2f,%s\n",
+  char declStr[16] = "", deltaStr[16] = "";
+  if (declared != 0) {
+    std::snprintf(declStr, sizeof(declStr), "%.3f", declared);
+    std::snprintf(deltaStr, sizeof(deltaStr), "%.3f", (measuredDistanceM != 0 ? measuredDistanceM : measuredAngleDeg) - declared);
+  }
+  std::snprintf(buf, bufSize, "%u,%s,%s,%s,%s,%s,%s,%s,%s,%.2f,%s,%s,%s\n",
                 (unsigned)timestampMs, segmentType, fromStr, toStr, stationId,
-                motionName(motion), axis, distStr, angleStr, confidence, qualityFlags);
+                motionName(motion), axis, distStr, angleStr, confidence, qualityFlags, declStr, deltaStr);
 }
 
 // Ride columns appended to a transport row (replacing its '\n'):

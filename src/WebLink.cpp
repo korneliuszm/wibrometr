@@ -21,15 +21,16 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 std::atomic<bool> greetWanted{false};
 std::atomic<uint8_t> command{uint8_t(Command::None)};
-std::atomic<int> commandArg{0};
+int configLine = 0;
+const char *configWhat = nullptr; // Set when config.csv is not valid.
 Row rows[maxRows];
 int rowCount = 0;
 uint32_t lastSend = 0, prevUs = 0;
 bool havePrev = false;
 // Text buffers (~25 KB) are allocated in begin(), so they land in PSRAM.
 constexpr int batchSize = maxRows * 64 + 512, moveSize = DisplacementMeter::trackPoints * 24 + 256,
-              lineSize = 65536, transitSize = line::envBins * 40 + 512;
-char *batch = nullptr, *moveText = nullptr, *lineText = nullptr, *transitText = nullptr;
+              lineSize = 65536;
+char *batch = nullptr, *moveText = nullptr, *lineText = nullptr;
 char ip[16] = "192.168.4.1";
 
 const char *stateName(DisplacementMeter::State s) {
@@ -61,14 +62,10 @@ void onEvent(AsyncWebSocket *, AsyncWebSocketClient *, AwsEventType type, void *
     std::memcpy(text, data, len);
     text[len] = 0;
     Command c = Command::None;
-    int a = 0;
     if (!std::strcmp(text, "reset")) c = Command::ResetTotals;
     else if (!std::strcmp(text, "home")) c = Command::Home;
     else if (!std::strcmp(text, "forgetwifi")) c = Command::ForgetWifi;
-    else if (!std::strcmp(text, "forgetall")) c = Command::ForgetAll;
-    else if (!std::strncmp(text, "stations:", 9)) { c = Command::Stations; a = std::atoi(text + 9); }
     if (c == Command::None) return;
-    commandArg = a;
     command = uint8_t(c);
   }
 }
@@ -88,8 +85,7 @@ void begin() {
   batch = static_cast<char *>(malloc(batchSize));
   moveText = static_cast<char *>(malloc(moveSize));
   lineText = static_cast<char *>(malloc(lineSize));
-  transitText = static_cast<char *>(malloc(transitSize));
-  if (!batch || !moveText || !lineText || !transitText) {
+  if (!batch || !moveText || !lineText) {
     Serial.println("web: no memory for buffers, page disabled");
     return;
   }
@@ -119,7 +115,6 @@ void loop(uint32_t now, const DisplacementMeter &meter, const line::Tracker &tra
           bool scanning) {
   if (greetWanted.exchange(false)) {
     publishLine(tracker);
-    for (int i = 0; i < tracker.transitCount(); ++i) publishTransit(tracker.transit(i));
     if (meter.moves()) publishMove(meter);
   }
   if (!batch || uint32_t(now - lastSend) < batchMs) return;
@@ -136,7 +131,7 @@ void loop(uint32_t now, const DisplacementMeter &meter, const line::Tracker &tra
                    "\"lost\":%d,\"carry\":%d},\"r\":[",
                    rateHz, live ? 1 : 0, stateName(meter.state()), meter.movingS(), (unsigned long)meter.moves(),
                    100 * meter.live(0), 100 * meter.live(1), 100 * ui::shown(meter.live(2), 2), 100 * meter.total(0),
-                   100 * meter.total(1), 100 * ui::shown(meter.total(2), 2), tracker.learned.stations, tracker.station(),
+                   100 * meter.total(1), 100 * ui::shown(meter.total(2), 2), tracker.stations(), tracker.station(),
                    tracker.known() ? 1 : 0, phaseName(tracker.phase()), tracker.arrived() ? 1 : 0, tracker.position(),
                    tracker.direction(), tracker.phaseS(), tracker.untilPark(), tracker.liveDistance(),
                    scanning ? 1 : 0, tracker.activity(), tracker.startThreshold(), tracker.shaking(),
@@ -178,20 +173,22 @@ void publishMove(const DisplacementMeter &meter) {
 // names stop early when it runs short.
 void publishLine(const line::Tracker &t) {
   if (!lineText || ws.count() == 0) return;
-  const int stations = t.learned.stations, room = lineSize;
+  const int stations = t.stations(), room = lineSize;
   int n = 0;
   const auto add = [&](const char *fmt, auto... args) {
     if (n >= room - 1) return;
     const int w = snprintf(lineText + n, room - n, fmt, args...);
     if (w > 0) n = std::min(n + w, room - 1);
   };
-  add("{\"t\":\"ln\",\"n\":%d,\"cur\":%d,\"k\":%d,\"fix\":%d,\"gaps\":[", stations, t.station(), t.known() ? 1 : 0,
-      t.lastCorrected() ? 1 : 0);
+  // cfg: 0 without a valid config.csv (then cfgErr says why, and nothing else counts).
+  add("{\"t\":\"ln\",\"cfg\":%d,\"cfgLine\":%d,\"cfgErr\":\"%s\",\"n\":%d,\"cur\":%d,\"k\":%d,\"fix\":%d,\"gaps\":[",
+      t.configAuthoritative() ? 1 : 0, configLine, configWhat ? configWhat : "", stations, t.station(),
+      t.known() ? 1 : 0, t.lastCorrected() ? 1 : 0);
   for (int i = 0; i < stations - 1; ++i) add("%s%.2f", i ? "," : "", t.gap(i));
-  // Floor direction of each gap in degrees, null while not learned (and for a lift shaft).
+  // Floor direction of each gap in degrees (as drawn), null for a lift shaft or a turntable.
   add("],\"gdir\":[");
   for (int i = 0; i < stations - 1; ++i) {
-    if (t.learned.gapDirKnown[i]) add("%s%.1f", i ? "," : "", t.shownDir(i) * 57.29578f);
+    if (t.floorGap(i)) add("%s%.1f", i ? "," : "", t.shownDir(i) * 57.29578f);
     else add("%snull", i ? "," : "");
   }
   // Lift shafts: +1 up, -1 down, 0 on the floor.
@@ -244,27 +241,8 @@ void publishLine(const line::Tracker &t) {
   ws.textAll(lineText, n);
 }
 
-// Envelope as flat [lo x, lo y, lo z, hi x, hi y, hi z, ...] in 0.01 m/s2.
-void publishTransit(const line::Transit &tr) {
-  if (!transitText || ws.count() == 0) return;
-  const int room = transitSize;
-  int n = snprintf(transitText, room,
-                   "{\"t\":\"tr\",\"id\":%lu,\"from\":%d,\"to\":%d,\"d\":%.2f,\"dur\":%.2f,\"dir\":%.0f,\"ramp\":%.3f,"
-                   "\"rms\":[%.3f,%.3f,%.3f],\"pk\":[%.3f,%.3f,%.3f],\"wifi\":%d,\"carried\":%d,\"bin\":%.3f,\"env\":[",
-                   (unsigned long)tr.id, tr.from, tr.to, tr.distance, tr.durationS, tr.floorDeg, tr.ramp, tr.rms[0], tr.rms[1],
-                   tr.rms[2], tr.peak[0], tr.peak[1], tr.peak[2], tr.wifiCorrected ? 1 : 0, tr.carried ? 1 : 0, tr.binS);
-  for (int b = 0; b < tr.bins && n < room - 60; ++b)
-    n += snprintf(transitText + n, room - n, "%s%d,%d,%d,%d,%d,%d", b ? "," : "", tr.lo[b][0], tr.lo[b][1],
-                  tr.lo[b][2], tr.hi[b][0], tr.hi[b][1], tr.hi[b][2]);
-  n += snprintf(transitText + n, room - n, "]}");
-  ws.textAll(transitText, n);
-}
-
-Command takeCommand(int &arg) {
-  const Command c = Command(command.exchange(uint8_t(Command::None)));
-  arg = commandArg;
-  return c;
-}
+Command takeCommand() { return Command(command.exchange(uint8_t(Command::None))); }
+void setConfigProblem(int line, const char *what) { configLine = line; configWhat = what; }
 int clients() { return ws.count(); }
 const char *address() { return ip; }
 } // namespace weblink

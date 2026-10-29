@@ -12,18 +12,18 @@ GY-521) przez I2C.
 
 ## Nawigacja na linii rolkowej
 
-Detal z czujnikiem jedzie po rolkach między stołami (odstęp ok. 5–8 m):
+Detal z czujnikiem jedzie po rolkach między stołami (odstęp ok. 3–8 m):
 rusza z rampą, hamuje i stoi ok. 120 s. Płytka sama wyznacza, na którym
-stole jest (`include/LineTracker.h`).
+stole jest (`include/LineTracker.h`). Linię opisuje plik `config.csv`
+(opis niżej) — **bez prawidłowego pliku płytka nie liczy pozycji i niczego
+nie uczy**: ekran LINIA i strona pokazują „BRAK PRAWIDŁOWEJ KONFIGURACJI”
+z numerem błędnego wiersza i przyczyną. Po wgraniu poprawnego pliku na dysk
+USB trzeba nacisnąć RESET (plik jest czytany przy starcie).
 
 **Obsługa:** postaw detal na pierwszym stole i na ekranie LINIA (pierwszy)
 przytrzymaj BOOT ≥1 s — albo na stronie „Detal jest na stole 1”. Od tej
-chwili pozycja liczy się sama. Liczbę stołów (domyślnie 8, do 64) ustawia
-się na stronie.
-
-Linia może biec w osi X i Y hali, stoły podnoszone unoszą karoserię
-(ten ruch jest pomijany), a stoły obrotowe obracają ją o 90° w jedną lub
-drugą stronę — firmware obsługuje wszystkie te przypadki.
+chwili pozycja liczy się sama. Liczba stołów (do 64), odstępy, kierunki,
+windy, stoły obrotowe i ruchy technologiczne pochodzą z `config.csv`.
 
 **Jak to działa:**
 - *Orientacja:* żyroskop (bez offsetu) cały czas — w postoju i w jeździe —
@@ -34,19 +34,22 @@ drugą stronę — firmware obsługuje wszystkie te przypadki.
   bliski zera (< 0,23 °/s) — obrót i przechył go nie psują; „obrót” trwający
   ponad 30 s w postoju jest traktowany jako zmiana offsetu (np. temperatura).
 - *Kurs i obroty:* obrót wokół pionu jest całkowany stale (0 = kierunek
-  karoserii na stole 1). Obrót w postoju (powyżej 2 °/s) jest rozpoznawany
-  jako obrót stołu i zaokrąglany do wielokrotności 90°, jeśli mieści się
-  w ±20°. Strona pokazuje kompas na autku, a płytka — „OBROT W LEWO/PRAWO”.
+  karoserii na stole 1). Obrót w postoju (powyżej 2 °/s, co najmniej 20°)
+  jest rozpoznawany jako obrót stołu; kurs jest zaokrąglany do wielokrotności
+  90°, jeśli mieści się w ±20°, ale **do logu trafia kąt zmierzony** (bez
+  zaokrąglenia), żeby można było porównać go z konfiguracją. Strona pokazuje
+  kompas na autku, a płytka — „OBROT W LEWO/PRAWO”.
 - *Ruch:* od spoczynku do postoju przyspieszenie jest obracane żyroskopem
   do osi z chwili startu, pozbawione grawitacji i całkowane na bieżąco.
   W postoju prędkość musi być zerowa, więc reszta prędkości to dryf —
-  usuwany w zamkniętej postaci. Pozioma część wyniku to przejechane metry.
+  usuwany w zamkniętej postaci. Pozioma część wyniku to przejechane metry,
+  pionowa — ruch w Z (winda, stół technologiczny).
 - *Postój czy jazda (filtr drgań konstrukcji):* stoły wiszą na konstrukcji,
   która drga, więc samo przyspieszenie nie odróżnia postoju od jazdy.
   Wskaźnikiem jazdy jest pozioma „prędkość z przeciekiem” (przyspieszenie bez
   grawitacji całkowane ze stałą zaniku 1,5 s): drgania o amplitudzie A i
   częstotliwości f dają tylko A/(2πf) (1 m/s² przy 5 Hz → 0,03 m/s), a ruszenie
-  z rampą 0,3–0,5 m/s; pionowe bujanie się nie liczy. W postoju płytka stale
+  z rampą 0,3–0,5 m/s. W postoju płytka stale
   mierzy poziom drgań (RMS tej prędkości i przyspieszenia poniżej ok. 1 Hz,
   pamięć ok. 10 s) i dopasowuje progi: ruszenie powyżej 4× poziomu
   (0,25–0,30 m/s — próg nie schodzi poniżej 0,25 m/s, żeby drgania konstrukcji
@@ -56,81 +59,96 @@ drugą stronę — firmware obsługuje wszystkie te przypadki.
   (prędkość z przeciekiem przeciwna do kierunku ruszenia), a po nim cisza —
   równa jazda po rolkach też bywa cicha, ale nie ma przed nią hamowania;
   awaryjnie wystarcza 45 s ciszy (dłużej niż najdłuższa równa jazda przez
-  stoły PT: 24 m przy 0,6 m/s to ok. 38 s). Grawitacja i offset żyroskopu są w postoju
+  kilka stołów: 24 m przy 0,6 m/s to ok. 38 s). Grawitacja i offset żyroskopu są w postoju
   śledzone dwustopniową średnią (tłumi drgania o ok. 4 rzędy), a grawitacja po
   zatrzymaniu jest średnią z całych 15 s ciszy. Poziom drgań liczony jest
   tylko ze zmienności (składowa stała odjęta), więc chwilowy rozjazd
-  grawitacji nie podnosi progów. Ruch pionowy (stoły podnoszone) się nie
-  liczy. Ruch bez impulsu hamowania (szarpnięcie, przechył) nie zmienia stołu.
+  grawitacji nie podnosi progów. Ruch bez impulsu hamowania (szarpnięcie,
+  przechył) nie zmienia stołu.
   Poziom i progi widać na
   stronie („Filtr drgań konstrukcji”) i na ekranie LINIA (dolny wiersz).
-- *Stół:* kierunek przejazdu na podłodze = kurs + kierunek w osiach
-  czujnika. Każdy odstęp między stołami uczy się swojego kierunku przy
-  pierwszym przejeździe (strzałki przy odstępach na stronie), więc odcinki
-  w X i w Y oraz jazda po obrocie karoserii są rozpoznawane jako „do przodu”
-  albo „wstecz”; bez wyuczonych kierunków przyjmowane jest „do przodu”.
-  Przejazd przesuwa pozycję o tyle stołów, ile odstępów mieści się
-  w odległości (zaokrąglając); odstępy uczą się same (domyślnie 6,5 m).
-  Przesunięcie krótsze niż 35% odstępu (lub 1,5 m) to poprawka, nie przejazd.
-  Po 2 s bezruchu strona pokazuje detal na nowym stole.
-- *Odcisk Wi-Fi:* po **15 s** postoju stół jest zatwierdzany i płytka robi
-  3 skany Wi-Fi (ok. 8 s; jej sieć działa dalej, strona może na chwilę się
-  zatrzymać). Pierwszy odcisk na stole staje się jego wzorcem (potem
-  uśredniany). Kolejne skany porównuje ze wzorcami (średnia różnica RSSI);
-  gdy inny stół pasuje wyraźnie lepiej, pozycja jest poprawiana
-  („poprawione przez Wi-Fi”). Po zgubieniu próbek w trakcie przejazdu,
-  po przejeździe dłuższym niż 60 s (np. noszenie w ręku) i po włączeniu
-  płytki stół jest nieznany — rozpoznaje go pierwszy odcisk.
+- *Pion:* płytka obserwuje też pionową „prędkość z przeciekiem” (stała 3 s,
+  własny próg 0,05–0,25 m/s z pionowych drgań) — na każdej stacji. Ruch
+  w pionie to przejazd windą (przy windzie), ruch technologiczny stacji
+  (`lift`, `RPS_seat`) albo punkt odniesienia (niżej); w innym przypadku nic
+  nie zmienia. Ruch w Z kończy się po 6 s spokoju w pionie (przechył stołu
+  podnoszonego nie przeszkadza). Gdy w trakcie ruchu w Z albo tuż po nim
+  ruszą rolki (stół podnosi detal i przenośnik od razu jedzie), ruch
+  przechodzi w przejazd: pozioma część to przejazd, pionowa — ruch w Z.
+- *Stół:* kierunki odcinków z `config.csv` są w osiach czujnika, więc
+  przejazd jest „do przodu” albo „wstecz” według kierunku w osiach czujnika
+  (kurs nie ma znaczenia). Przejazd przesuwa pozycję o tyle stołów, ile
+  odstępów z pliku mieści się w odległości (zaokrąglając do najbliższej
+  stacji, więc błąd nie narasta); przejazd przez kilka stołów bez
+  zatrzymania jest liczony tak samo. Przesunięcie krótsze niż 35% odstępu
+  (lub 1,5 m) to poprawka, nie przejazd. Po 2 s bezruchu strona pokazuje
+  detal na nowym stole.
+- *Punkty odniesienia:* obrót w postoju (stół obrotowy `RZ±` albo
+  `rotation_z`) i ruch w Z (winda, `lift`, `RPS_seat`) wykonują tylko
+  niektóre stacje — są więc charakterystycznymi punktami linii. Gdy taki
+  ruch nie pasuje do policzonej stacji, płytka przechodzi na najbliższą
+  stację, która go wykonuje (obrót: ten sam kierunek i liczba ćwierćobrotów;
+  winda: ten kierunek i ≥35% jej wysokości; `lift`/`RPS_seat`: ≥50% zakresu).
+  Przy dwóch równie bliskich stacjach nic się nie zmienia. Gdy stół jest
+  nieznany (po włączeniu, po zgubieniu próbek, po przeniesieniu), ruch
+  ustala stację, jeśli wykonuje go tylko jedna stacja na linii. Korekta
+  pokazuje się na ekranie („KOREKTA: PUNKT ODNIES.”), a wiersz logu dostaje
+  flagę `ref_fix=<stacja liczona>><stacja właściwa>`.
+- *Odcisk Wi-Fi:* po **15 s** postoju (tylko na stacjach z `wifi_scan`)
+  płytka robi 3 skany Wi-Fi (ok. 8 s; jej sieć działa dalej, strona może na
+  chwilę się zatrzymać). Pierwszy odcisk na stole staje się jego wzorcem
+  (potem uśredniany). Wi-Fi **nie poprawia** policzonej stacji — tylko ją
+  znajduje, gdy jest nieznana: po włączeniu płytki i po zgubieniu próbek
+  przy wyraźnym dopasowaniu (średnia różnica ≤12 dB i przewaga nad drugim
+  stołem ≥0,8 dB oraz ≥25%; inaczej skan co 45 s, wyniki z tego samego
+  miejsca uśredniane), a po przeniesieniu — od razu najlepiej pasujący stół.
+  Liczą się tylko stoły z odciskiem.
 - *Przeniesienie w inne miejsce:* jazda po rolkach jest pozioma, nie obraca
   się i kończy hamowaniem. Ruch z przechyłem ponad 8°, obrotem ponad 30° przed
   zatrzymaniem, bez hamowania (przy ≥1,5 m) albo dłuższy niż 60 s jest
   uznawany za przeniesienie (ręcznie, suwnicą): strona pokazuje
-  „Przenoszony” już w trakcie, a po odstawieniu stół jest nieznany i po 15 s
-  postoju rozpoznaje go sam odcisk Wi-Fi — bez względu na to, jak daleko od
-  poprzedniego stołu. Stół jest przyjmowany tylko przy wyraźnym dopasowaniu
-  (średnia różnica ≤12 dB i przewaga nad drugim stołem ≥0,8 dB oraz ≥25%);
-  inaczej skan jest powtarzany co 45 s, a wyniki skanów z tego samego miejsca
-  są uśredniane, aż sąsiednie stoły się rozdzielą. Tak samo po włączeniu
-  płytki i po zgubieniu próbek. Przeniesienie jest na liście przejazdów
-  („przeniesiony, stół z Wi-Fi”). Bezpiecznik: „jazda” dłuższa niż 120 s
-  oznacza utratę orientacji — płytka uczy się grawitacji od nowa, a stół
-  znajduje Wi-Fi.
-- Wzorce, odstępy, kierunki odcinków, kurs karoserii na każdym stole i liczba
-  stołów są zapisywane w pamięci nieulotnej (NVS) i przetrwają wyłączenie;
-  po włączeniu stół rozpoznaje odcisk Wi-Fi, a kurs — zapamiętany kurs na
-  tym stole. (Zmiana formatu w tej wersji: wcześniej zapisane dane są
-  kasowane, linię trzeba raz przejechać od stołu 1.)
+  „Przenoszony” już w trakcie, a po odstawieniu stół jest nieznany. Koniec
+  przeniesienia jest rozpoznawany z surowych odczytów (żyroskop spokojny,
+  akcelerometr stabilny), bez orientacji z żyroskopu — ta może się
+  rozjechać np. po stuknięciu ponad zakres ±500 °/s. Po odłożeniu wystarczą
+  3 s spokoju, potem skan Wi-Fi ustala stół. Bezpiecznik: „jazda” dłuższa
+  niż 120 s oznacza utratę orientacji — płytka uczy się grawitacji od nowa.
+- W pamięci nieulotnej (NVS) są tylko odciski Wi-Fi i kurs karoserii na
+  każdym stole; po włączeniu stół rozpoznaje odcisk Wi-Fi albo punkt
+  odniesienia, a kurs — zapamiętany kurs na tym stole. (Zmiana formatu
+  w tej wersji: wcześniej zapisane dane są przy pierwszym starcie kasowane.)
 
-**Drgania przejazdu:** dla każdego przejazdu płytka zapisuje odległość,
-czas, największe przyspieszenie rampy (start/hamowanie), RMS i szczyt
-drgań w X/Y/Z (składowa powyżej ok. 0,6 Hz) oraz obwiednię przyspieszenia
-(min–maks w czasie, do 160 punktów). Pamięta ostatnie 12. Strona pokazuje
-je w tabeli z wykresem i pozwala pobrać obwiednię jako CSV, a jeśli była
-otwarta przez cały przejazd — także próbki 200 Hz (CSV).
-RMS, szczyt i obwiednia liczone są z próbek 200 Hz (filtr czujnika 94 Hz).
+**Drgania przejazdu:** dla każdego przejazdu płytka liczy czas,
+największe przyspieszenie rampy (start/hamowanie), RMS i szczyt
+drgań w X/Y/Z (składowa powyżej ok. 0,6 Hz, z próbek 200 Hz, filtr czujnika
+94 Hz) — trafiają do logu przejazdu (niżej) i na port szeregowy, a największy
+RMS przy każdym stole — na stronę (słupki i kolor stołu).
 
-**Strona — linia:** widok z boku: stoły jako ramy, przez które biegnie
-przenośnik rolkowy, detal jako autko jadące po rolkach (koła i rolki kręcą
-się w ruchu). W ramie stołu — „kod kreskowy” jego odcisku Wi-Fi (sieci
-ułożone wg stołu, przy którym są najsilniejsze), pod stołami — wyuczone
-odstępy (linie wymiarowe) i podobieństwo ostatniego skanu do każdego stołu.
+**Strona — linia:** widok z góry: stoły rozmieszczone wg odstępów
+i kierunków z `config.csv` (windy i stoły obrotowe zaznaczone), detal jako
+autko jadące po rolkach. W ramie stołu — „kod kreskowy” jego odcisku Wi-Fi
+(sieci ułożone wg stołu, przy którym są najsilniejsze), przy stołach —
+słupki drgań X/Y/Z i podobieństwo ostatniego skanu do każdego stołu.
 W postoju nad autkiem odlicza się czas do odcisku, a w trakcie skanu
 pulsuje znak Wi-Fi. Kliknięcie stołu pokazuje jego sieci z porównaniem do
-ostatniego skanu.
+ostatniego skanu. Niżej wykresy przyspieszenia i prędkości kątowej
+ostatniego przejazdu (od ruszenia do zatrzymania).
 
-Sprawdzenie na komputerze: symulowana linia 8 stołów z odcinkami w X i Y,
-stół podnoszony (0,4 m, przechył 1,5°), stoły obrotowe +90° i −90°, rampa,
-drgania rolek, Wi-Fi z 12 punktów dostępowych, zgubione próbki, restart,
-poprawka, przeniesienie w ręku ze stołu 8 na 3 i z powrotem (chwianie ±12°,
-obrót 60°); czujnik zamocowany krzywo i obrócony względem linii. Cały
-scenariusz przechodzi dwa razy: bez drgań konstrukcji i z drganiami
+Sprawdzenie na komputerze (`test/line_checks.cpp`): symulowana linia
+8 stołów z odcinkami w X i Y, stół `RPS_seat` (0,4 m w górę i w dół,
+przechył 1,5°), stoły obrotowe w lewo i w prawo, rampa, drgania rolek,
+Wi-Fi z 12 punktów dostępowych, zgubione próbki, restart, poprawka,
+przeniesienie w ręku i z powrotem (chwianie ±12°, obrót 60°, stuknięcie
+ponad zakres żyroskopu); czujnik zamocowany krzywo i obrócony względem linii.
+Scenariusze przechodzą bez drgań konstrukcji i z drganiami
 (0,8 m/s² 7 Hz i 0,5 m/s² 11 Hz w poziomie, 1 m/s² 5 Hz w pionie, kołysanie
 0,15 m/s² 0,9 Hz, kołysanie dla żyroskopu) — w tym 120 s postoju bez
-fałszywego przejazdu, obroty rozpoznane jako 90,0°, podnoszenie bez wpływu
-na progi i stół; największy błąd odległości ok. 0,2 m bez drgań i ok. 0,4 m
-z drganiami. Do tego: konfiguracja `config.csv` (odstępy z pliku, skan Wi-Fi
-tylko tam, gdzie `wifi_scan`), przejazdy przez stoły PT (16 i 24 m bez
-zatrzymania) oraz linia z windami (`Z-`/`Z+`, opis niżej):
+fałszywego przejazdu i obroty rozpoznane jako ok. 90°; największy błąd
+odległości ok. 0,2 m bez drgań i ok. 0,5 m z drganiami. Do tego: stoły
+obrotowe przy czujniku poza osią, przejazdy przez kilka stołów (16 i 24 m
+bez zatrzymania), windy, `lift` i `RPS_seat` (z przejazdem ruszającym tuż po
+powrocie), punkty odniesienia (obrót, stół obrotowy, winda, `RPS_seat`,
+stacja nieznana, remis), praca bez `config.csv`:
 
 ```text
 g++ -std=c++17 -O2 -Iinclude test/line_checks.cpp -o lc && ./lc
@@ -140,84 +158,110 @@ g++ -std=c++17 -O2 -Iinclude test/line_checks.cpp -o lc && ./lc
 
 Płytka jest widoczna przez USB jako dysk **WIBROMTR SKID LOG** (obok portu
 szeregowego). Plik `config.csv` na nim, wczytywany przy starcie, opisuje
-linię (do 64 stacji); wtedy jest nadrzędny: odstępy i kierunki nie są
-uczone, a Wi-Fi nie poprawia stołu. Bez pliku — samouczenie jak opisano
-wyżej. Błędny wiersz odrzuca cały plik (log: `config.csv: not found or
-invalid`). Przykłady: `docs/configs/`.
+linię (2–64 stacje). Bez pliku albo z błędem płytka nie liczy pozycji —
+błędny wiersz odrzuca cały plik, a ekran, strona i port szeregowy podają
+numer wiersza i przyczynę. Przykłady: `docs/configs/`, `docs/config.example.csv`.
 
 ```csv
-station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed
-B1,X+,0,false,true,none,,,
-B2,X+,6.5,false,false,none,,,
+station_id,direction,distance_m,wifi_scan,station_motion,motion_axis,motion_range
+B1,X+,0,true,none,,
+B2,X+,6.5,false,RPS_seat,Z,0.5
+B3,X+,6.5,false,rotation_z,Z,-90
+B3r,RZ+,90,false,none,,
+B4,Y-,6.5,true,none,,
 ```
 
+Plik może mieć nagłówek (jak wyżej), BOM UTF-8 i końce wierszy CRLF;
+zapis z polskiego arkusza (`;` między polami, przecinek dziesiętny) też jest
+czytany. Ostatnie dwie kolumny można pominąć.
+
+- `station_id` — nazwa stacji (do 11 znaków), pokazywana na ekranie LINIA,
+  na stronie i w nazwach plików logu.
 - `direction`, `distance_m`: odcinek od poprzedniej stacji (dla pierwszej
   pomijany). `X+ / X- / Y+ / Y-` — po rolkach, w osiach czujnika (detal
   obraca się razem z czujnikiem, więc po stole obrotowym „X+” to nadal X+
-  czujnika, choć w hali linia biegnie już pod kątem); `Z+ / Z-` — winda w górę / w dół między
-  dwoma osobnymi miejscami postoju, `distance_m` to jej wysokość;
-  `RZ+ / RZ-` — stół obrotowy między dwiema pozycjami, obrót wokół
-  pokazywanej osi Z (skierowanej w dół): `RZ+` w prawo (zgodnie z ruchem
-  wskazówek zegara patrząc z góry), `RZ-` w lewo, `distance_m` to kąt w stopniach (np. 90). Obrót w
-  postoju o co najmniej połowę tego kąta w tę stronę przenosi detal na
-  następną pozycję, w przeciwną — na poprzednią (log np. `B026-B026o.csv`).
-  Kierunki kolejnych wierszy zostają w osiach czujnika; strona rysuje linię
-  za obrotem obróconą o ten kąt.
-- `passthrough` — stół, przez który detal może przejechać bez zatrzymania.
+  czujnika, choć w hali linia biegnie już pod kątem), `distance_m` > 0;
+  `Z+ / Z-` — winda w górę / w dół między dwoma osobnymi miejscami postoju,
+  `distance_m` to jej wysokość; `RZ+ / RZ-` — stół obrotowy między dwiema
+  pozycjami, obrót wokół pokazywanej osi Z (skierowanej w dół): `RZ+`
+  w prawo (zgodnie z ruchem wskazówek zegara patrząc z góry), `RZ-` w lewo,
+  `distance_m` to kąt w stopniach — **wielokrotność 90** (inaczej plik jest
+  odrzucany). Obrót w postoju o tyle ćwierćobrotów w tę stronę przenosi
+  detal na następną pozycję, w przeciwną — na poprzednią (log np.
+  `B3-B3r.csv`). Kierunki kolejnych wierszy zostają w osiach czujnika;
+  strona rysuje linię za obrotem obróconą o ten kąt.
 - `wifi_scan` — tylko na tych stacjach robiony jest odcisk Wi-Fi (oraz
   zawsze, gdy stół jest nieznany).
-- `station_motion` (`none / lift / rotation_z / z_transfer / compound`),
-  `motion_axis`, `motion_range` (m albo °), `motion_speed` — ruch
-  technologiczny na stacji (log `B026_tech.csv`, stacja się nie zmienia);
-  zakres (wartość bezwzględna) służy do oznaczenia `over_range`. Dla
-  `rotation_z` znak to kierunek obrotu wokół pokazywanej osi Z (w dół):
-  `+` w prawo, `-` w lewo, np. `B026,X+,6.5,…,rotation_z,Z,-90,` — stół
-  obraca detal o 90° w lewo, a linia biegnie dalej w X+ czujnika, w hali
-  skręcona (tak ją rysuje strona).
-- Nazwa stacji (`station_id`, do 11 znaków) jest pokazywana na ekranie
-  LINIA i na stronie.
+- `station_motion` — ruch technologiczny na stacji (stacja się nie zmienia,
+  log `<stacja>_tech.csv`):
+  - `none` — brak;
+  - `lift` — jeden ruch w Z, w którąkolwiek stronę (jak winda, ale na tej
+    samej stacji); każdy ruch to jeden wiersz;
+  - `RPS_seat` — osadzenie na pinach stołu bazującego (RPS, reference
+    positioning system) na czas obróbki przez roboty i powrót: w jednym
+    cyklu dwa ruchy w Z, w którąkolwiek stronę najpierw. Cykl to jeden
+    wiersz, zapisany, gdy ruch powrotny go zamknie; głębokość powrotu jest
+    we fladze `back_m=…`. Bez powrotu (odjazd ze stacji, przeniesienie, albo
+    10 min) wiersz z flagą `no_return`;
+  - `rotation_z` — obrót na stacji wokół pokazywanej osi Z o `motion_range`
+    stopni ze znakiem (`+` w prawo, `-` w lewo), **wielokrotność 90**;
+    np. `B3,X+,6.5,…,rotation_z,Z,-90` — stół obraca detal o 90° w lewo,
+    a linia biegnie dalej w X+ czujnika, w hali skręcona (tak ją rysuje strona);
+  - `z_transfer`, `compound` — krótki przejazd (manewr) na stacji, który
+    kończy się na tej samej stacji.
+- `motion_axis` — czytana i nieużywana (wszystkie ruchy są w osi Z / wokół
+  osi Z, kierunek nie ma znaczenia); można zostawić `Z` albo puste.
+- `motion_range` — zakres ruchu: metry (`lift`, `RPS_seat`) albo stopnie
+  (`rotation_z`); tylko do porównania z pomiarem (`declared`, `delta`,
+  flagi), nie odrzuca ruchu — liczy się ruch od 0,1 m. Może być przybliżony
+  i poprawiony później na podstawie logów.
 
-**Windy:** przy stacji sąsiadującej z windą płytka obserwuje też pionową
-„prędkość z przeciekiem” (stała 3 s, własny próg 0,05–0,25 m/s z pionowych
-drgań); ruch w pionie w stronę windy dłuższy niż 35% jej wysokości to
-przejazd do następnego miejsca postoju. W innych miejscach ruch pionowy dalej
-się nie liczy (stoły podnoszone). W symulacji windę widać od ok. 0,15 m/s,
-przy silnych pionowych drganiach konstrukcji (1 m/s² przy 5 Hz) od ok.
-0,3 m/s.
+Flagi (`quality_flags`, rozdzielone `;`): `over_range` (ponad 1,5 × zakres),
+`under_range` (poniżej 0,5 × zakres), `return_mismatch` (powrót `RPS_seat`
+różni się od ruchu „tam” o ponad 20% i ponad 0,15 m), `back_m=…`,
+`no_return`, `ref_fix=A>B` (punkt odniesienia przestawił stację z A na B).
 
 **Stół obrotowy z czujnikiem poza osią:** czujnik zatacza łuk, co
 akcelerometr widzi jak ruch poziomy. Gdy detal obraca się wokół pionu bez
 przechyłu (stół, nie ręka), ruszenie jest zablokowane, a po obrocie
 detektor jazdy jest zerowany — obrót jest ruchem technologicznym stacji.
 
-**Przeniesienie:** gdy ruch rozpoznano jako przeniesienie (przechył,
-obrót w drodze), koniec jest rozpoznawany z surowych odczytów (żyroskop
-spokojny, akcelerometr stabilny), bez orientacji z żyroskopu — ta może się
-rozjechać np. po stuknięciu ponad zakres ±500 °/s. Po odłożeniu wystarczą
-3 s spokoju,
-potem skan Wi-Fi i pozycja od razu przechodzi na najlepiej pasujący stół
-(również z `config.csv`; liczą się tylko stoły z odciskiem).
-
 **Logi** (na tym samym dysku): każdy przejazd dopisuje wiersz do pliku
 nazwanego od stacji, np. `B2-B3.csv`, a ruch technologiczny — do
 `B3_tech.csv`; wszystkie wiersze trafiają też do wspólnego
-`distances_last_run.csv` (plik ze starym nagłówkiem jest przy starcie
-przemianowany na `distances_last_run_old.csv`) (bez `config.csv` — numery stołów, stół nieznany:
-`nieznana`). Kolumny: `timestamp_ms, segment_type, from_station,
-to_station, station_id, motion_type, axis, measured_distance_m,
-measured_angle_deg, confidence, quality_flags`, a dla przejazdów dodatkowo
+`distances_last_run.csv` (stół nieznany: `nieznana`). Kolumny:
+`timestamp_ms, segment_type, from_station, to_station, station_id,
+motion_type, axis, measured_distance_m, measured_angle_deg, confidence,
+quality_flags, declared, delta`, a dla przejazdów dodatkowo
 `duration_s, ramp_m_s2, rms_x, rms_y, rms_z, peak_x, peak_y, peak_z`
-(m/s², drgania powyżej ok. 0,6 Hz). Gdy komputer ma dysk zamontowany, płytka
-nie zapisuje (wysuń dysk przed jazdą).
+(m/s², drgania powyżej ok. 0,6 Hz). Wartości „measured” to zawsze pomiar
+(kąt bez zaokrąglenia). `declared` to wartość z `config.csv` dla tego
+samego (m, a dla obrotu — stopnie ze znakiem; dla przejazdu przez kilka
+stacji — suma odcinków), `delta` = zmierzone − zadeklarowane, w jednostce
+zmierzonej wartości wiersza; oba puste, gdy wartość nie jest w pliku
+ustawiona. Na tej podstawie można poprawić `distance_m` / `motion_range`
+(najlepiej średnią z kilku przejazdów). Plik logu ze starym nagłówkiem
+(inne kolumny) jest przy pierwszym zapisie przemianowany na
+`<nazwa>_old.csv`, a nowy zaczyna się od aktualnego nagłówka. Gdy komputer
+ma dysk zamontowany, płytka nie zapisuje (wysuń dysk przed jazdą).
 
 Ograniczenia: drgania konstrukcji o bardzo niskiej częstotliwości (wolne
 bujanie poniżej ok. 0,5 Hz o dużej amplitudzie) wyglądają podobnie jak
 ruszenie; górny limit progu (0,25 m/s) gwarantuje, że przejazd nadal jest
 wykrywany, ale takie bujanie może dać fałszywe krótkie „przejazdy” (krótsze
-niż 35% odstępu nie zmieniają stołu). Wi-Fi rozróżnia stoły tylko wtedy, gdy sieci w hali
-różnią się między nimi — na początku warto przejechać całą linię raz od
-stołu 1, aby każdy stół dostał wzorzec. Dokładność metrów nie była jeszcze
-sprawdzona na prawdziwej linii.
+niż 35% odstępu nie zmieniają stołu). Ruch w Z wolniejszy niż ok. 0,15 m/s
+(0,3 m/s przy silnych pionowych drganiach konstrukcji, 1 m/s² przy 5 Hz)
+może zostać niewykryty. Ruch w Z to jedna noga dopiero po 6 s spokoju, więc
+postój na pinach krótszy niż ok. 6 s nie rozdziela się na dwa ruchy. Przy
+silnych drganiach głębokość drugiego ruchu `RPS_seat` ma rozrzut ok.
+±0,12 m (stąd próg `return_mismatch`), a gdy przenośnik rusza zaraz po
+powrocie, powrót bywa mierzony gorzej (może wyjść `no_return`); przejazd
+ruszający 1–4 s po zakończonym ruchu w Z (bez powrotu) przy bardzo silnych
+drganiach może nie zostać zakończony. Wi-Fi rozróżnia stoły tylko wtedy, gdy
+sieci w hali różnią się między nimi — na początku warto przejechać całą
+linię raz od stołu 1, aby każdy stół ze `wifi_scan` dostał wzorzec.
+Dokładność metrów nie była jeszcze sprawdzona na prawdziwej linii.
+
 > Pozostałe funkcje są wyłączone flagami w `src/main.cpp`, a ich kod jest
 > zachowany: ekrany analizy (przebieg czasowy, FFT, licznik ruchów —
 > `imuEnabled`) oraz nawigacja po Wi-Fi (`ipsEnabled`; w praktyce działała
@@ -261,15 +305,16 @@ Ta magistrala jest też wyprowadzona na złączu STEMMA QT.
 ## Ekran i obsługa
 
 Ekrany przełączane krótkim naciśnięciem BOOT (numer w prawym górnym rogu):
-1 — przyspieszenie XYZ, 2 — żyroskop, 3–5 — przemieszczenie (wartości,
-wykres w czasie, tor), ostatni — akumulator. Z flagą `imuEnabled = true`
-dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 5.
+1 — LINIA (opis wyżej), 2 — przyspieszenie XYZ, 3 — żyroskop,
+4–6 — przemieszczenie (wartości, wykres w czasie, tor), 7 — strona
+w przeglądarce (Wi-Fi), 8 — akumulator. Z flagą `imuEnabled = true`
+dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 6.
 
 ![Ekran przyspieszenia: płasko, przechylony, uderzenie, tara, brak czujnika, łączenie](docs/accel-screens.png)
 
 *Podgląd wyrenderowany na komputerze tym samym kodem co na urządzeniu (skala 2×).*
 
-### 1. Przyspieszenie XYZ
+### 2. Przyspieszenie XYZ
 
 - Trzy wiersze: X czerwony, Y zielony, Z niebieski; wartość w m/s² i w g
   oraz pasek od środka (zero) w skali ±20 m/s²; na dole moduł |a|.
@@ -286,7 +331,7 @@ dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 5.
 - Czujnik mierzy do ±8 g (ok. ±78 m/s²); mocniejsze uderzenia są obcinane
   przez czujnik. Pasek jest obcinany na końcach.
 
-### 2. Żyroskop
+### 3. Żyroskop
 
 - Prędkość kątowa wokół X, Y, Z w °/s (pasek ±200 °/s), lekko wygładzona,
   z odjętym offsetem zera zmierzonym w ostatnim spoczynku (ten sam co
@@ -298,7 +343,7 @@ dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 5.
   ok. 1°/min po pomiarze offsetu.
 - **BOOT:** krótko — następny ekran; przytrzymanie ≥1 s — zerowanie kątów.
 
-### 3–5. Przemieszczenie (miernik odległości w osiach X, Y, Z)
+### 4–6. Przemieszczenie (miernik odległości w osiach X, Y, Z)
 
 Mierzy, o ile przesunięto czujnik w każdej osi podczas jednego ruchu
 **od spoczynku do spoczynku** (`include/Displacement.h`). Wynik jest
@@ -309,14 +354,14 @@ kompensowany żyroskopem.
 „SPOCZYNEK”, przesuń go płynnie i znów zostaw nieruchomo. Wynik pojawia się
 ok. 0,6 s po zatrzymaniu.
 
-- **Ekran 3:** przemieszczenie ostatniego ruchu w cm dla X, Y, Z, obok
+- **Ekran 4:** przemieszczenie ostatniego ruchu w cm dla X, Y, Z, obok
   suma wszystkich ruchów od zerowania; na dole długość wektora |d|, czas,
   największa prędkość i kąt obrotu w trakcie ruchu. W trakcie ruchu cyfry
   są żółte: to bieżący szacunek bez korekty dryfu, ostateczny wynik
   zastępuje go po zatrzymaniu.
-- **Ekran 4:** położenie X/Y/Z w czasie dla ostatniego ruchu, skala
+- **Ekran 5:** położenie X/Y/Z w czasie dla ostatniego ruchu, skala
   pionowa dobierana automatycznie (1-2-5 cm).
-- **Ekran 5:** tor ruchu w rzucie na płaszczyznę dwóch osi, w których ruch
+- **Ekran 6:** tor ruchu w rzucie na płaszczyznę dwóch osi, w których ruch
   był największy (np. X-Y), w tej samej skali w obu osiach; kółko — start,
   kropka — koniec, krok siatki podany na dole.
 - **BOOT:** krótko — następny ekran; przytrzymanie ≥1 s — zerowanie sumy.
@@ -355,16 +400,16 @@ Płytka tworzy własną sieć Wi-Fi (punkt dostępowy, bez internetu):
 - ekran „WYKRESY W PRZEGLADARCE” na płytce (przedostatni) podaje te dane
   i liczbę otwartych stron.
 
-Strona pokazuje na żywo próbki 200 Hz: przyspieszenie X/Y/Z
-i prędkość kątową X/Y/Z jako przewijane wykresy (okno 5, 10 albo 30 s,
-wstrzymanie, opcja „same drgania” odejmująca średnią z okna) z bieżącą
-wartością przy końcu każdego śladu. Niżej ostatni ruch z miernika
-przemieszczenia: wynik X/Y/Z w cm, sumy, wykres położenia w czasie, tor ruchu
-oraz przycisk „Wyzeruj sumę” (działa jak przytrzymanie BOOT).
+Strona pokazuje linię (opis wyżej), a pod nią próbki 200 Hz ostatniego
+przejazdu (od ruszenia do zatrzymania): przyspieszenie X/Y/Z i prędkość
+kątową X/Y/Z (opcja „same drgania” odejmuje grawitację i offset). Niżej
+ostatni ruch z miernika przemieszczenia: wynik X/Y/Z w cm, sumy, wykres
+położenia w czasie, tor ruchu oraz przycisk „Wyzeruj sumę” (działa jak
+przytrzymanie BOOT).
 
 Technicznie: ESPAsyncWebServer, WebSocket `/ws`; co 50 ms płytka wysyła
-paczkę JSON z nowymi próbkami i stanem miernika, po każdym ruchu — ruch
-z torem (`src/WebLink.*`). Strona jest w `src/WebPage.h` (bez zewnętrznych
+paczkę JSON z nowymi próbkami, stanem miernika i linii, po każdym ruchu —
+ruch z torem, a po zmianie — opis linii (`src/WebLink.*`). Strona jest w `src/WebPage.h` (bez zewnętrznych
 plików, działa offline). Z włączonym prototypem nawigacji Wi-Fi
 (`ipsEnabled`) punkt dostępowy nie startuje.
 
@@ -563,9 +608,8 @@ pozycję przed i po filtrze, confidence, czas skanu i czas obliczeń.
   `getCalibrationProgress()`, `resetCalibration()`.
 
 `src/NavigationScreen` rysuje ekran ze stanu (bez dostępu do radia).
-Wszystkie bufory mają stały rozmiar (bez alokacji na skan). Po dodaniu
-Wi-Fi firmware zajmuje 61% flash (+0,5 MB) i 27% statycznego RAM (+45 KB);
-sterownik Wi-Fi rezerwuje dodatkowo pamięć dynamiczną w czasie działania.
+Wszystkie bufory mają stały rozmiar (bez alokacji na skan). Sterownik Wi-Fi
+rezerwuje dodatkowo pamięć dynamiczną w czasie działania.
 
 ### Testy na komputerze
 
@@ -648,14 +692,14 @@ g++ -std=c++17 -O2 -Iinclude test/displacement_checks.cpp -o dc && ./dc
 
 1. Po starcie potwierdź na porcie szeregowym `MPU6050: addr 0x68 ...` oraz
    `MPU6050: INT works`; `rate=` ok. 200 Hz, drops=0.
-2. Połóż płytkę płasko: Z ≈ +9,8 m/s², X i Y bliskie zeru. MPU6050 bez
+2. Połóż płytkę płasko: Z ≈ −9,8 m/s² (oś Z pokazywana w dół), X i Y bliskie zeru. MPU6050 bez
    kalibracji ma typowo ±0,5 m/s² przesunięcia zera — to normalne; tara
    (BOOT ≥1 s) je odejmuje.
 3. Obracaj czujnik: składowa grawitacji powinna przechodzić między osiami,
    a moduł |a| zostać około 9,8 m/s² (1 g).
 4. Lekkie stuknięcie powinno być widoczne jako szczyt na paskach.
 5. Odłącz INT (A5) przy włączonym zasilaniu i zresetuj: powinien być
-   komunikat „no INT … polling every 5 ms”, a odczyt dalej działać.
+   komunikat „no INT … polling every 1 ms”, a odczyt dalej działać.
 6. Odłącz SDA podczas pracy: ekran pokaże `BRAK MPU6050`, a po
    podłączeniu odczyt wróci w ciągu kilku sekund. Nie zwieraj pinów.
 7. Sprawdź odczyt przez kilka minut w docelowym montażu na przewodzie

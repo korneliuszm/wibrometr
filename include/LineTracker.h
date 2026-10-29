@@ -15,15 +15,17 @@
 #endif
 
 // Position of a car body riding a roller line between numbered tables
-// (stations). The line may run in X and in Y, tables may lift the body (that
-// motion is ignored) and turntables may turn it by 90 degrees either way.
+// (stations), as config.csv describes the line: gaps along X and Y, lift
+// shafts, turntables (multiples of 90 degrees) and technological motions at
+// stations. Nothing about the line is learned; without a valid config.csv
+// nothing is tracked.
 //
 // Attitude: the gyro (minus its offset) turns the expected gravity in the
 // sensor axes all the time, standing or riding; the accelerometer only pulls
 // it back slowly. So tilting (lifting tables) or turning (turntables) does not
 // look like acceleration. The heading (turn about the vertical) is integrated
-// the same way; a turn while standing is reported, and snapped to a multiple
-// of 90 degrees when close to one.
+// the same way; a turn while standing is reported, and the heading snapped to
+// a multiple of 90 degrees when close to one (logs keep the measured angle).
 //
 // Standing or riding: the structure the tables hang from shakes the body all
 // the time. A ride is told apart by frequency and direction: a horizontal
@@ -39,27 +41,32 @@
 // gyro. The horizontal part of the result is the distance, and its direction
 // plus the heading gives the direction on the floor.
 //
-// Lifts: config.csv may make a gap a lift shaft (Z+/Z-) between two stops.
-// At a stop next to one, the ride detector also watches the vertical, and a
-// vertical ride the way of the shaft moves to the next stop. Everywhere else
-// vertical motion is still ignored (lifting tables).
+// Vertical: the ride detector watches it everywhere. Next to a lift shaft
+// (a Z+/Z- gap) a move the way of the shaft goes to the next stop. At a
+// station with a technological move in Z (lift: one move; RPS_seat: down onto
+// the reference pins and back, either way first) the station stays and the
+// move is logged in <station>_tech.csv (a leg ends after `legStopS` of calm).
 //
-// Tables: each gap between tables learns its floor direction from the first
-// ride through it. A ride is forward or back by comparing with those
-// directions, and moves the position by distance / spacing tables. Rides
-// without braking (a tilt or a jolt) move nothing.
+// Tables: the gaps' directions (in the sensor's axes) tell a ride forward
+// from back, and a ride moves the position by distance / spacing tables
+// (rounded). Rides without braking (a tilt or a jolt) move nothing.
+//
+// Reference points: a turn or a move in Z that only some stations make (a
+// turntable, rotation_z, a shaft, lift or RPS_seat) and that the counted
+// station cannot explain puts the body at the nearest station that can (if
+// one is clearly nearest; while the station is unknown, if it is the only one
+// on the line). The log row carries "ref_fix=A>B".
 //
 // Wi-Fi: a stop longer than `parkS` confirms the table and asks for a Wi-Fi
-// fingerprint. The first one at a table becomes its reference; later ones are
-// compared with all references and can correct the table counted from motion,
-// or find the table from scratch after a power cycle.
+// fingerprint (only where config.csv says wifi_scan). The first one at a table
+// becomes its reference. Scans never overrule a counted table; they find it
+// while it is unknown (after a power cycle, lost samples or being carried).
 //
 // Each ride also records its vibration: RMS and peak of the high-passed
 // acceleration per axis, the largest ramp (smoothed) acceleration and an
 // envelope of the acceleration without gravity over time.
 namespace line {
 constexpr int maxStations = 64;
-constexpr int defaultStations = 8;
 constexpr int maxAps = 24;           // Strongest access points kept per fingerprint.
 constexpr int envBins = 160;         // Envelope points kept per transit.
 constexpr int maxTransits = 12;      // Recent transits kept.
@@ -132,14 +139,11 @@ struct Transit {
   int16_t lo[envBins][3] = {}, hi[envBins][3] = {}; // Acceleration without gravity, 0.01 m/s2.
 };
 
-// What is learned and kept across power cycles.
+// What is learned and kept across power cycles: Wi-Fi fingerprints and the
+// body's heading at each table. The line itself comes from config.csv only.
 struct Learned {
-  static constexpr uint32_t currentVersion = 3; // 3: 64 stations.
+  static constexpr uint32_t currentVersion = 4; // 4: the line from config.csv only.
   uint32_t version = currentVersion;
-  int stations = defaultStations;
-  float gap[maxStations] = {};       // Metres from table i to i+1; 0: not learned.
-  float gapDir[maxStations] = {};    // Floor direction from table i to i+1, rad.
-  bool gapDirKnown[maxStations] = {};
   float heading[maxStations] = {};   // Heading of the body when it last stood at table i, rad.
   bool headingKnown[maxStations] = {};
   Fingerprint fp[maxStations];
@@ -173,6 +177,12 @@ public:
   // passthrough tables (24 m at 0.6 m/s rolls ~38 s between its ramps).
   static constexpr float forcedStopS = 45.0f;
   static constexpr float stopS = 2.0f;         // Calm this long: shown as arrived.
+  static constexpr float legStopS = 6.0f;      // Calm this long ends a technological lift leg (gravity is re-measured over it).
+  static constexpr float minLegM = 0.1f;      // A technological lift leg is at least this far; the configured range does not gate it (it may be a guess).
+  static constexpr float underRangeK = 0.5f;  // A leg under this share of the configured range: "under_range".
+  static constexpr float cycleReturnS = 600.0f; // A down-and-back cycle must be back within this.
+  static constexpr float returnTol = 0.2f;     // Way back differing from the way out by this share
+  static constexpr float returnTolM = 0.15f;   // and this much (the way back spreads +-0.12 m under strong shaking): "return_mismatch".
   static constexpr float parkS = 15.0f;        // Calm this long: table confirmed, Wi-Fi scan.
   static constexpr float turnStart = 0.035f;   // rad/s (2 deg/s) about the vertical: turning.
   static constexpr float turnEnd = 0.009f;     // rad/s (0.5 deg/s) ...
@@ -180,7 +190,6 @@ public:
   static constexpr float minTurn = 0.35f;      // rad (20 deg): smaller is not a turn.
   static constexpr float snapTol = 0.35f;      // rad: within this of k * 90 deg, snap to it.
   static constexpr float minTransitM = 1.5f;   // Shorter: a nudge, same table.
-  static constexpr float defaultGapM = 6.5f;
   static constexpr float nudgeShare = 0.35f;   // Under this share of a spacing: same table.
   static constexpr float maxTransitS = 60.0f;  // Longer: not a ride, table unknown.
   static constexpr float abandonS = 120.0f;    // "Riding" this long: the attitude is lost; start over.
@@ -208,17 +217,14 @@ public:
 
   Learned learned;
 
-  void setStations(int n) {
-    learned.stations = n < 2 ? 2 : n > maxStations ? maxStations : n;
-    if (station_ >= learned.stations) station_ = learned.stations - 1;
-  }
-  // Loads a parsed config.csv as the authoritative station layout: gaps and
-  // floor directions come from `cfg` and are no longer auto-learned, and
-  // Wi-Fi scans stop correcting the counted station (still scanned and
-  // blended into fingerprints, for the dashboard and distance log).
+  // Loads a parsed config.csv: the line (stations, gaps, directions, shafts,
+  // turntables, technological motions). Nothing about the line is learned;
+  // without a config the tracker does nothing at all (add() returns). Wi-Fi
+  // never overrules a counted station, it only finds one while it is unknown.
   // Call once, at boot, before `home()`.
   void applyStationConfig(const StationConfig &cfg) {
-    setStations(cfg.count);
+    stations_ = cfg.count < 2 ? 2 : cfg.count > maxStations ? maxStations : cfg.count;
+    if (station_ >= stations_) station_ = stations_ - 1;
     // Directions are in the sensor's (the body's) axes: the body turns with
     // the sensor on a turntable, so "X+" stays the sensor's X+ after it while
     // the line goes on turned on the floor. Rides are compared in those axes
@@ -228,7 +234,7 @@ public:
       stationRow_[i] = cfg.row[i];
       if (i + 1 < cfg.count) {
         const Direction d = cfg.row[i + 1].direction;
-        learned.gap[i] = cfg.row[i + 1].distanceM;
+        gap_[i] = cfg.row[i + 1].distanceM;
         shaft_[i] = d == Direction::ZPlus ? 1 : d == Direction::ZMinus ? -1 : 0;
         // RZ is about the Z axis as shown (pointing down): RZ+ turns right (CW from above).
         turn_[i] = d == Direction::RZPlus ? -1 : d == Direction::RZMinus ? 1 : 0;
@@ -236,9 +242,9 @@ public:
         // Z as shown, down: + right) or this gap itself (RZ). CCW is + here.
         if (cfg.row[i].motion == Motion::RotationZ) turned -= cfg.row[i].motionRange * pi / 180;
         if (turn_[i]) turned += turn_[i] * cfg.row[i + 1].distanceM * pi / 180;
-        learned.gapDir[i] = shaft_[i] || turn_[i] ? 0 : directionAngle(d);
-        learned.gapDirKnown[i] = !shaft_[i] && !turn_[i]; // No floor direction: not ridden along the floor.
-        shownDir_[i] = wrap(learned.gapDir[i] + turned);
+        gapDir_[i] = shaft_[i] || turn_[i] ? 0 : directionAngle(d);
+        gapFloor_[i] = !shaft_[i] && !turn_[i]; // No floor direction: not ridden along the floor.
+        shownDir_[i] = wrap(gapDir_[i] + turned);
       }
     }
     configAuthoritative_ = true;
@@ -248,10 +254,11 @@ public:
   // or `s` is out of range. Used by the motion classifier and distance log
   // in later tasks.
   const StationRow *stationRow(int s) const {
-    return configAuthoritative_ && s >= 0 && s < learned.stations ? &stationRow_[s] : nullptr;
+    return configAuthoritative_ && s >= 0 && s < stations_ ? &stationRow_[s] : nullptr;
   }
   // The body is at table 1 now; its heading there is the floor's 0.
   void home() {
+    pendDir_ = 0;
     station_ = 0;
     known_ = true;
     lost_ = Lost::None;
@@ -264,15 +271,13 @@ public:
   // In place: a fresh Learned would be ~5 KB on the stack.
   void forgetAll() {
     learned.version = Learned::currentVersion;
-    if (learned.stations < 2 || learned.stations > maxStations) learned.stations = defaultStations;
-    for (int i = 0; i < maxStations; ++i) {
-      learned.gap[i] = learned.gapDir[i] = learned.heading[i] = 0;
-      learned.gapDirKnown[i] = learned.headingKnown[i] = false;
-    }
+    for (int i = 0; i < maxStations; ++i) { learned.heading[i] = 0; learned.headingKnown[i] = false; }
     forgetWifi();
   }
+  int stations() const { return stations_; }
 
   void add(Accel a, Accel w, uint32_t us) {
+    if (!configAuthoritative_) return; // No valid config.csv: the line is not tracked at all.
     float dt = 0;
     if (primed_) {
       dt = (us - lastUs_) * 1e-6f;
@@ -294,7 +299,6 @@ public:
       refSet_ = true;
       settleStart_ = clock_;
     }
-    if (phase_ != Phase::Moving) lift_ = known_ && atShaft(station_); // Fixed for the length of a ride.
     attitude(a, w, dt);
     detect(a, dt);
     switch (phase_) {
@@ -303,6 +307,7 @@ public:
         if (clock_ - settleStart_ >= settleS) enterPark();
         break;
       case Phase::Parked: {
+        if (pendDir_ && clock_ - pendAt_ > cycleReturnS) flushLiftCycle("no_return");
         // While the body turns level (turntable) nothing starts a ride: a
         // sensor off the table's axis swings along an arc, which is no ride.
         // The detector is held at zero meanwhile and the arc is kept out of
@@ -315,7 +320,7 @@ public:
           overS_ = 0;
           hist_[(head_ + restSamples - 1) % restSamples] = {gB_, bias_}; // As follow() would.
         } else follow(dt, levelTauS);
-        if (!turningNow && (hv_ > startThreshold() || (lift_ && std::fabs(vv_) > shaftThreshold()))) {
+        if (!turningNow && (hv_ > startThreshold() || std::fabs(vv_) > shaftThreshold())) {
           if ((overS_ += dt) >= startConfirmS) startMove();
         } else overS_ = 0;
         if (phase_ == Phase::Parked && !parkDone_ && clock_ - phaseStart_ >= parkS) { parkDone_ = true; wantScan(); }
@@ -346,10 +351,35 @@ public:
         // Carried: the attitude the gyro kept may be off (a knock past its
         // range), so the stop is told from the raw sensor alone: no rocking
         // and a steady accelerometer once the hand has let go.
-        const bool calm = carrying()
+        // A move in Z (started by the vertical, not next to a shaft: a
+        // technological move, or a reference point while the count is off or
+        // unknown) is told by the vertical alone: the tilt of a lifting table
+        // drifts the horizontal signals for good.
+        const bool vertLeg = !carrying() && rideUp_ && !(known_ && atShaft(station_));
+        const bool calm = vertLeg ? std::fabs(vv_) < shaftThreshold() && std::fabs(va_) < stillVThreshold() : carrying()
           ? rideRate_ < std::max(carryStillRate, 2.5f * std::sqrt(levelW2_)) &&
               norm(sub(aFast_, aSlow_)) < std::max(carryStillA, 3 * std::sqrt(levelA2_))
-          : ha_ < stillThreshold() && hv_ < startThreshold() && (!lift_ || std::fabs(vv_) < shaftThreshold());
+          : ha_ < stillThreshold() && hv_ < startThreshold() &&
+              (!(rideUp_ || (known_ && atShaft(station_))) || std::fabs(vv_) < shaftThreshold()); // Vertical: up a shaft only.
+        // The rollers start during a move in Z or before its calm is over (a
+        // table lifts the body and the conveyor goes at once): from here on it
+        // is a ride. The integration goes on from the start of the move in Z,
+        // so the ride's distance is the horizontal part and that move the
+        // vertical one (see finish()). Counted from the start of the move, so
+        // the slow drift a tilted lifting table leaves is not a start.
+        if (vertLeg && norm(sub(vlFlat_, vlLeg_)) > startThreshold()) {
+          if ((overS_ += dt) >= startConfirmS) {
+            const Accel go = sub(vlFlat_, vlLeg_);
+            rideDir_ = scale(go, 1 / norm(go));
+            rideUp_ = 0;
+            legThenRide_ = true;
+            braked_ = false;
+            quietStart_ = -1;
+            arrived_ = false;
+            overS_ = 0;
+            break;
+          }
+        } else overS_ = 0;
         if (!calm) { quietStart_ = -1; arrived_ = false; break; }
         if (quietStart_ < 0) { // The body may have stopped: remember the state now.
           quietStart_ = clock_;
@@ -369,12 +399,15 @@ public:
         // Carried (tilted, turned on the way, too long): set down and still
         // for `carrySettleS` is enough, then Wi-Fi finds the table.
         const bool carry = carrying();
-        const bool stopped = calmS >= (slow_ ? stopS : carry ? carrySettleS : forcedStopS);
+        // Such a leg is over after a short calm even without braking: a slow
+        // table is seen by the detector only half way, and waiting for the usual
+        // parking time would swallow what follows (the way back, the next ride).
+        const bool stopped = calmS >= (slow_ || vertLeg ? (vertLeg ? legStopS : stopS) : carry ? carrySettleS : forcedStopS);
         if (stopped && !arrived_) {
           arrived_ = true;
           arrivalStation_ = slow_ && known_ ? rideTarget(snap_.p) : station_;
         }
-        if (stopped && calmS >= (carry ? carrySettleS : parkS)) finish();
+        if (stopped && calmS >= (carry ? carrySettleS : vertLeg ? legStopS : parkS)) finish();
         break;
       }
     }
@@ -387,29 +420,22 @@ public:
   void scanStarted() { scanWanted_ = false; }
   void applyScan(const Fingerprint &scan) {
     lastScan_ = scan;
-    const int n = learned.stations;
+    const int n = stations_;
     for (int s = 0; s < maxStations; ++s) score_[s] = s < n && learned.fp[s].count ? distance(scan, learned.fp[s]) : -1;
     if (scan.count == 0) return;
-    // Best table: Wi-Fi likeness plus a cost for disagreeing with the count.
+    // Wi-Fi only finds the table while it is unknown; a counted table is
+    // never overruled (motion and the reference points own it).
     int best = -1;
-    float bestCost = 1e9f;
-    for (int s = 0; s < n; ++s) {
-      if (score_[s] < 0) continue;
-      const float cost = score_[s] + (known_ ? stepCostDb * std::abs(s - station_) : 0);
-      if (cost < bestCost) { bestCost = cost; best = s; }
-    }
     corrected_ = false;
     if (!known_ && lost_ == Lost::Carried) {
       // Just set down after being carried: the best match is the table now,
-      // straight away (with config.csv too; only scanned tables compete).
-      best = -1;
+      // straight away (only scanned tables compete).
       for (int s = 0; s < n; ++s)
         if (score_[s] >= 0 && (best < 0 || score_[s] < score_[best])) best = s;
       if (best < 0) { relocateAt_ = clock_ + relocateRetryS; return; } // No table has a fingerprint yet.
       locate(best);
     } else if (!known_) {
-      if (configAuthoritative_) return; // CSV is authoritative: never locate purely from Wi-Fi.
-      // Table from Wi-Fi alone (after boot, lost samples or being carried):
+      // Table from Wi-Fi alone (after boot or lost samples):
       // only a clear match counts; otherwise try again a little later. Scans
       // taken at the same spot are averaged, so close neighbours separate.
       ++scoreN_;
@@ -427,18 +453,6 @@ public:
         return;
       }
       locate(best);
-    }
-    // Overrule the count only against a table that has its own reference
-    // (while learning, the current table has none yet).
-    else if (!configAuthoritative_ && known_ && best >= 0 && best != station_ && score_[station_] >= 0 &&
-             bestCost + switchMarginDb < score_[station_]) {
-      station_ = best;
-      corrected_ = true;
-      if (transitCount_ && transits_[(transitHead_ + maxTransits - 1) % maxTransits].id == lastTransitId_) {
-        Transit &t = transits_[(transitHead_ + maxTransits - 1) % maxTransits];
-        t.to = station_;
-        t.wifiCorrected = true;
-      }
     }
     if (!known_) return;
     Fingerprint &ref = learned.fp[station_];
@@ -470,7 +484,7 @@ public:
   float liveDistance() const {
     if (phase_ != Phase::Moving) return 0;
     const Accel p = arrived_ ? snap_.p : p_;
-    return std::max(horizontal(p), lift_ ? std::fabs(vertical(p)) : 0.0f);
+    return std::max(horizontal(p), known_ && atShaft(station_) ? std::fabs(vertical(p)) : 0.0f);
   }
   // Position as a fractional table index, for the animation.
   float position() const {
@@ -479,7 +493,7 @@ public:
     const float d = liveDistance();
     const int dir = direction();
     float pos = station_ + dir * (d / gapAhead(dir));
-    const float maxPos = float(learned.stations - 1);
+    const float maxPos = float(stations_ - 1);
     return pos < 0 ? 0 : pos > maxPos ? maxPos : pos;
   }
   int direction() const {
@@ -491,10 +505,12 @@ public:
   int shaft(int i) const { return i >= 0 && i < maxStations ? shaft_[i] : 0; }
   // Direction of gap i on the floor (rad, CCW, 0 = as the body at table 1), for
   // drawing: config.csv directions are the sensor's and turn with the body.
-  float shownDir(int i) const { return configAuthoritative_ ? shownDir_[i] : learned.gapDir[i]; }
+  float shownDir(int i) const { return shownDir_[i]; }
+  // Gap i is ridden along the floor (has a direction).
+  bool floorGap(int i) const { return i >= 0 && i < maxStations && gapFloor_[i]; }
   // Gap i is a turntable (RZ+/RZ-): +1 left (CCW), -1 right; gap(i) is its angle in degrees.
   int turntable(int i) const { return i >= 0 && i < maxStations ? turn_[i] : 0; }
-  float gap(int i) const { return learned.gap[i] > 0 ? learned.gap[i] : 0; }
+  float gap(int i) const { return gap_[i] > 0 ? gap_[i] : 0; }
   // Largest RMS vibration (m/s2, high-passed) recorded on any ride that
   // arrived at station `s`, per axis (0=X,1=Y,2=Z). 0 until a ride arrives.
   float stationVib(int s, int axis) const {
@@ -519,13 +535,31 @@ public:
   float stillThreshold() const { return clampf(stillK * std::sqrt(levelA2_), minStillA, maxStillA); }
   // Same for the vertical, used only next to a lift shaft.
   float shaftThreshold() const { return clampf(startK * std::sqrt(levelVz2_), minShaftV, maxShaftV); }
-  bool besideShaft() const { return lift_; }
+  // Vertical acceleration (low-passed) under which a technological lift leg is still.
+  float stillVThreshold() const { return clampf(stillK * std::sqrt(levelVa2_), minStillA, maxStillA); }
   float verticalActivity() const { return vv_; } // Vertical leaky velocity, m/s (up +).
 
   // Transits, oldest first; `newTransit()` is true once per finished transit.
   int transitCount() const { return transitCount_; }
   const Transit &transit(int i) const { return transits_[(transitHead_ + maxTransits - transitCount_ + i) % maxTransits]; }
   bool newTransit() { const bool r = newTransit_; newTransit_ = false; return r; }
+  // Log rows (distance log, see DistanceLog.h), queued: several may come
+  // between two calls (a cycle closed and a ride logged at once, samples
+  // processed in a batch). `takeDistanceRow()` hands them out oldest first.
+  bool takeDistanceRow(const char *&file, const char *&csv) {
+    if (!rowCount_) return false;
+    const LogRow &r = rows_[(rowHead_ + rowQueue - rowCount_) % rowQueue];
+    --rowCount_;
+    file = r.file;
+    csv = r.csv;
+    return true;
+  }
+  int droppedRows() const { return droppedRows_; }
+  // A reference point (a turn or a move in Z only some stations make) has
+  // just set the station: true once; `refFixStation()` names it.
+  bool newRefFix() { const bool r = newRefFix_; newRefFix_ = false; return r; }
+  const char *refFixStation() const { return refFixShown_; }
+  // The newest row (for display and checks): true once per new row.
   bool newDistanceRow() { const bool r = newDistanceRow_; newDistanceRow_ = false; return r; }
   const char *distanceRowCsv() const { return distanceRow_; }
   // File (without ".csv") the last row belongs in: "B2-B3" or "B3_tech".
@@ -544,8 +578,6 @@ public:
   }
 
 private:
-  static constexpr float stepCostDb = 4.0f;     // Per table away from the counted one.
-  static constexpr float switchMarginDb = 3.0f; // Needed to overrule the count.
   struct Sample { Accel a, w; float dt; };
   struct Rest { Accel g, bias; };
   struct Quat { float w, x, y, z; };
@@ -597,14 +629,27 @@ private:
   Fingerprint lastScan_{};
   float score_[maxStations] = {};
   float stationVibMax_[maxStations][3] = {};
-  bool configAuthoritative_ = false;
+  bool configAuthoritative_ = false; // A valid config.csv was applied; without one nothing is tracked.
+  int stations_ = 2;
+  float gap_[maxStations] = {};      // config.csv: metres from table i to i+1 (shaft: height; turntable: degrees).
+  float gapDir_[maxStations] = {};   // config.csv: direction of gap i in the sensor's axes, rad.
+  bool gapFloor_[maxStations] = {};  // Gap i is ridden along the floor (not a shaft or a turntable).
   StationRow stationRow_[maxStations];
   int8_t shaft_[maxStations] = {}; // From config.csv only, see shaft().
   int8_t turn_[maxStations] = {};  // From config.csv only, see turntable().
   float shownDir_[maxStations] = {}; // config.csv gap directions turned onto the floor, for drawing.
-  bool lift_ = false;              // Watching the vertical too: standing next to a shaft (or riding from one).
+  int pendDir_ = 0;                // Open RPS_seat cycle: way out (+1 up / -1 down); 0: none.
+  float pendDepth_ = 0, pendAt_ = 0;
+  int pendStation_ = -1;
+  char pendFix_[48] = {};          // The reference fix that came with the way out, if any.
+  char refFix_[48] = {};           // "ref_fix=A>B" while the move that caused it is logged.
+  char refFixShown_[16] = {};      // Station of the last reference fix, for display.
+  bool newRefFix_ = false;
   int rideUp_ = 0;                 // This ride started up (+1) / down (-1) a shaft; 0: along the floor.
   float vv_ = 0, vvMean_ = 0, levelVz2_ = 0;
+  float va_ = 0, vaMean_ = 0, levelVa2_ = 0; // Low-passed vertical acceleration, its 1 s mean and shaking level.
+  Accel vlLeg_{};                  // Horizontal leaky velocity when a move in Z started.
+  bool legThenRide_ = false;       // This ride began as a move in Z (see Phase::Moving).
   static float directionAngle(Direction d) {
     switch (d) {
       case Direction::XPlus: return 0;
@@ -636,6 +681,19 @@ private:
     logFileName(logName_, sizeof logName_, technological, from, to, [this](int s) { return stationName(s); });
   }
   bool newDistanceRow_ = false;
+  static constexpr int rowQueue = 8;
+  struct LogRow { char csv[256]; char file[32]; };
+  LogRow rows_[rowQueue];
+  int rowHead_ = 0, rowCount_ = 0, droppedRows_ = 0;
+  // The row just formatted in distanceRow_ / logName_ goes into the queue.
+  void pushRow() {
+    LogRow &r = rows_[rowHead_];
+    std::snprintf(r.csv, sizeof r.csv, "%s", distanceRow_);
+    std::snprintf(r.file, sizeof r.file, "%s", logName_);
+    rowHead_ = (rowHead_ + 1) % rowQueue;
+    if (rowCount_ < rowQueue) ++rowCount_; else ++droppedRows_; // Oldest overwritten.
+    newDistanceRow_ = true;
+  }
   float lastDistance_ = 0;
   Lost lost_ = Lost::Boot;
   float relocateAt_ = -1;   // When to scan again while the table is unknown; <0: not planned.
@@ -747,45 +805,52 @@ private:
     const float turned = heading_ - turnFrom_;
     if (std::fabs(turned) < minTurn) return;
     const float snapped = std::round(turned / (pi / 2)) * (pi / 2);
-    if (std::fabs(turned - snapped) < snapTol) heading_ = turnFrom_ + snapped;
+    if (std::fabs(turned - snapped) < snapTol) heading_ = turnFrom_ + snapped; // The heading only: logs keep the measure.
     lastTurn_ = heading_ - turnFrom_;
     turnAt_ = clock_;
     ++turnCount_;
     newTurn_ = true;
-    // A turntable between two positions (RZ+/RZ- in config.csv): standing,
-    // turned at least half its angle its way, the body is at the next
-    // position (or back at the previous one when turned the other way).
-    if (const int way = known_ && phase_ == Phase::Parked ? turntableWay(lastTurn_) : 0) {
-      const int from = station_;
+    // As measured (not snapped), about Z as shown (down): right +; and in
+    // quarter turns, as every turn on the line is configured.
+    const float measuredDeg = -turned * 180 / pi;
+    const int quarters = int(std::lround(measuredDeg / 90));
+    refFix_[0] = 0;
+    // Standing, a turn is a reference point: it says where the body is.
+    if (phase_ == Phase::Parked && quarters)
+      moveToReference(nearestReference([&](int st) { return turntableWayAt(st, quarters) || rotationAt(st, quarters); },
+                                       known_ && (turntableWayAt(station_, quarters) || rotationAt(station_, quarters))));
+    // A turntable between two positions (RZ+/RZ- in config.csv): the body is
+    // at the next position (or back at the previous one when turned the
+    // other way).
+    if (const int way = known_ && phase_ == Phase::Parked ? turntableWayAt(station_, quarters) : 0) {
+      if (pendDir_) flushLiftCycle("no_return");
+      const int from = station_, i = way > 0 ? from : from - 1;
       station_ += way;
       formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000), "transport", from, station_, "",
-                        Motion::None, "RZ", 0, -lastTurn_ * 180 / pi, 1.0f, ""); // About Z as shown (down): right +.
+                        Motion::None, "RZ", 0, measuredDeg, 1.0f, refFix_, float(way * turnDeg(i)));
       setLogName(false, from, station_);
-      newDistanceRow_ = true;
+      pushRow();
       if (headingKnown_) { learned.heading[station_] = heading_; learned.headingKnown[station_] = true; }
       learnedChanged_ = true;
+      refFix_[0] = 0;
       enterPark(); // At the new position: its own stop, Wi-Fi scan and all.
       return;
     }
-    // A turn finished while parked (turntable rotating a stopped part) never
-    // reaches Tracker::finish() (that only runs after a Moving ride with real
-    // horizontal/vertical displacement). Log RotationZ here instead, at the
-    // point the turn itself completes.
+    // A turntable at the station (rotation_z): the same station. A turn
+    // finished while parked never reaches finish(), so it is logged here.
     if (known_) {
-      if (const StationRow *row = stationRow(station_)) {
-        if (row->motion == Motion::RotationZ) {
-          const MotionResult motionResult = classifyMotion(*row, 0, -lastTurn_ * 180 / pi); // Z as shown: right +.
-          if (motionResult.valid) {
-            formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
-                               "technological", -1, -1, row->id, motionResult.motion,
-                               "Z", motionResult.measuredDistanceM, motionResult.measuredAngleDeg,
-                               1.0f, motionResult.overRange ? "over_range" : "");
-            setLogName(true, station_, station_);
-            newDistanceRow_ = true;
-          }
-        }
+      if (const StationRow *row = stationRow(station_); row && row->motion == Motion::RotationZ) {
+        const MotionResult motionResult = classifyMotion(*row, 0, measuredDeg);
+        char flags[64] = {};
+        if (motionResult.overRange) addFlag(flags, sizeof flags, "over_range");
+        if (refFix_[0]) addFlag(flags, sizeof flags, refFix_);
+        formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000), "technological", -1, -1,
+                          row->id, Motion::RotationZ, "Z", 0, measuredDeg, 1.0f, flags, row->motionRange); // Signed like the measure.
+        setLogName(true, station_, station_);
+        pushRow();
       }
     }
+    refFix_[0] = 0;
   }
 
   // Ride detector signals, in the sensor axes now.
@@ -805,6 +870,7 @@ private:
     // elevator starts more gently than the rollers.
     const float gn = norm(g), up = gn > 0 ? dot(dyn, g) / gn : 0;
     vv_ += up * dt - vv_ * dt / shaftLeakTauS;
+    va_ = gn > 0 ? dot(lp2_, g) / gn : 0; // Low-passed vertical acceleration (up +).
   }
   // Standing: measure the shaking. Only the fluctuation counts: a constant
   // offset (a gravity estimate still settling) must not raise the thresholds.
@@ -821,10 +887,13 @@ private:
     // ride (slow, and integrated over the longer leak) is left out.
     vvMean_ += dt / (1.0f + dt) * (vv_ - vvMean_);
     levelVz2_ += kl * ((vv_ - vvMean_) * (vv_ - vvMean_) - levelVz2_);
+    vaMean_ += dt / (1.0f + dt) * (va_ - vaMean_);
+    levelVa2_ += kl * ((va_ - vaMean_) * (va_ - vaMean_) - levelVa2_);
     hist_[(head_ + restSamples - 1) % restSamples] = {gB_, bias_}; // Slot of the sample just added.
   }
-  void clearDetector() { lp1_ = lp2_ = vl_ = vlFlat_ = vlMean_ = haMean_ = {}; ha_ = hv_ = overS_ = vv_ = vvMean_ = 0; }
+  void clearDetector() { lp1_ = lp2_ = vl_ = vlFlat_ = vlMean_ = haMean_ = {}; ha_ = hv_ = overS_ = vv_ = vvMean_ = va_ = vaMean_ = 0; }
   void abandon() {
+    pendDir_ = 0;
     if (known_) { known_ = false; lost_ = Lost::Carried; }
     phase_ = Phase::Settling;
     arrived_ = false;
@@ -845,22 +914,146 @@ private:
   float horizontal(Accel p) const { return norm(flat(p)); }
   // Vertical part (up +) of a vector given in the axes at the ride start.
   float vertical(Accel p) const { return dot(p, rest_.g) / std::max(norm(rest_.g), 1e-6f); }
-  // Along the line (+1 / -1) a turn by `turned` rad goes through a turntable
-  // next to the current table: at least half its angle, its way; else 0.
-  int turntableWay(float turned) const {
-    const int left = turned > 0 ? 1 : -1, s = station_;
-    const auto enough = [&](int i) { return std::fabs(turned) >= 0.5f * learned.gap[i] * pi / 180; };
-    if (s < learned.stations - 1 && turn_[s] == left && enough(s)) return 1;
-    if (s > 0 && turn_[s - 1] == -left && enough(s - 1)) return -1;
+  // Signed angle (deg, about Z as shown: right +) of turntable gap i, ridden
+  // forward (from table i to i+1); 0 when gap i is not a turntable.
+  float turnDeg(int i) const { return i >= 0 && i < maxStations ? -turn_[i] * gap_[i] : 0; }
+  // Along the line (+1 / -1) a turn of `quarters` (x 90 deg, right +) takes
+  // through a turntable next to station `s`; 0 when none there turns so.
+  int turntableWayAt(int s, int quarters) const {
+    if (!quarters) return 0;
+    const auto is = [&](float deg) { return deg != 0 && std::lround(deg / 90) == quarters; };
+    if (s < stations_ - 1 && is(turnDeg(s))) return 1;
+    if (s > 0 && is(-turnDeg(s - 1))) return -1;
     return 0;
   }
-  bool atShaft(int s) const { return (s < learned.stations - 1 && shaft_[s]) || (s > 0 && shaft_[s - 1]); }
+  // Station `s` turns the body by `quarters` (rotation_z).
+  bool rotationAt(int s, int quarters) const {
+    const StationRow *r = stationRow(s);
+    return quarters && r && r->motion == Motion::RotationZ && std::lround(r->motionRange / 90) == quarters;
+  }
+  // Reference points: a turn or a move in Z that the counted station cannot
+  // explain (`explained` false) puts the body at the nearest station that
+  // can (`ok`), if exactly one is nearest; while the station is unknown, at
+  // the only one on the line. -1: no change.
+  template <class Ok> int nearestReference(Ok ok, bool explained) const {
+    if (explained) return -1;
+    int best = -1, bestD = 1 << 30;
+    bool tie = false;
+    for (int st = 0; st < stations_; ++st) {
+      if (!ok(st)) continue;
+      const int d = known_ ? std::abs(st - station_) : 0;
+      if (d < bestD) { best = st; bestD = d; tie = false; }
+      else if (d == bestD) tie = true;
+    }
+    return tie ? -1 : best;
+  }
+  void moveToReference(int st) {
+    if (st < 0 || (known_ && st == station_)) return;
+    std::snprintf(refFix_, sizeof refFix_, "ref_fix=%s>%s", known_ ? stationName(station_) : "nieznana", stationName(st));
+    std::snprintf(refFixShown_, sizeof refFixShown_, "%s", stationName(st));
+    station_ = st;
+    known_ = true;
+    lost_ = Lost::None;
+    relocateAt_ = -1;
+    clearScores();
+    newRefFix_ = true;
+  }
+  // A move in Z (up +) the counted station cannot explain (no shaft that
+  // way, no technological move in Z there): see nearestReference().
+  void resolveVertical(float vz) {
+    const float h = std::fabs(vz);
+    const int up = vz > 0 ? 1 : -1;
+    const auto ok = [&](int st) {
+      if (const StationRow *r = stationRow(st); r && (r->motion == Motion::Lift || r->motion == Motion::RpsSeat) &&
+                                                  h >= std::max(minLegM, underRangeK * r->motionRange))
+        return true;
+      if (st < stations_ - 1 && shaft_[st] == up && h >= nudgeShare * gap_[st]) return true; // Up or down to st + 1.
+      return st > 0 && shaft_[st - 1] == -up && h >= nudgeShare * gap_[st - 1];              // Back to st - 1.
+    };
+    moveToReference(nearestReference(ok, known_ && (shaftTarget(vz) != station_ || techLift(station_))));
+  }
+  // Distance config.csv gives between tables `a` and `b` (sum of the gaps
+  // between them).
+  float declaredSpan(int a, int b) const {
+    if (a == b) return 0;
+    float sum = 0;
+    for (int i = std::min(a, b); i < std::max(a, b) && i < maxStations; ++i) sum += gap_[i];
+    return sum;
+  }
+  // Station `s` moves the body in Z (lift or RPS_seat).
+  bool techLift(int s) const {
+    const StationRow *r = stationRow(s);
+    return r && (r->motion == Motion::Lift || r->motion == Motion::RpsSeat);
+  }
+  static void addFlag(char *flags, size_t size, const char *flag) {
+    const size_t n = std::strlen(flags);
+    std::snprintf(flags + n, size - n, "%s%s", n ? ";" : "", flag);
+  }
+  static bool underRange(const StationRow &row, float depth) {
+    return row.motionRange != 0 && depth < underRangeK * std::fabs(row.motionRange);
+  }
+  void logLift(int s, float depth, const char *flags) {
+    const StationRow *row = stationRow(s);
+    formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000), "technological", -1, -1,
+                      row ? row->id : "", row ? row->motion : Motion::Lift, "Z", depth, 0, 1.0f, flags,
+                      row ? std::fabs(row->motionRange) : 0);
+    setLogName(true, s, s);
+    pushRow();
+  }
+  // The open down-and-back cycle never got its way back.
+  void flushLiftCycle(const char *flag) {
+    char flags[96] = {};
+    if (const StationRow *row = stationRow(pendStation_)) {
+      if (classifyMotion(*row, pendDepth_, 0).overRange) addFlag(flags, sizeof flags, "over_range");
+      if (underRange(*row, pendDepth_)) addFlag(flags, sizeof flags, "under_range");
+    }
+    addFlag(flags, sizeof flags, flag);
+    if (pendFix_[0]) addFlag(flags, sizeof flags, pendFix_);
+    logLift(pendStation_, pendDepth_, flags);
+    pendDir_ = 0;
+  }
+  // One move in Z (`vz`, up +) at a station with a technological move in Z.
+  // lift: one move, either way, logged at once. RPS_seat: down onto the
+  // pins and back up (or up and back down), either way first; logged once
+  // the way back closes the cycle, with the way back in back_m.
+  void liftLeg(const StationRow &row, float vz) {
+    const int dir = vz > 0 ? 1 : -1;
+    const float depth = std::fabs(vz);
+    char flags[96] = {};
+    if (row.motion == Motion::RpsSeat && pendDir_ && pendStation_ == station_ && dir == -pendDir_) {
+      if (classifyMotion(row, pendDepth_, 0).overRange) addFlag(flags, sizeof flags, "over_range");
+      if (underRange(row, pendDepth_)) addFlag(flags, sizeof flags, "under_range");
+      if (std::fabs(depth - pendDepth_) > std::max(returnTol * pendDepth_, returnTolM)) addFlag(flags, sizeof flags, "return_mismatch");
+      char back[24];
+      std::snprintf(back, sizeof back, "back_m=%.3f", depth); // The way back, measured too.
+      addFlag(flags, sizeof flags, back);
+      if (pendFix_[0]) addFlag(flags, sizeof flags, pendFix_);
+      if (refFix_[0]) addFlag(flags, sizeof flags, refFix_);
+      logLift(station_, pendDepth_, flags);
+      pendDir_ = 0;
+      return;
+    }
+    if (pendDir_) flushLiftCycle("no_return"); // The same way again, or another station.
+    if (row.motion == Motion::RpsSeat) { // The way out: logged when the way back is done.
+      pendDir_ = dir;
+      pendDepth_ = depth;
+      pendAt_ = clock_;
+      pendStation_ = station_;
+      std::snprintf(pendFix_, sizeof pendFix_, "%s", refFix_);
+      return;
+    }
+    if (classifyMotion(row, depth, 0).overRange) addFlag(flags, sizeof flags, "over_range");
+    if (underRange(row, depth)) addFlag(flags, sizeof flags, "under_range");
+    if (refFix_[0]) addFlag(flags, sizeof flags, refFix_);
+    logLift(station_, depth, flags);
+  }
+  bool atShaft(int s) const { return (s < stations_ - 1 && shaft_[s]) || (s > 0 && shaft_[s - 1]); }
   // Along the line (+1 / -1) a vertical move `vz` takes through a shaft
   // next to the current table; 0 when no shaft there goes that way.
   int shaftWay(float vz) const {
     const int up = vz > 0 ? 1 : -1, s = station_;
-    if (!lift_) return 0;
-    if (s < learned.stations - 1 && shaft_[s] == up) return 1;
+    if (!known_) return 0;
+    if (s < stations_ - 1 && shaft_[s] == up) return 1;
     if (s > 0 && shaft_[s - 1] == -up) return -1;
     return 0;
   }
@@ -873,8 +1066,8 @@ private:
     float left = std::fabs(vz);
     for (;;) {
       const int i = dir > 0 ? s : s - 1;
-      if (i < 0 || i >= learned.stations - 1 || shaft_[i] != dir * up) break;
-      const float g = learned.gap[i] > 0 ? learned.gap[i] : 1.0f;
+      if (i < 0 || i >= stations_ - 1 || shaft_[i] != dir * up) break;
+      const float g = gap_[i] > 0 ? gap_[i] : 1.0f;
       if (left < (s == station_ ? nudgeShare * g : g / 2)) break;
       left -= g;
       s += dir;
@@ -900,29 +1093,28 @@ private:
     const Accel e2 = cross(up, e1);
     return wrap(rideHeading_ + std::atan2(dot(ph, e2), dot(ph, e1)));
   }
-  // Forward (+1) or back (-1) along the line, from the learned directions of
-  // the gaps next to the current table; forward when nothing is known.
+  // Forward (+1) or back (-1) along the line, from the configured directions
+  // of the floor gaps next to the current table; forward when there are none.
   int direction(Accel ph) const {
-    // With config.csv the gaps' directions are in the sensor's axes (the
-    // body turns with it), so the ride's own direction in them counts and
-    // the heading does not matter; learned gaps are on the floor.
-    if (norm(ph) < 0.05f || (!configAuthoritative_ && !headingKnown_)) return 1;
-    const float ang = configAuthoritative_ ? wrap(floorAngle(ph) - rideHeading_) : floorAngle(ph);
+    // The gaps' directions are in the sensor's axes (the body turns with it),
+    // so the ride's own direction in them counts and the heading does not.
+    if (norm(ph) < 0.05f) return 1;
+    const float ang = wrap(floorAngle(ph) - rideHeading_);
     const int s = station_;
-    const bool f = s < learned.stations - 1 && learned.gapDirKnown[s];
-    const bool b = s > 0 && learned.gapDirKnown[s - 1];
-    const float cf = f ? std::cos(ang - learned.gapDir[s]) : 0;
-    const float cb = b ? std::cos(ang - learned.gapDir[s - 1] - pi) : 0;
+    const bool f = s < stations_ - 1 && gapFloor_[s];
+    const bool b = s > 0 && gapFloor_[s - 1];
+    const float cf = f ? std::cos(ang - gapDir_[s]) : 0;
+    const float cb = b ? std::cos(ang - gapDir_[s - 1] - pi) : 0;
     if (f && b) return cf >= cb ? 1 : -1;
     if (f) return cf > -0.5f ? 1 : -1;
     if (b) return cb > 0.5f ? -1 : 1;
-    return s == learned.stations - 1 ? -1 : 1;
+    return s == stations_ - 1 ? -1 : 1;
   }
   float gapAhead(int dir) const {
     const int i = dir > 0 ? station_ : station_ - 1;
-    return i >= 0 && i < maxStations && learned.gap[i] > 0 ? learned.gap[i] : defaultGapM;
+    return i >= 0 && i < maxStations && gap_[i] > 0 ? gap_[i] : 1.0f;
   }
-  // Table reached after `d` metres: walk gap by gap with the learned spacings
+  // Table reached after `d` metres: walk gap by gap with the configured spacings
   // (rounded to the nearest table); a short nudge stays at the same table.
   int targetFor(Accel ph, float d) const {
     const int dir = direction(ph);
@@ -931,8 +1123,8 @@ private:
     float left = d;
     for (;;) {
       const int i = dir > 0 ? s : s - 1;
-      if (i < 0 || i >= learned.stations - 1 || shaft_[i] || turn_[i]) break; // Not ridden along the floor.
-      const float g = learned.gap[i] > 0 ? learned.gap[i] : defaultGapM;
+      if (i < 0 || i >= stations_ - 1 || shaft_[i] || turn_[i]) break; // Not ridden along the floor.
+      const float g = gap_[i] > 0 ? gap_[i] : 1.0f;
       if (s != station_ && left < g / 2) break;
       left -= g;
       s += dir;
@@ -953,7 +1145,9 @@ private:
     // The way the ride started (leaky velocity), to recognise its braking.
     const float n = norm(vlFlat_);
     rideDir_ = n > 1e-6f ? scale(vlFlat_, 1 / n) : Accel{};
-    rideUp_ = lift_ && hv_ <= startThreshold() ? (vv_ > 0 ? 1 : -1) : 0;
+    rideUp_ = hv_ <= startThreshold() ? (vv_ > 0 ? 1 : -1) : 0; // Started by the vertical.
+    vlLeg_ = vlFlat_;
+    legThenRide_ = false;
     braked_ = false;
     minUpCos_ = 1;
     clearScores(); // A new spot: earlier scans no longer apply.
@@ -1070,49 +1264,49 @@ private:
     }
     const Accel ph = flat(p);
     const float vz = vertical(p);
-    const int lifted = known_ ? shaftTarget(vz) : station_;
-    const bool shaftRide = lifted != station_ && std::fabs(vz) > norm(ph); // Up or down a lift shaft.
-    const float d = shaftRide ? std::fabs(vz) : norm(ph);
-    const float floorDir = shaftRide ? 0 : floorAngle(ph);
-    const int from = station_;
-    const bool knownBefore = known_;
     // Carried elsewhere rather than ridden: tilted, turned on the way, far
     // longer than a ride, or a long move without braking. Distance and
     // direction mean nothing then; the table comes from Wi-Fi alone.
     const Accel up = scale(rest_.g, 1 / std::max(norm(rest_.g), 1e-6f));
     const float yawToStop = 2 * std::atan2(dot({snap_.q.x, snap_.q.y, snap_.q.z}, up), snap_.q.w);
+    const bool level = minUpCos_ >= std::cos(carryTilt) && std::fabs(wrap(yawToStop)) <= carryYaw && T <= maxTransitS;
+    // Mostly up or down and level: a lift shaft or a technological move in
+    // Z; one the counted station cannot explain is a reference point.
+    const bool upright = level && std::fabs(vz) > norm(ph) && std::fabs(vz) >= minLegM;
+    refFix_[0] = 0;
+    if (upright) resolveVertical(vz);
+    const int lifted = upright ? shaftTarget(vz) : station_;
+    const bool shaftRide = known_ && lifted != station_; // Up or down a lift shaft.
+    const float d = shaftRide ? std::fabs(vz) : norm(ph);
+    const float floorDir = shaftRide ? 0 : floorAngle(ph);
+    const int from = station_;
+    const bool knownBefore = known_;
     const bool moved = shaftRide || d >= minTransitM; // shaftTarget() already left out a nudge.
-    const bool carried = moved && (minUpCos_ < std::cos(carryTilt) || std::fabs(wrap(yawToStop)) > carryYaw ||
-                                   T > maxTransitS || !slow_);
+    // An elevator seen only half way (no braking) is still one: it is upright.
+    const bool carried = moved && (!level || (!slow_ && !shaftRide));
+    if (carried && pendDir_) flushLiftCycle("no_return");
     if (carried && known_) { known_ = false; lost_ = Lost::Carried; }
-    const bool ride = moved && slow_ && !carried;
+    const bool ride = moved && (slow_ || shaftRide) && !carried;
+    if (upright && !shaftRide && known_ && techLift(station_)) liftLeg(*stationRow(station_), vz);
+    // A move in Z that a ride followed at once: the move is the vertical part.
+    if (legThenRide_ && !upright && level && known_ && techLift(station_) && std::fabs(vz) >= minLegM)
+      liftLeg(*stationRow(station_), vz);
     // `targetFor()` resolves a short ride to the *same* table (a "nudge",
-    // see its comment) whenever `ride` holds: `!carried` with `moved` true
-    // already forces `slow_` true (see `carried`'s `!slow_` term above), so
-    // `ride` is never false here — a maneuver at the current table (lift,
-    // z_transfer) can still land on `to == from` and must be classified as
-    // technological motion, not logged as a same-table "transport" ride.
-    // This check must run, and `maneuver` must be known, before `station_`
-    // is (not) mutated below.
+    // see its comment): a maneuver at the current table (z_transfer,
+    // compound) lands on `to == from` and is classified as technological
+    // motion, not logged as a same-table "transport" ride. This check must
+    // run, and `maneuver` must be known, before `station_` is (not) mutated
+    // below.
     bool maneuver = false;
     MotionResult motionResult; // Default: invalid, nothing technological happened.
     if (ride && known_) {
       const int to = shaftRide ? lifted : targetFor(ph, d);
       maneuver = to == from;
       if (!maneuver) {
-        if (std::abs(to - from) == 1 && !configAuthoritative_ && !shaftRide) { // Learn this gap: spacing and floor direction.
-          const int i = to > from ? from : to;
-          float &g = learned.gap[i];
-          g = g > 0 ? g + 0.5f * (d - g) : d;
-          if (headingKnown_) {
-            const float dir = to > from ? floorDir : wrap(floorDir + pi);
-            if (!learned.gapDirKnown[i]) { learned.gapDir[i] = dir; learned.gapDirKnown[i] = true; }
-            else learned.gapDir[i] = wrap(learned.gapDir[i] + 0.3f * wrap(dir - learned.gapDir[i]));
-          }
-          learnedChanged_ = true;
-        }
+        if (pendDir_) flushLiftCycle("no_return"); // Left an RPS_seat station before the way back.
         station_ = to;
-      } else if (const StationRow *row = stationRow(station_); row && row->motion != Motion::RotationZ) {
+      } else if (const StationRow *row = stationRow(station_);
+                 row && (row->motion == Motion::ZTransfer || row->motion == Motion::Compound)) {
         // Same station before and after: not a transport ride. `flat()`
         // split `p` into the horizontal component `ph` (its norm is `d`)
         // and whatever lies along gravity, which `flat()` removed — that
@@ -1128,20 +1322,22 @@ private:
     if (ride && !carried && !maneuver) {
       formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
                          "transport", knownBefore ? from : -1, known_ ? station_ : -1,
-                         "", Motion::None, shaftRide ? "Z" : "", d, 0, slow_ ? 1.0f : 0.5f, "");
+                         "", Motion::None, shaftRide ? "Z" : "", d, 0, slow_ ? 1.0f : 0.5f, refFix_,
+                         knownBefore && known_ ? declaredSpan(from, station_) : 0);
       float rms[3];
       for (int i = 0; i < 3; ++i) rms[i] = n_ ? float(std::sqrt(sq_[i] / n_)) : 0;
       appendRideColumns(distanceRow_, sizeof(distanceRow_), T, ramp_, rms, peak_);
       setLogName(false, knownBefore ? from : -1, known_ ? station_ : -1);
-      newDistanceRow_ = true;
+      pushRow();
     } else if (motionResult.valid) {
       const StationRow *row = stationRow(station_);
       formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
                          "technological", -1, -1, row ? row->id : "", motionResult.motion,
                          "Z", motionResult.measuredDistanceM, motionResult.measuredAngleDeg,
-                         1.0f, motionResult.overRange ? "over_range" : "");
+                         1.0f, motionResult.overRange ? "over_range" : "",
+                         row ? std::fabs(row->motionRange) : 0);
       setLogName(true, station_, station_);
-      newDistanceRow_ = true;
+      pushRow();
     }
     if ((ride && !maneuver) || carried) {
       Transit &t = transits_[transitHead_];
@@ -1180,6 +1376,7 @@ private:
       if (transitCount_ < maxTransits) ++transitCount_;
       newTransit_ = true;
     }
+    refFix_[0] = 0;
     lastDistance_ = d;
     if (known_ && headingKnown_) {
       learned.heading[station_] = heading_;

@@ -241,7 +241,6 @@ footer { color: var(--ink-soft); padding-top: 6px; }
       </div>
       <div class="ctrl">
         <button class="primary" id="home">Detal jest na stole 1</button>
-        <label>Stołów <select id="stations"></select></label>
         <button class="quiet" id="forget">Zapomnij odciski Wi-Fi</button>
       </div>
     </div>
@@ -915,7 +914,7 @@ function renderFingerprint() {
   $("fpTitle").textContent = `Odcisk Wi-Fi stołu ${s + 1}${selected < 0 ? "" : " (wybrany)"}`;
   const list = $("fpList");
   if (!fp.length) {
-    list.innerHTML = `<p class="empty" style="grid-column:1/-1">Ten stół nie ma jeszcze odcisku. Powstanie po 15 s postoju detalu na nim. Kliknij inny stół, aby zobaczyć jego odcisk.</p>`;
+    list.innerHTML = `<p class="empty" style="grid-column:1/-1">Ten stół nie ma jeszcze odcisku. Powstanie po 15 s postoju detalu na nim (jeśli w config.csv ma wifi_scan = true). Kliknij inny stół, aby zobaczyć jego odcisk.</p>`;
     return;
   }
   const pct = v => Math.max(0, Math.min(100, (v + 95) / 65 * 100));
@@ -934,12 +933,12 @@ function renderFacts() {
   sc.forEach((v, s) => { if (v >= 0 && (best < 0 || v < sc[best])) best = s; });
   const scan = lineInfo.scan || [];
   const rows = [
-    ["Stół liczony", "z ruchu: przejechana odległość względem odstępów"],
+    ["Stół liczony", "z ruchu: przejechana odległość względem odstępów z config.csv; obroty, windy i ruchy w Z to punkty odniesienia"],
     ["Odciski Wi-Fi", `${fpN} z ${n} stołów`],
-    ["Odstępy wyuczone", `${gapN} z ${n - 1}`],
+    ["Odstępy z config.csv", `${gapN} z ${n - 1}`],
     ["Ostatni skan", scan.length ? (best >= 0 ? `${scan.length} sieci, najbliżej stołu ${best + 1} (zgodność ${Math.round(similarity(sc[best]) * 100)}%)` : `${scan.length} sieci`) : "jeszcze nie było"],
-    ["Korekta przez Wi-Fi", lineInfo.fix ? "tak, przy ostatnim postoju" : "nie była potrzebna"],
-    ["Kierunki odcinków", (lineInfo.gdir || []).some(d => d !== null) ? (lineInfo.gdir || []).map(d => arrow(d) || "–").join(" ") : "jeszcze nie wyuczone"],
+    ["Stół z Wi-Fi", lineInfo.fix ? "ustalony przez Wi-Fi przy ostatnim postoju" : "nie (Wi-Fi szuka stołu tylko, gdy jest nieznany)"],
+    ["Kierunki odcinków", (lineInfo.gdir || []).map(d => arrow(d) || "–").join(" ") || "–"],
   ];
   $("lineFacts").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 }
@@ -957,9 +956,6 @@ function onLine(m) {
   lineInfo = m;
   if (sceneN !== m.n || arrChanged(prevGaps, m.gaps) || arrChanged(prevGdir, m.gdir) || arrChanged(prevGz, m.gz) || arrChanged(prevGr, m.gr) ||
       arrChanged(prevIds, m.ids)) buildScene(m.n); else renderTables();
-  const sel = $("stations");
-  if (sel.options.length === 0) for (let i = 2; i <= 64; i++) sel.add(new Option(String(i), String(i)));
-  sel.value = String(m.n);
   if (selected >= m.n) selected = -1;
   renderFingerprint();
   renderFacts();
@@ -990,7 +986,11 @@ function renderWhere() {
   if (!lst) return;
   const where = $("where"), sub = $("whereSub");
   let main, text = "", moving = false;
-  if (lst.carry && !lst.arr) {
+  if (lineInfo && lineInfo.cfg === 0) { // No valid config.csv: nothing is tracked.
+    main = "Brak prawidłowej konfiguracji";
+    text = `config.csv${lineInfo.cfgLine ? `, wiersz ${lineInfo.cfgLine}` : ""}: ${lineInfo.cfgErr}. ` +
+      "Wgraj poprawny plik na dysk USB WIBROMTR i naciśnij RESET na płytce.";
+  } else if (lst.carry && !lst.arr) {
     moving = true;
     main = "Przenoszony";
     text = "Ruch nie wygląda na jazdę po rolkach (przechył, obrót). Po odstawieniu stół rozpozna Wi-Fi.";
@@ -1000,8 +1000,8 @@ function renderWhere() {
     const why = lst.lost === 3 ? "Detal przeniesiono w inne miejsce. " : lst.lost === 2 ? "W trakcie jazdy zgubiono próbki. " : "";
     text = why + (lst.scan ? "Skanuję Wi-Fi, aby rozpoznać stół…"
       : lst.wait >= 0 ? `Odcisk Wi-Fi za ${Math.ceil(lst.wait)} s rozpozna stół.`
-      : lst.ph === "park" ? "Odcisk Wi-Fi nie wskazał stołu jednoznacznie, ponowię skan za chwilę. Można też ustawić stół 1 przyciskiem."
-      : "Po postoju odcisk Wi-Fi rozpozna stół. Można też ustawić stół 1 przyciskiem.");
+      : lst.ph === "park" ? "Odcisk Wi-Fi nie wskazał stołu jednoznacznie, ponowię skan za chwilę. Stół ustali też punkt odniesienia (obrót, winda, ruch w Z jedynej takiej stacji) albo przycisk stołu 1."
+      : "Po postoju odcisk Wi-Fi rozpozna stół. Stół ustali też punkt odniesienia (obrót, winda, ruch w Z jedynej takiej stacji) albo przycisk stołu 1.");
   } else if (lst.ph === "move" && !lst.arr) {
     moving = true;
     main = `Jedzie ze stołu ${lst.cur + 1} na ${lst.cur + 1 + lst.dir}`;
@@ -1015,7 +1015,7 @@ function renderWhere() {
     else if (lst.ltS >= 0 && lst.ltS < 30) text = `Obrócony o ${turnWords(lst.lt)}` + (lst.wait >= 0 ? `, odcisk Wi-Fi za ${Math.ceil(lst.wait)} s` : "");
     else if (lst.scan) text = "Skanuję Wi-Fi, aby zapisać i porównać odcisk stołu…";
     else if (lst.wait >= 0) text = `Postój ${mmss(lst.t)}, odcisk Wi-Fi za ${Math.ceil(lst.wait)} s`;
-    else text = `Postój ${mmss(lst.t)}` + (lineInfo && lineInfo.fix ? ", stół poprawiony przez Wi-Fi" : "");
+    else text = `Postój ${mmss(lst.t)}` + (lineInfo && lineInfo.fix ? ", stół ustalony przez Wi-Fi" : "");
   }
   where.textContent = main;
   where.classList.toggle("moving", moving);
@@ -1061,7 +1061,6 @@ function animateLine(ts) {
   refs.wifi.classList.toggle("on", !!lst.scan);
 }
 $("home").addEventListener("click", () => { if (ws && ws.readyState === 1) ws.send("home"); });
-$("stations").addEventListener("change", e => { if (ws && ws.readyState === 1) ws.send(`stations:${e.target.value}`); });
 $("forget").addEventListener("click", () => {
   if (confirm("Usunąć odciski Wi-Fi wszystkich stołów? Powstaną od nowa przy kolejnych postojach.") && ws && ws.readyState === 1) ws.send("forgetwifi");
 });

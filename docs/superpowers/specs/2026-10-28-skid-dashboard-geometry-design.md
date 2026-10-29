@@ -63,3 +63,11 @@ Geometria to pętla z trygonometrią (branch + loop) — jeden mały check,
 nie framework: czysta funkcja `pos(gaps, gdir)` wydzielona, sprawdzona
 `node -e` asercjami (node jest już w toolchainie PlatformIO), analogicznie
 do istniejących `g++ ... && ./test` w README.
+
+## Aktualizacja 2026-10-29
+
+Wykresy przyspieszenia i żyroskopu zostały na stronie, ale pokazują ostatni
+przejazd (od ruszenia do zatrzymania), nie przebieg na żywo. Tabela
+przejazdów została usunięta — firmware nie wysyła już komunikatów `tr`.
+Strona pokazuje też brak prawidłowego `config.csv` (pola `cfg`, `cfgLine`,
+`cfgErr` w komunikacie `ln`); wybór liczby stołów usunięty (liczba z pliku).

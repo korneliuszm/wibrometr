@@ -115,3 +115,28 @@ rozmiarem porównywalne do detektora obrotu.
 ## Flash budget (measured 2026-10-28)
 
 Z custom `partitions.csv` (app0 = 0x300000, ffat = 0x80000) i probe USB MSC + FFat: Flash 39.4% (1240875 / 3145728 bytes) — fits comfortably, go.
+
+## Aktualizacja 2026-10-29 (obowiązuje zamiast sprzecznych punktów wyżej)
+
+- **Bez `config.csv` nie ma trybu samouczenia:** płytka nie liczy pozycji,
+  ekran i strona pokazują „BRAK PRAWIDŁOWEJ KONFIGURACJI” z numerem wiersza
+  i przyczyną (`ConfigError`). Odstępy/kierunki nie są uczone ani zapisywane
+  w NVS (tam tylko odciski Wi-Fi i kurs na stołach).
+- **Format:** 7 kolumn —
+  `station_id,direction,distance_m,wifi_scan,station_motion,motion_axis,motion_range`;
+  `passthrough` i `motion_speed` usunięte (liczba ominiętych stacji wynika
+  z odległości). BOM, CRLF i zapis z `;` / przecinkiem dziesiętnym są czytane.
+  Kąty (`RZ±`, `rotation_z`) muszą być wielokrotnością 90°.
+- **Ruchy w Z:** `lift` — jeden ruch w Z w dowolną stronę; `RPS_seat` — cykl
+  tam i z powrotem (osadzenie na pinach stołu bazującego), dowolna strona
+  najpierw; `motion_axis` jest czytana i nieużywana. Pion jest obserwowany
+  na każdej stacji — „Znane ograniczenie” wyżej jest nieaktualne.
+- **Wi-Fi:** nigdy nie poprawia policzonej stacji; znajduje ją, gdy jest
+  nieznana (po włączeniu, po zgubieniu próbek, po przeniesieniu).
+- **Punkty odniesienia** (wcześniej „etap 2”): obrót w postoju i ruch w Z,
+  których policzona stacja nie wyjaśnia, ustawiają najbliższą stację, która
+  je wykonuje (flaga `ref_fix=A>B`); przy stacji nieznanej — jedyną taką.
+- **Log:** jeden plik na odcinek/stację + `distances_last_run.csv`
+  (dopisywanie, nie ring buffer); kolumny jak w README (`declared`, `delta`,
+  kolumny przejazdu); plik ze starym nagłówkiem idzie do `<nazwa>_old.csv`.
+  Kąty w logu są zmierzone, bez zaokrąglenia do 90°.
