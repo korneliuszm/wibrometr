@@ -152,21 +152,28 @@ B2,X+,6.5,false,false,none,,,
 ```
 
 - `direction`, `distance_m`: odcinek od poprzedniej stacji (dla pierwszej
-  pomijany). `X+ / X- / Y+ / Y-` — po rolkach na podłodze (kierunki względem
-  karoserii na pierwszej stacji); `Z+ / Z-` — winda w górę / w dół między
+  pomijany). `X+ / X- / Y+ / Y-` — po rolkach, w osiach czujnika (detal
+  obraca się razem z czujnikiem, więc po stole obrotowym „X+” to nadal X+
+  czujnika, choć w hali linia biegnie już pod kątem); `Z+ / Z-` — winda w górę / w dół między
   dwoma osobnymi miejscami postoju, `distance_m` to jej wysokość;
-  `RZ+ / RZ-` — stół obrotowy między dwiema pozycjami (obrót w lewo / w
-  prawo wokół pionu), `distance_m` to kąt w stopniach (np. 90). Obrót w
+  `RZ+ / RZ-` — stół obrotowy między dwiema pozycjami, obrót wokół
+  pokazywanej osi Z (skierowanej w dół): `RZ+` w prawo (zgodnie z ruchem
+  wskazówek zegara patrząc z góry), `RZ-` w lewo, `distance_m` to kąt w stopniach (np. 90). Obrót w
   postoju o co najmniej połowę tego kąta w tę stronę przenosi detal na
   następną pozycję, w przeciwną — na poprzednią (log np. `B026-B026o.csv`).
-  Kierunki kolejnych wierszy obracają się razem z detalem: po `RZ-` o 90°
-  „X+” oznacza dalej przed siebie w nowym ustawieniu (w hali o 90° w prawo).
+  Kierunki kolejnych wierszy zostają w osiach czujnika; strona rysuje linię
+  za obrotem obróconą o ten kąt.
 - `passthrough` — stół, przez który detal może przejechać bez zatrzymania.
 - `wifi_scan` — tylko na tych stacjach robiony jest odcisk Wi-Fi (oraz
   zawsze, gdy stół jest nieznany).
 - `station_motion` (`none / lift / rotation_z / z_transfer / compound`),
   `motion_axis`, `motion_range` (m albo °), `motion_speed` — ruch
-  technologiczny na stacji; zakres służy do oznaczenia `over_range`.
+  technologiczny na stacji (log `B026_tech.csv`, stacja się nie zmienia);
+  zakres (wartość bezwzględna) służy do oznaczenia `over_range`. Dla
+  `rotation_z` znak to kierunek obrotu wokół pokazywanej osi Z (w dół):
+  `+` w prawo, `-` w lewo, np. `B026,X+,6.5,…,rotation_z,Z,-90,` — stół
+  obraca detal o 90° w lewo, a linia biegnie dalej w X+ czujnika, w hali
+  skręcona (tak ją rysuje strona).
 - Nazwa stacji (`station_id`, do 11 znaków) jest pokazywana na ekranie
   LINIA i na stronie.
 
@@ -178,14 +185,24 @@ się nie liczy (stoły podnoszone). W symulacji windę widać od ok. 0,15 m/s,
 przy silnych pionowych drganiach konstrukcji (1 m/s² przy 5 Hz) od ok.
 0,3 m/s.
 
+**Stół obrotowy z czujnikiem poza osią:** czujnik zatacza łuk, co
+akcelerometr widzi jak ruch poziomy. Gdy detal obraca się wokół pionu bez
+przechyłu (stół, nie ręka), ruszenie jest zablokowane, a po obrocie
+detektor jazdy jest zerowany — obrót jest ruchem technologicznym stacji.
+
 **Przeniesienie:** gdy ruch rozpoznano jako przeniesienie (przechył,
-obrót w drodze), po odłożeniu wystarczą 3 s spokoju (także żyroskopu),
+obrót w drodze), koniec jest rozpoznawany z surowych odczytów (żyroskop
+spokojny, akcelerometr stabilny), bez orientacji z żyroskopu — ta może się
+rozjechać np. po stuknięciu ponad zakres ±500 °/s. Po odłożeniu wystarczą
+3 s spokoju,
 potem skan Wi-Fi i pozycja od razu przechodzi na najlepiej pasujący stół
 (również z `config.csv`; liczą się tylko stoły z odciskiem).
 
 **Logi** (na tym samym dysku): każdy przejazd dopisuje wiersz do pliku
 nazwanego od stacji, np. `B2-B3.csv`, a ruch technologiczny — do
-`B3_tech.csv` (bez `config.csv` — numery stołów, stół nieznany:
+`B3_tech.csv`; wszystkie wiersze trafiają też do wspólnego
+`distances_last_run.csv` (plik ze starym nagłówkiem jest przy starcie
+przemianowany na `distances_last_run_old.csv`) (bez `config.csv` — numery stołów, stół nieznany:
 `nieznana`). Kolumny: `timestamp_ms, segment_type, from_station,
 to_station, station_id, motion_type, axis, measured_distance_m,
 measured_angle_deg, confidence, quality_flags`, a dla przejazdów dodatkowo
@@ -259,8 +276,10 @@ dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 5.
 - Odczyt jest lekko wygładzony (ok. 0,15 s), żeby cyfry dało się czytać;
   nagłówek podaje faktyczną liczbę próbek na sekundę (ok. 200 Hz).
 - Czujnik w spoczynku mierzy reakcję podłoża, więc położony płasko pokazuje
-  Z ≈ +9,81 m/s² (1 g), a X i Y bliskie zeru. Osie X i Y mają znak odwrócony
-  względem nadruku modułu (czujnik zamocowany obrócony o 180° wokół Z).
+  Z ≈ −9,81 m/s² (1 g; oś Z pokazywana w dół), a X i Y bliskie zeru. Osie
+  X i Y mają znak odwrócony względem nadruku modułu (czujnik zamocowany
+  obrócony o 180° wokół Z); na ekranach, stronie i porcie szeregowym Z ma
+  też odwrócony znak (nawigacja liczy w osiach czujnika).
 - **BOOT:** krótko — następny ekran; przytrzymanie ≥1 s — **tara**:
   bieżący wektor jest odejmowany (np. grawitacja przy ustalonym ułożeniu),
   na ekranie pojawia się „TARA”; kolejne ≥1 s wyłącza tarę.

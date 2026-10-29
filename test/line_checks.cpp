@@ -104,7 +104,9 @@ struct Part {
     const V structure{shake * (0.8f * std::sin(ts * 7) + 0.15f * std::sin(ts * 0.9f)), shake * 0.5f * std::sin(ts * 11 + 1),
                       shake * 1.0f * std::sin(ts * 5 + 2)};
     const V a = add(add(a0, roll), structure);
-    const V g = toSensor(rate);
+    V g = toSensor(rate);
+    const float clip = 500 * deg; // The MPU6050's +-500 deg/s range.
+    g = {std::fmax(-clip, std::fmin(clip, g.x)), std::fmax(-clip, std::fmin(clip, g.y)), std::fmax(-clip, std::fmin(clip, g.z))};
     t.add({a.x + 0.07f * rnd(), a.y + 0.07f * rnd(), a.z + 0.07f * rnd()},
           {0.04f + g.x + 0.003f * rnd(), -0.03f + g.y + 0.003f * rnd(), 0.02f + g.z + 0.003f * rnd()}, us);
     if (t.scanWanted()) { t.scanStarted(); t.applyScan(w.scan(x, y)); }
@@ -129,17 +131,44 @@ struct Part {
     }
   }
   // Turntable: turn by `angDeg` in 10 s (smooth), then settle.
-  void turntable(float angDeg) {
+  // `armM` > 0: the sensor sits that far from the table's axis (beside the
+  // body's way, on its left), so it swings along an arc while turning.
+  void turntable(float angDeg, float armM = 0) {
     const float T = 10;
+    const float phi0 = -90 * deg; // Direction from the axis to the sensor: the axis is on the body's left.
+    const float cx = x - armM * std::cos(phi0), cy = y - armM * std::sin(phi0);
+    float th = 0, prevRate = 0;
     for (float tt = 0; tt < T; tt += step) {
       const float s = std::sin(3.14159f * tt / T);
-      sample(0, 0, 0, angDeg * deg / T * 2 * s * s);
+      const float rate = angDeg * deg / T * 2 * s * s, acc = (rate - prevRate) / step;
+      prevRate = rate;
+      th += rate * step;
+      const float c = std::cos(phi0 + th), sn = std::sin(phi0 + th);
+      // Arc: tangential acc * arm along (-sin, cos), centripetal rate^2 * arm toward the axis.
+      const float ax = armM * (acc * -sn - rate * rate * c), ay = armM * (acc * c - rate * rate * sn);
+      x = cx + armM * c; y = cy + armM * sn;
+      sample(ax, ay, 0, rate);
     }
     stand(3);
   }
   // Carried by hand to (tx, ty) in `secs`: walking, rocking +-12 deg,
   // turned 60 deg and back, bobbing up and down; set down gently.
-  void carry(float tx, float ty, float secs) {
+  // Turntable that starts and stops abruptly (rate steps, 0.3 s ramps).
+  void turntableAbrupt(float angDeg, float armM) {
+    const float T = 6, ramp = 0.3f, w = angDeg * deg / (T - ramp);
+    const float phi0 = -90 * deg, cx = x - armM * std::cos(phi0), cy = y - armM * std::sin(phi0);
+    float th = 0, prevRate = 0;
+    for (float tt = 0; tt < T; tt += step) {
+      const float rate = tt < ramp ? w * tt / ramp : tt > T - ramp ? w * (T - tt) / ramp : w, acc = (rate - prevRate) / step;
+      prevRate = rate; th += rate * step;
+      const float c = std::cos(phi0 + th), sn = std::sin(phi0 + th);
+      x = cx + armM * c; y = cy + armM * sn;
+      sample(armM * (acc * -sn - rate * rate * c), armM * (acc * c - rate * rate * sn), 0, rate);
+    }
+  }
+  // `knock`: knocked once on the way (an 860 deg/s flick, past the gyro's
+  // range, and slowly back), which spoils the attitude the gyro keeps.
+  void carry(float tx, float ty, float secs, bool knock = false) {
     const float x0 = x, y0 = y;
     float vx = 0, vy = 0;
     for (float tt = 0; tt < secs; tt += step) {
@@ -150,7 +179,10 @@ struct Part {
       x += vx * step; y += vy * step;
       const float sway = 12 * deg * 2 * 3.14159f * 0.7f * std::cos(2 * 3.14159f * 0.7f * tt) * std::sin(3.14159f * u);
       const float yaw = 60 * deg / secs * 3.14159f * std::sin(2 * 3.14159f * u); // Out and back.
-      sample(ax, ay, 1.5f * std::sin(2 * 3.14159f * 1.8f * tt) * std::sin(3.14159f * u), yaw, sway);
+      float flick = 0;
+      if (knock && u > 0.6f && u < 0.6f + 0.06f / secs) flick = 15;                            // 0.06 s at 15 rad/s ...
+      else if (knock && u >= 0.6f + 0.06f / secs && u < 0.6f + 0.56f / secs) flick = -15 * 0.06f / 0.5f; // ... back in 0.5 s.
+      sample(ax, ay, 1.5f * std::sin(2 * 3.14159f * 1.8f * tt) * std::sin(3.14159f * u), yaw, sway + flick);
     }
     x = tx; y = ty;
   }
@@ -371,8 +403,8 @@ int main() {
     std::printf("      rotation_z row: %s", row.c_str());
     check(row.find("technological") != std::string::npos && row.find("rotation_z") != std::string::npos,
           "rotation_z: row is technological, motion_type rotation_z");
-    check(row.find(",,90.0") != std::string::npos,
-          "rotation_z: measured_angle_deg is ~90 deg, not 0");
+    check(row.find(",,-90.0") != std::string::npos,
+          "rotation_z: measured_angle_deg is ~-90 deg (a left turn about Z as shown, down), not 0");
   }
 
   // --- A ride that settles back at the same table ("nudge", d >=
@@ -475,17 +507,18 @@ int main() {
       "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
       "B1,X+,0,false,true,none,,,\n"
       "B2,X+,6.5,false,false,none,,,\n"
-      "B2r,RZ+,90,false,false,none,,,\n"
+      "B2r,RZ-,90,false,false,none,,,\n" // RZ- turns left.
       "B3,X+,6.5,false,false,none,,,\n" // The body's X+ after turning left: the floor's Y.
-      "B3r,RZ-,90,false,true,none,,,\n";
-    check(line::parseStationConfig(text, cfg), "setup: RZ+ / RZ- parse");
+      "B3r,RZ+,90,false,true,none,,,\n"; // RZ+ turns right.
+    check(line::parseStationConfig(text, cfg), "setup: RZ- (left) / RZ+ (right) parse");
     World world;
     auto tracker = std::make_unique<line::Tracker>();
     line::Tracker &t = *tracker;
     t.applyStationConfig(cfg);
     check(t.turntable(1) == 1 && t.turntable(3) == -1 && t.turntable(0) == 0 && !t.learned.gapDirKnown[1],
           "turntables 2-3 (left) and 4-5 (right) taken from the config");
-    check(std::fabs(t.learned.gapDir[2] - 90 * deg) < 1e-4f, "X+ after a left turn is the floor's +90 deg");
+    check(t.learned.gapDir[2] == 0 && std::fabs(t.shownDir(2) - 90 * deg) < 1e-4f,
+          "X+ after a left turn: the sensor's X+, drawn at the floor's +90 deg");
     Part part{t, world};
     part.shake = shake;
     part.stand(40); // Learning the shaking.
@@ -499,7 +532,7 @@ int main() {
     part.turntable(90); part.stand(5);
     check(t.station() == 2 && std::string(t.distanceRowFile()) == "B2-B2r", "turned 90 deg left: B2r, logged to B2-B2r");
     std::printf("      turntable row: %s", t.distanceRowCsv());
-    check(std::string(t.distanceRowCsv()).find(",RZ,0.000,90.000,") != std::string::npos, "the log row carries the angle");
+    check(std::string(t.distanceRowCsv()).find(",RZ,0.000,-90.000,") != std::string::npos, "the log row carries the angle");
     part.stand(20);
     part.ride(6.5f, 30 + 90); part.stand(22); // After the turn the line goes on along the floor's Y.
     check(t.station() == 3, "ride on (the body's X+) after the turntable: B3");
@@ -507,6 +540,120 @@ int main() {
     check(t.station() == 4, "turned 90 deg right: B3r");
     part.turntable(90); part.stand(20);
     check(t.station() == 3, "turned back left: B3 again");
+  }
+
+  // --- A turntable at a station (rotation_z): the same table, the body
+  // turns with the sensor, then rides on along the sensor's X+ while the
+  // line goes on turned on the floor. ---
+  for (float shake : {0.0f, 1.0f}) {
+    std::printf("--- rotation_z station, structure shaking %s\n", shake > 0 ? "on" : "off");
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "B024,X+,0,false,true,none,,,\n"
+      "B025,X+,6.5,false,false,none,,,\n"
+      "B026,X+,6.5,false,false,rotation_z,Z,-90,\n" // Turns left (about Z as shown, down).
+      "B027,X+,6.5,false,false,none,,,\n";
+    check(line::parseStationConfig(text, cfg), "setup: rotation_z station line parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    check(std::fabs(t.shownDir(1)) < 1e-4f && std::fabs(t.shownDir(2) - 90 * deg) < 1e-4f,
+          "drawn: one corner at B026, the line after it at +90 deg");
+    Part part{t, world};
+    part.shake = shake;
+    part.stand(40);
+    t.home();
+    part.stand(1);
+    part.ride(6.5f, 30); part.stand(22);
+    part.ride(6.5f, 30); part.stand(22);
+    check(t.station() == 2, "rode to B026");
+    part.turntable(90); part.stand(20); // Left, on the table.
+    check(t.station() == 2, "turned on B026: still B026");
+    check(std::string(t.distanceRowFile()) == "B026_tech" &&
+          std::string(t.distanceRowCsv()).find(",,-90.0") != std::string::npos, "the turn is logged to B026_tech, -90 deg");
+    part.ride(6.5f, 30 + 90); part.stand(22); // The sensor's X+, the floor's turned line.
+    check(t.station() == 3, "rode on along the sensor's X+: B027");
+    part.ride(6.5f, 30 + 90 + 180); part.stand(22);
+    check(t.station() == 2, "and back: B026");
+    part.turntable(-90); part.stand(20);
+    part.ride(6.5f, 30 + 180); part.stand(22);
+    check(t.station() == 1, "turned back and rode back: B025");
+  }
+
+  // --- The sensor off the turntable's axis: it swings along an arc, which
+  // must not count as a ride; the turn is the station's own motion. ---
+  for (float arm : {1.0f, 2.0f})
+    for (float shake : {0.0f, 1.0f}) {
+      std::printf("--- off-axis turntable, arm %.0f m, structure shaking %s\n", arm, shake > 0 ? "on" : "off");
+      line::StationConfig cfg;
+      const char *text =
+        "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+        "B024,X+,0,false,true,none,,,\n"
+        "B025,X+,6.5,false,false,none,,,\n"
+        "B026,X+,6.5,false,false,rotation_z,Z,-90,\n"
+        "B027,X+,6.5,false,false,none,,,\n";
+      check(line::parseStationConfig(text, cfg), "setup: parses");
+      World world;
+      auto tracker = std::make_unique<line::Tracker>();
+      line::Tracker &t = *tracker;
+      t.applyStationConfig(cfg);
+      Part part{t, world};
+      part.shake = shake;
+      part.stand(40);
+      t.home();
+      part.stand(1);
+      part.ride(6.5f, 30); part.stand(22);
+      part.ride(6.5f, 30); part.stand(22);
+      const int rides = t.transitCount();
+      part.turntable(90, arm); part.stand(20);
+      std::printf("      after the turn: table %d known %d, transits %d -> %d, row file %s\n", t.station() + 1, t.known(),
+                  rides, t.transitCount(), t.distanceRowFile());
+      check(t.known() && t.station() == 2 && t.transitCount() == rides, "off-axis turn on B026: still B026, no ride");
+      check(std::string(t.distanceRowFile()) == "B026_tech", "the turn is logged to B026_tech");
+      part.ride(6.5f, 30 + 90); part.stand(22);
+      check(t.station() == 3, "then the ride along the sensor's X+: B027");
+      // An abrupt turn back and the ride out at once, without a stop.
+      part.ride(6.5f, 30 + 90 + 180); part.stand(22);
+      part.turntableAbrupt(-90, arm);
+      part.ride(6.5f, 30 + 180); part.stand(22);
+      check(t.station() == 1 && std::string(t.distanceRowFile()) == "B026-B025",
+            "abrupt turn back and riding out at once: B025, the turn not counted as a ride");
+    }
+
+  // --- Carried with a knock on the way (past the gyro's range): the attitude
+  // the gyro kept is off, yet the stop must still be found, the scan made
+  // and the table found quickly. ---
+  for (float shake : {0.0f, 1.0f}) {
+    std::printf("--- knocked carry, structure shaking %s\n", shake > 0 ? "on" : "off");
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "B1,X+,0,false,true,none,,,\n"
+      "B2,X+,8,false,true,none,,,\n"
+      "B3,X+,8,false,true,none,,,\n"
+      "B4,X+,8,false,true,none,,,\n";
+    check(line::parseStationConfig(text, cfg), "setup: parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    Part part{t, world};
+    part.shake = shake;
+    part.stand(40);
+    t.home();
+    part.stand(1);
+    for (int s = 0; s < 3; ++s) { part.ride(8, 30); part.stand(22); }
+    const float c30 = std::cos(30 * deg), s30 = std::sin(30 * deg);
+    part.carry(8 * c30, 8 * s30, 15, true);
+    float found = -1;
+    for (int k = 0; k < 40 && found < 0; ++k) { part.stand(0.5f); if (t.known() && t.phase() == line::Tracker::Phase::Parked) found = 0.5f * (k + 1); }
+    std::printf("      knocked carry: found after %.1f s, table %d, activity %.3f / %.3f\n", found, t.station() + 1,
+                t.activity(), t.startThreshold());
+    check(found > 0 && found <= 8 && t.station() == 1, "knocked carry: B2 found within 8 s of setting it down");
+    part.stand(30);
+    check(t.phase() == line::Tracker::Phase::Parked && t.station() == 1, "and it stays parked at B2 (no endless ride)");
   }
 
   // --- Rides through passthrough tables: one ride over two or three gaps

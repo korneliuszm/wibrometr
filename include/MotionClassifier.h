@@ -30,7 +30,8 @@ inline MotionResult classifyMotion(const StationRow &row, float distanceM, float
   r.measuredDistanceM = isRotation ? 0 : distanceM;
   r.measuredAngleDeg = isRotation ? angleDeg : 0;
   const float measured = isRotation ? angleDeg : distanceM;
-  r.overRange = row.motionRange > 0 && std::fabs(measured) > 1.5f * row.motionRange;
+  // The range's sign is a direction (rotation_z); its size is the range.
+  r.overRange = row.motionRange != 0 && std::fabs(measured) > 1.5f * std::fabs(row.motionRange);
   return r;
 }
 

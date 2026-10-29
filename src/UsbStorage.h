@@ -17,9 +17,9 @@ namespace storage {
 // a write-while-mounted case ever shows up on real hardware.
 bool begin();
 bool readConfig(line::StationConfig &out);
-// Appends `csvRow` to "/ffat/<file>.csv" (header first when new): one file
-// per ride between two stations ("B2-B3") and per station's technological
-// motions ("B3_tech").
+// Appends `csvRow` to distances_last_run.csv and to "/ffat/<file>.csv"
+// (header first when new): one file per ride between two stations ("B2-B3")
+// and per station's technological motions ("B3_tech").
 void appendLogRow(const char *file, const char *csvRow);
 bool isMounted();
 

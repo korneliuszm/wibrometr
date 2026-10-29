@@ -160,8 +160,8 @@ void serviceLine(uint32_t now) {
     Serial.printf("log %s.csv: %s", tracker().distanceRowFile(), tracker().distanceRowCsv());
   }
   if (tracker().newTurn()) {
-    Serial.printf("line: turned %+.0f deg (turntable), heading %+.0f deg\n", tracker().lastTurn() * 57.29578f,
-                  tracker().heading() * 57.29578f);
+    Serial.printf("line: turned %+.0f deg (turntable), heading %+.0f deg (about Z as shown: right +)\n",
+                  ui::shown(tracker().lastTurn(), 2) * 57.29578f, ui::shown(tracker().heading(), 2) * 57.29578f);
     showNotice(tracker().lastTurn() > 0 ? "OBROT W LEWO" : "OBROT W PRAWO", now);
   }
   if (tracker().learnedChanged()) saveLearned();
@@ -622,10 +622,10 @@ void drawLine(uint32_t now) {
   canvas.setCursor(150, 40);
   if (tracker().turning()) {
     canvas.setTextColor(ST77XX_YELLOW);
-    canvas.printf("obrot %+.0f st", tracker().turnSoFar() * 57.29578f);
+    canvas.printf("obrot %+.0f st", ui::shown(tracker().turnSoFar(), 2) * 57.29578f);
   } else if (tracker().headingKnown()) {
     canvas.setTextColor(muted);
-    canvas.printf("kurs %+.0f st", tracker().heading() * 57.29578f);
+    canvas.printf("kurs %+.0f st", ui::shown(tracker().heading(), 2) * 57.29578f);
   }
   // Track: tables evenly spread, the part at its fractional position.
   const int y = 58, x0 = 10, x1 = 230;
@@ -751,7 +751,7 @@ void drawAccel(uint32_t now) {
                    latest.z - (tareSet ? tare.z : 0)};
     shown = {shown.x + k * (in.x - shown.x), shown.y + k * (in.y - shown.y), shown.z + k * (in.z - shown.z)};
   }
-  state.value = shown;
+  state.value = {shown.x, shown.y, ui::shown(shown.z, 2)};
   state.tared = tareSet;
   state.rateHz = actualHz;
   state.status = workerState;
@@ -771,8 +771,8 @@ void drawGyro(uint32_t now) {
     gyroShown = {gyroShown.x + k * (in.x - gyroShown.x), gyroShown.y + k * (in.y - gyroShown.y),
                  gyroShown.z + k * (in.z - gyroShown.z)};
   }
-  state.rate = gyroShown;
-  state.angle = gyroAngle;
+  state.rate = {gyroShown.x, gyroShown.y, ui::shown(gyroShown.z, 2)};
+  state.angle = {gyroAngle.x, gyroAngle.y, ui::shown(gyroAngle.z, 2)};
   state.biasKnown = displacement().biasKnown();
   state.rateHz = actualHz;
   state.status = workerState;
@@ -1037,11 +1037,12 @@ void loop() {
                   actualHz, (unsigned long)dropped.load(), fresh(now) ? "live" : workerState);
     if (fresh(now))
     {
-      Serial.printf("accel_xyz=%.3f,%.3f,%.3f m/s2\n", latest.x, latest.y, latest.z);
+      Serial.printf("accel_xyz=%.3f,%.3f,%.3f m/s2\n", latest.x, latest.y, ui::shown(latest.z, 2));
       const float toDeg = 1 / mpu6050::kRadPerDeg;
       const Accel b = displacement().gyroBias();
       Serial.printf("gyro_xyz=%.2f,%.2f,%.2f deg/s (bias %.2f,%.2f,%.2f)\n", latestGyro.x * toDeg,
-                    latestGyro.y * toDeg, latestGyro.z * toDeg, b.x * toDeg, b.y * toDeg, b.z * toDeg);
+                    latestGyro.y * toDeg, ui::shown(latestGyro.z, 2) * toDeg, b.x * toDeg, b.y * toDeg,
+                    ui::shown(b.z, 2) * toDeg);
     }
   }
   if (uint32_t(now - lastFrame) >= binMs) { lastFrame = now; draw(now); }

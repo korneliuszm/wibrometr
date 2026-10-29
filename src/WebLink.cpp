@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "WebPage.h"
+#include "UiTheme.h"
 #include "WifiScan.h"
 
 namespace weblink {
@@ -134,8 +135,8 @@ void loop(uint32_t now, const DisplacementMeter &meter, const line::Tracker &tra
                    "\"hd\":%.1f,\"hk\":%d,\"turn\":%d,\"tn\":%.1f,\"lt\":%.1f,\"ltS\":%.1f,"
                    "\"lost\":%d,\"carry\":%d},\"r\":[",
                    rateHz, live ? 1 : 0, stateName(meter.state()), meter.movingS(), (unsigned long)meter.moves(),
-                   100 * meter.live(0), 100 * meter.live(1), 100 * meter.live(2), 100 * meter.total(0),
-                   100 * meter.total(1), 100 * meter.total(2), tracker.learned.stations, tracker.station(),
+                   100 * meter.live(0), 100 * meter.live(1), 100 * ui::shown(meter.live(2), 2), 100 * meter.total(0),
+                   100 * meter.total(1), 100 * ui::shown(meter.total(2), 2), tracker.learned.stations, tracker.station(),
                    tracker.known() ? 1 : 0, phaseName(tracker.phase()), tracker.arrived() ? 1 : 0, tracker.position(),
                    tracker.direction(), tracker.phaseS(), tracker.untilPark(), tracker.liveDistance(),
                    scanning ? 1 : 0, tracker.activity(), tracker.startThreshold(), tracker.shaking(),
@@ -149,7 +150,7 @@ void loop(uint32_t now, const DisplacementMeter &meter, const line::Tracker &tra
     prevUs = r.us;
     havePrev = true;
     n += snprintf(batch + n, batchSize - n, "%s[%lu,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f]", i ? "," : "",
-                  (unsigned long)d, r.a.x, r.a.y, r.a.z, r.g.x, r.g.y, r.g.z);
+                  (unsigned long)d, r.a.x, r.a.y, ui::shown(r.a.z, 2), r.g.x, r.g.y, ui::shown(r.g.z, 2));
   }
   n += snprintf(batch + n, batchSize - n, "]}");
   rowCount = 0;
@@ -162,11 +163,11 @@ void publishMove(const DisplacementMeter &meter) {
   int n = snprintf(moveText, moveSize,
                    "{\"t\":\"m\",\"n\":%lu,\"d\":[%.2f,%.2f,%.2f],\"dur\":%.2f,\"v\":%.3f,\"rot\":%.1f,"
                    "\"tilt\":%d,\"tr\":[",
-                   (unsigned long)meter.moves(), 100 * m.d[0], 100 * m.d[1], 100 * m.d[2], m.durationS,
+                   (unsigned long)meter.moves(), 100 * m.d[0], 100 * m.d[1], 100 * ui::shown(m.d[2], 2), m.durationS,
                    m.peakSpeed, m.rotationDeg, m.tilted ? 1 : 0);
   for (int k = 0; k < m.points && n < int(moveSize) - 40; ++k)
     n += snprintf(moveText + n, moveSize - n, "%s[%.2f,%.2f,%.2f]", k ? "," : "", 100 * m.track[k][0],
-                  100 * m.track[k][1], 100 * m.track[k][2]);
+                  100 * m.track[k][1], 100 * ui::shown(m.track[k][2], 2));
   n += snprintf(moveText + n, moveSize - n, "]}");
   ws.textAll(moveText, n);
 }
@@ -190,7 +191,7 @@ void publishLine(const line::Tracker &t) {
   // Floor direction of each gap in degrees, null while not learned (and for a lift shaft).
   add("],\"gdir\":[");
   for (int i = 0; i < stations - 1; ++i) {
-    if (t.learned.gapDirKnown[i]) add("%s%.1f", i ? "," : "", t.learned.gapDir[i] * 57.29578f);
+    if (t.learned.gapDirKnown[i]) add("%s%.1f", i ? "," : "", t.shownDir(i) * 57.29578f);
     else add("%snull", i ? "," : "");
   }
   // Lift shafts: +1 up, -1 down, 0 on the floor.

@@ -63,7 +63,7 @@ void drawDisplacementScreen(GFXcanvas16 &c, const DisplacementScreenState &s) {
   const bool have = moving || m.moves();
   for (int i = 0; i < 3; ++i) {
     const int y = rowY[i];
-    const float cm = 100 * (moving ? m.live(i) : m.last().d[i]);
+    const float cm = 100 * ui::shown(moving ? m.live(i) : m.last().d[i], i);
     c.setTextSize(3);
     c.setTextColor(axisColor[i]);
     c.setCursor(0, y);
@@ -116,7 +116,7 @@ void drawDisplacementPlot(GFXcanvas16 &c, const DisplacementScreenState &s) {
     int px = 0, py = 0;
     for (int k = 0; k < mv.points; ++k) {
       const int x = plotX + k * (plotW - 1) / (mv.points - 1);
-      const int y = yOf(mv.track[k][i]);
+      const int y = yOf(ui::shown(mv.track[k][i], i));
       if (k) c.drawLine(px, py, x, y, axisColor[i]);
       px = x; py = y;
     }
@@ -146,8 +146,8 @@ void drawDisplacementPath(GFXcanvas16 &c, const DisplacementScreenState &s) {
   for (int i = 0; i < 3; ++i) {
     lo[i] = hi[i] = 0;
     for (int k = 0; k < mv.points; ++k) {
-      lo[i] = fminf(lo[i], mv.track[k][i]);
-      hi[i] = fmaxf(hi[i], mv.track[k][i]);
+      lo[i] = fminf(lo[i], ui::shown(mv.track[k][i], i));
+      hi[i] = fmaxf(hi[i], ui::shown(mv.track[k][i], i));
     }
     span[i] = hi[i] - lo[i];
   }
@@ -172,9 +172,10 @@ void drawDisplacementPath(GFXcanvas16 &c, const DisplacementScreenState &s) {
     if (y >= areaY && y < areaY + areaH) c.drawFastHLine(areaX, y, areaW, n ? ui::grid : ui::edge);
   }
   for (int k = 1; k < mv.points; ++k)
-    c.drawLine(px(mv.track[k - 1][h]), py(mv.track[k - 1][v]), px(mv.track[k][h]), py(mv.track[k][v]), ui::yellow);
+    c.drawLine(px(ui::shown(mv.track[k - 1][h], h)), py(ui::shown(mv.track[k - 1][v], v)), px(ui::shown(mv.track[k][h], h)),
+               py(ui::shown(mv.track[k][v], v)), ui::yellow);
   c.drawCircle(px(0), py(0), 3, ui::green);
-  c.fillCircle(px(mv.track[mv.points - 1][h]), py(mv.track[mv.points - 1][v]), 3, ui::red);
+  c.fillCircle(px(ui::shown(mv.track[mv.points - 1][h], h)), py(ui::shown(mv.track[mv.points - 1][v], v)), 3, ui::red);
   c.setTextColor(axisColor[h]);
   c.setCursor(areaX + areaW - 6, areaY + areaH - 8);
   c.printf("%c>", axisLetter[h]);

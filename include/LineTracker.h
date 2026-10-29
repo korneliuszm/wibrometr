@@ -190,6 +190,8 @@ public:
   static constexpr float carryYaw = 0.52f;     // rad (30 deg) of turn before the stop.
   static constexpr float carrySettleS = 3.0f;  // Set down and still this long: scan Wi-Fi.
   static constexpr float carryStillRate = 0.05f; // rad/s (3 deg/s, 0.5 s mean): no longer rocked by a hand.
+  static constexpr float carryStillA = 0.15f;    // m/s2: raw acceleration this steady (0.2 s vs 1 s mean).
+  static constexpr float turntableTilt = 0.05f;  // rad/s (3 deg/s): turning with less tilt than this is a turntable.
   // Finding the table by Wi-Fi alone: the best table must match well and
   // clearly better than the next one, else scan again later.
   static constexpr float relocateMaxDb = 12.0f;
@@ -217,8 +219,10 @@ public:
   // Call once, at boot, before `home()`.
   void applyStationConfig(const StationConfig &cfg) {
     setStations(cfg.count);
-    // Directions are the body's own: after a turntable (RZ+/RZ-) the rows
-    // that follow are turned with it ("X+" goes on the way the body faces).
+    // Directions are in the sensor's (the body's) axes: the body turns with
+    // the sensor on a turntable, so "X+" stays the sensor's X+ after it while
+    // the line goes on turned on the floor. Rides are compared in those axes
+    // (see direction()); shownDir() turns them back onto the floor to draw.
     float turned = 0;
     for (int i = 0; i < cfg.count; ++i) {
       stationRow_[i] = cfg.row[i];
@@ -226,10 +230,15 @@ public:
         const Direction d = cfg.row[i + 1].direction;
         learned.gap[i] = cfg.row[i + 1].distanceM;
         shaft_[i] = d == Direction::ZPlus ? 1 : d == Direction::ZMinus ? -1 : 0;
-        turn_[i] = d == Direction::RZPlus ? 1 : d == Direction::RZMinus ? -1 : 0;
+        // RZ is about the Z axis as shown (pointing down): RZ+ turns right (CW from above).
+        turn_[i] = d == Direction::RZPlus ? -1 : d == Direction::RZMinus ? 1 : 0;
+        // A turn before this gap: at station i (rotation_z, signed range about
+        // Z as shown, down: + right) or this gap itself (RZ). CCW is + here.
+        if (cfg.row[i].motion == Motion::RotationZ) turned -= cfg.row[i].motionRange * pi / 180;
         if (turn_[i]) turned += turn_[i] * cfg.row[i + 1].distanceM * pi / 180;
-        learned.gapDir[i] = shaft_[i] || turn_[i] ? 0 : wrap(directionAngle(d) + turned);
+        learned.gapDir[i] = shaft_[i] || turn_[i] ? 0 : directionAngle(d);
         learned.gapDirKnown[i] = !shaft_[i] && !turn_[i]; // No floor direction: not ridden along the floor.
+        shownDir_[i] = wrap(learned.gapDir[i] + turned);
       }
     }
     configAuthoritative_ = true;
@@ -293,9 +302,20 @@ public:
         follow(dt, 1.0f); // Learn the shaking quickly.
         if (clock_ - settleStart_ >= settleS) enterPark();
         break;
-      case Phase::Parked:
-        follow(dt, levelTauS);
-        if (hv_ > startThreshold() || (lift_ && std::fabs(vv_) > shaftThreshold())) {
+      case Phase::Parked: {
+        // While the body turns level (turntable) nothing starts a ride: a
+        // sensor off the table's axis swings along an arc, which is no ride.
+        // The detector is held at zero meanwhile and the arc is kept out of
+        // the shaking level, so a ride out right after the turn starts clean.
+        // A hand tilts the body as well: that is a carry and may start.
+        const bool turningNow = std::fabs(yawFast_) > 0.5f * turnStart && tiltLp_ < turntableTilt;
+        sinceTurn_ = turningNow ? 0 : std::min(sinceTurn_ + 1, restSamples);
+        if (turningNow) {
+          clearDetector();
+          overS_ = 0;
+          hist_[(head_ + restSamples - 1) % restSamples] = {gB_, bias_}; // As follow() would.
+        } else follow(dt, levelTauS);
+        if (!turningNow && (hv_ > startThreshold() || (lift_ && std::fabs(vv_) > shaftThreshold()))) {
           if ((overS_ += dt) >= startConfirmS) startMove();
         } else overS_ = 0;
         if (phase_ == Phase::Parked && !parkDone_ && clock_ - phaseStart_ >= parkS) { parkDone_ = true; wantScan(); }
@@ -305,6 +325,7 @@ public:
           wantScan();
         }
         break;
+      }
       case Phase::Moving: {
         // Safety net: no ride or carry lasts this long. Whatever happened,
         // the attitude cannot be trusted: learn gravity again, let Wi-Fi
@@ -322,10 +343,13 @@ public:
         // Calm: no ride-like velocity and little low-frequency acceleration.
         // A steady roll is calm too, so a stop also needs the braking before
         // it (or a calm longer than any steady roll).
-        // Carried: still only once the hand has let go (no rocking either).
-        const bool calm = ha_ < stillThreshold() && hv_ < startThreshold() &&
-                          (!lift_ || std::fabs(vv_) < shaftThreshold()) &&
-                          (!carrying() || rideRate_ < std::max(carryStillRate, 2.5f * std::sqrt(levelW2_)));
+        // Carried: the attitude the gyro kept may be off (a knock past its
+        // range), so the stop is told from the raw sensor alone: no rocking
+        // and a steady accelerometer once the hand has let go.
+        const bool calm = carrying()
+          ? rideRate_ < std::max(carryStillRate, 2.5f * std::sqrt(levelW2_)) &&
+              norm(sub(aFast_, aSlow_)) < std::max(carryStillA, 3 * std::sqrt(levelA2_))
+          : ha_ < stillThreshold() && hv_ < startThreshold() && (!lift_ || std::fabs(vv_) < shaftThreshold());
         if (!calm) { quietStart_ = -1; arrived_ = false; break; }
         if (quietStart_ < 0) { // The body may have stopped: remember the state now.
           quietStart_ = clock_;
@@ -465,6 +489,9 @@ public:
   }
   // Gap i (table i to i+1) is a lift shaft: +1 up, -1 down; 0: on the floor.
   int shaft(int i) const { return i >= 0 && i < maxStations ? shaft_[i] : 0; }
+  // Direction of gap i on the floor (rad, CCW, 0 = as the body at table 1), for
+  // drawing: config.csv directions are the sensor's and turn with the body.
+  float shownDir(int i) const { return configAuthoritative_ ? shownDir_[i] : learned.gapDir[i]; }
   // Gap i is a turntable (RZ+/RZ-): +1 left (CCW), -1 right; gap(i) is its angle in degrees.
   int turntable(int i) const { return i >= 0 && i < maxStations ? turn_[i] : 0; }
   float gap(int i) const { return learned.gap[i] > 0 ? learned.gap[i] : 0; }
@@ -554,6 +581,10 @@ private:
   Accel prevW_{}, prevAcc_{}, v_{}, p_{}, lp_{};
   float t_ = 0, rideRate_ = 0; // rideRate_: gyro rate (minus offset), 0.5 s mean.
   float levelW2_ = 0;          // Mean square gyro rate standing: the structure rocking.
+  float tiltLp_ = 0;           // Rate about a horizontal axis, 0.3 s mean: a hand tilts, a turntable does not.
+  float yawFast_ = 0;          // Rate about the vertical, 0.1 s mean: a turntable's start and stop, quickly.
+  int sinceTurn_ = restSamples; // Samples since the body last turned level (Parked), up to a ring.
+  Accel aFast_{}, aSlow_{};    // Raw acceleration, 0.2 s and 1 s means (sensor axes), for a carry's end.
   bool first_ = true;
   Snap snap_{};
   double sq_[3] = {};
@@ -570,6 +601,7 @@ private:
   StationRow stationRow_[maxStations];
   int8_t shaft_[maxStations] = {}; // From config.csv only, see shaft().
   int8_t turn_[maxStations] = {};  // From config.csv only, see turntable().
+  float shownDir_[maxStations] = {}; // config.csv gap directions turned onto the floor, for drawing.
   bool lift_ = false;              // Watching the vertical too: standing next to a shaft (or riding from one).
   int rideUp_ = 0;                 // This ride started up (+1) / down (-1) a shaft; 0: along the floor.
   float vv_ = 0, vvMean_ = 0, levelVz2_ = 0;
@@ -673,6 +705,9 @@ private:
     // Turns while standing (turntables), also in the calm after a ride.
     const float kw = dt / (0.3f + dt);
     yawLp_ += kw * (yaw - yawLp_);
+    yawFast_ += dt / (0.1f + dt) * (yaw - yawFast_);
+    const float tiltRate = gn > 0 ? norm(sub(rate, scale(g, yaw / gn))) : 0; // About a horizontal axis.
+    tiltLp_ += kw * (tiltRate - tiltLp_);
     if (phase_ != Phase::Moving || arrived_) {
       if (!turning_ && std::fabs(yawLp_) > turnStart) {
         turning_ = true;
@@ -684,7 +719,9 @@ private:
       }
     }
     if (phase_ == Phase::Moving) return; // The ride has its own attitude (q_).
-    { // Rocking of the structure (gyro), for telling a carry's end.
+    if (!turning_ && std::fabs(yawLp_) < 0.5f * turnStart && tiltLp_ < turntableTilt) {
+      // Rocking of the structure (gyro), for telling a carry's end; learned
+      // only while nothing turns or tilts the body.
       const float kl = dt / (levelTauS + dt), r = norm(rate);
       levelW2_ += kl * (r * r - levelW2_);
     }
@@ -722,7 +759,7 @@ private:
       const int from = station_;
       station_ += way;
       formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000), "transport", from, station_, "",
-                        Motion::None, "RZ", 0, lastTurn_ * 180 / pi, 1.0f, "");
+                        Motion::None, "RZ", 0, -lastTurn_ * 180 / pi, 1.0f, ""); // About Z as shown (down): right +.
       setLogName(false, from, station_);
       newDistanceRow_ = true;
       if (headingKnown_) { learned.heading[station_] = heading_; learned.headingKnown[station_] = true; }
@@ -737,7 +774,7 @@ private:
     if (known_) {
       if (const StationRow *row = stationRow(station_)) {
         if (row->motion == Motion::RotationZ) {
-          const MotionResult motionResult = classifyMotion(*row, 0, lastTurn_ * 180 / pi);
+          const MotionResult motionResult = classifyMotion(*row, 0, -lastTurn_ * 180 / pi); // Z as shown: right +.
           if (motionResult.valid) {
             formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
                                "technological", -1, -1, row->id, motionResult.motion,
@@ -866,8 +903,11 @@ private:
   // Forward (+1) or back (-1) along the line, from the learned directions of
   // the gaps next to the current table; forward when nothing is known.
   int direction(Accel ph) const {
-    if (!headingKnown_ || norm(ph) < 0.05f) return 1;
-    const float ang = floorAngle(ph);
+    // With config.csv the gaps' directions are in the sensor's axes (the
+    // body turns with it), so the ride's own direction in them counts and
+    // the heading does not matter; learned gaps are on the floor.
+    if (norm(ph) < 0.05f || (!configAuthoritative_ && !headingKnown_)) return 1;
+    const float ang = configAuthoritative_ ? wrap(floorAngle(ph) - rideHeading_) : floorAngle(ph);
     const int s = station_;
     const bool f = s < learned.stations - 1 && learned.gapDirKnown[s];
     const bool b = s > 0 && learned.gapDirKnown[s - 1];
@@ -904,7 +944,10 @@ private:
   void startMove() {
     // Gravity and gyro offset from the oldest ring slot: from before the
     // pre-roll, so the start of the ride has not leaked into them yet.
-    rest_ = hist_[head_];
+    // Right after a turntable the pre-roll starts where the turn stopped: the
+    // arc before it is no part of the ride.
+    const int skip = std::max(0, restSamples - sinceTurn_);
+    rest_ = hist_[(head_ + skip) % restSamples];
     // Heading at the start of the pre-roll: take back what the pre-roll turned.
     rideHeading_ = heading_;
     // The way the ride started (leaky velocity), to recognise its braking.
@@ -930,9 +973,9 @@ private:
     work_ = 0;
     perBin_ = 1;
     binOpen_ = false;
-    for (int i = 0; i < restSamples; ++i) {
+    for (int i = skip; i < restSamples; ++i) {
       const Sample &s = ring_[(head_ + i) % restSamples];
-      step(s.a, s.w, i ? s.dt : 0);
+      step(s.a, s.w, i > skip ? s.dt : 0);
     }
     // The pre-roll's own turn was already in the heading.
     const float yawPre = 2 * std::atan2(dot({q_.x, q_.y, q_.z}, rest_.g) / std::max(norm(rest_.g), 1e-6f), q_.w);
@@ -952,7 +995,11 @@ private:
       }
     }
     prevW_ = w;
-    if (!first_) rideRate_ += dt / (0.5f + dt) * (norm(sub(w, rest_.bias)) - rideRate_);
+    if (!first_) {
+      rideRate_ += dt / (0.5f + dt) * (norm(sub(w, rest_.bias)) - rideRate_);
+      aFast_ = mix(aFast_, a, dt / (0.2f + dt));
+      aSlow_ = mix(aSlow_, a, dt / (1.0f + dt));
+    } else aFast_ = aSlow_ = a;
     if (quietStart_ < 0) { // Tilt so far: where the start's up axis has gone.
       const Accel up = scale(rest_.g, 1 / std::max(norm(rest_.g), 1e-6f));
       minUpCos_ = std::min(minUpCos_, dot(up, rotate(q_, up)));

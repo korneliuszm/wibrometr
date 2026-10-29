@@ -9,8 +9,8 @@ namespace line {
 
 // X/Y: a stretch of rollers on the floor; Z: a lift shaft between two stops
 // (elevator), up or down; RZ: a turntable between two positions, turning the
-// body about the vertical, left (CCW, +) or right (CW, -), by `distanceM`
-// degrees.
+// body about the shown Z axis (pointing down): RZ+ right (CW from above),
+// RZ- left, by `distanceM` degrees.
 enum class Direction : uint8_t { XPlus, XMinus, YPlus, YMinus, ZPlus, ZMinus, RZPlus, RZMinus };
 enum class Motion : uint8_t { None, Lift, RotationZ, ZTransfer, Compound };
 

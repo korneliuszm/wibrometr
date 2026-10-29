@@ -5,6 +5,7 @@
 #include <USBMSC.h>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <new>
 #include "esp_vfs_fat.h"
@@ -26,7 +27,10 @@ constexpr const char *kBasePath = "/ffat";
 constexpr const char *kPartitionLabel = "ffat";
 constexpr const char *kConfigPath = "/ffat/config.csv";
 // One file per ride ("B2-B3.csv") and per station's technological motions
-// ("B3_tech.csv"), each with this header; rides fill the last 8 columns.
+// ("B3_tech.csv"), plus every row in distances_last_run.csv; all with this
+// header, rides fill the last 8 columns.
+constexpr const char *kAllRowsPath = "/ffat/distances_last_run.csv";
+constexpr const char *kAllRowsOldPath = "/ffat/distances_last_run_old.csv";
 constexpr const char *kLogHeader =
   "timestamp_ms,segment_type,from_station,to_station,station_id,motion_type,"
   "axis,measured_distance_m,measured_angle_deg,confidence,quality_flags,"
@@ -121,6 +125,18 @@ bool begin() {
   if (disk_ioctl(pdrv, GET_SECTOR_SIZE, &ss) == RES_OK && ss > 0) sectorSize = ss;
 
 
+  // distances_last_run.csv from before the ride columns: kept aside as
+  // distances_last_run_old.csv, a new one starts with the current header.
+  if (FILE *f = fopen(kAllRowsPath, "r")) {
+    char first[256] = {};
+    const bool same = fgets(first, sizeof first, f) && strcmp(first, kLogHeader) == 0;
+    fclose(f);
+    if (!same) {
+      remove(kAllRowsOldPath);
+      rename(kAllRowsPath, kAllRowsOldPath);
+    }
+  }
+
   msc.vendorID("WIBROMTR");
   msc.productID("SKID LOG");
   msc.productRevision("1.0");
@@ -154,11 +170,8 @@ bool readConfig(line::StationConfig &out) {
   return line::parseStationConfig(buf.get(), out);
 }
 
-void appendLogRow(const char *file, const char *csvRow) {
-  if (mounted.load(std::memory_order_relaxed)) return; // Host owns the drive right now; device is parked.
-  if (!file || !file[0]) return;
-  char path[64];
-  snprintf(path, sizeof path, "%s/%s.csv", kBasePath, file);
+namespace {
+void appendTo(const char *path, const char *csvRow) {
   bool fresh = true;
   if (FILE *f = fopen(path, "r")) { fresh = false; fclose(f); }
   FILE *f = fopen(path, "a");
@@ -166,6 +179,16 @@ void appendLogRow(const char *file, const char *csvRow) {
   if (fresh) fputs(kLogHeader, f);
   fputs(csvRow, f);
   fclose(f);
+}
+} // namespace
+
+void appendLogRow(const char *file, const char *csvRow) {
+  if (mounted.load(std::memory_order_relaxed)) return; // Host owns the drive right now; device is parked.
+  appendTo(kAllRowsPath, csvRow);
+  if (!file || !file[0]) return;
+  char path[64];
+  snprintf(path, sizeof path, "%s/%s.csv", kBasePath, file);
+  appendTo(path, csvRow);
 }
 
 bool isMounted() { return mounted.load(std::memory_order_relaxed); }
