@@ -5,6 +5,8 @@
 #include <USBMSC.h>
 #include <atomic>
 #include <cstdio>
+#include <memory>
+#include <new>
 #include "esp_vfs_fat.h"
 #include "ff.h"
 #include "diskio.h"
@@ -23,10 +25,12 @@ std::atomic<bool> mounted{false};
 constexpr const char *kBasePath = "/ffat";
 constexpr const char *kPartitionLabel = "ffat";
 constexpr const char *kConfigPath = "/ffat/config.csv";
-constexpr const char *kDistancesPath = "/ffat/distances_last_run.csv";
-constexpr const char *kDistancesHeader =
+// One file per ride ("B2-B3.csv") and per station's technological motions
+// ("B3_tech.csv"), each with this header; rides fill the last 8 columns.
+constexpr const char *kLogHeader =
   "timestamp_ms,segment_type,from_station,to_station,station_id,motion_type,"
-  "axis,measured_distance_m,measured_angle_deg,confidence,quality_flags\n";
+  "axis,measured_distance_m,measured_angle_deg,confidence,quality_flags,"
+  "duration_s,ramp_m_s2,rms_x,rms_y,rms_z,peak_x,peak_y,peak_z\n";
 
 // There used to be a separate "/usbdrive.img" file on this same FFat
 // partition, exposed to USB MSC as a nested FAT image, while config.csv /
@@ -116,12 +120,6 @@ bool begin() {
   WORD ss = 512;
   if (disk_ioctl(pdrv, GET_SECTOR_SIZE, &ss) == RES_OK && ss > 0) sectorSize = ss;
 
-  if (FILE *f = fopen(kDistancesPath, "r")) {
-    fclose(f);
-  } else if (FILE *f = fopen(kDistancesPath, "w")) {
-    fputs(kDistancesHeader, f);
-    fclose(f);
-  }
 
   msc.vendorID("WIBROMTR");
   msc.productID("SKID LOG");
@@ -141,22 +139,31 @@ bool readConfig(line::StationConfig &out) {
   fseek(f, 0, SEEK_END);
   const long fileSize = ftell(f);
   fseek(f, 0, SEEK_SET);
-  char buf[2048];
+  // 64 stations of up to ~160 bytes each; on the heap (PSRAM), not the stack.
+  constexpr size_t kBufSize = 12288;
   // A file bigger than the buffer would otherwise be silently truncated
   // (the trailing stations just disappear with no error): reject it
   // outright instead, same as any other invalid config.
-  if (fileSize < 0 || (size_t)fileSize > sizeof(buf) - 1) { fclose(f); return false; }
-  const size_t n = fread(buf, 1, (size_t)fileSize, f);
+  if (fileSize < 0 || (size_t)fileSize > kBufSize - 1) { fclose(f); return false; }
+  std::unique_ptr<char[]> buf(new (std::nothrow) char[kBufSize]);
+  if (!buf) { fclose(f); return false; }
+  const size_t n = fread(buf.get(), 1, (size_t)fileSize, f);
   fclose(f);
   if (n != (size_t)fileSize) return false; // Read came up short of the file's own size.
   buf[n] = 0;
-  return line::parseStationConfig(buf, out);
+  return line::parseStationConfig(buf.get(), out);
 }
 
-void appendDistanceRow(const char *csvRow) {
+void appendLogRow(const char *file, const char *csvRow) {
   if (mounted.load(std::memory_order_relaxed)) return; // Host owns the drive right now; device is parked.
-  FILE *f = fopen(kDistancesPath, "a");
+  if (!file || !file[0]) return;
+  char path[64];
+  snprintf(path, sizeof path, "%s/%s.csv", kBasePath, file);
+  bool fresh = true;
+  if (FILE *f = fopen(path, "r")) { fresh = false; fclose(f); }
+  FILE *f = fopen(path, "a");
   if (!f) return;
+  if (fresh) fputs(kLogHeader, f);
   fputs(csvRow, f);
   fclose(f);
 }

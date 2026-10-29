@@ -1,0 +1,6 @@
+station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed
+B024,X+,0,false,true,none,,,
+B025,X+,6.5,false,false,none,,,
+B026,X+,6.5,false,false,none,,,
+B026o,RZ-,90,false,false,none,,,
+B027,X+,6.5,false,false,none,,,

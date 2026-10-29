@@ -34,6 +34,27 @@ int main() {
           "rotation row carries angle not distance, and the quality flag");
   }
 
+  {
+    char buf[256];
+    formatDistanceRow(buf, sizeof(buf), 1, "transport", 1, 2, "", Motion::None, "", 6.5f, 0, 1.0f, "");
+    const float rms[3] = {0.1f, 0.2f, 0.3f}, peak[3] = {1, 2, 3};
+    appendRideColumns(buf, sizeof(buf), 12.5f, 0.42f, rms, peak);
+    check(std::strstr(buf, ",1.00,,12.50,0.420,0.100,0.200,0.300,1.000,2.000,3.000\n") != nullptr,
+          "ride columns follow the quality flags, one newline at the end");
+  }
+  {
+    const auto name = [](int s) { return s < 0 ? "nieznana" : s == 1 ? "B2" : s == 2 ? "B3" : "A/B?"; };
+    char out[32];
+    logFileName(out, sizeof out, false, 1, 2, name);
+    check(std::strcmp(out, "B2-B3") == 0, "ride file named from-to: B2-B3");
+    logFileName(out, sizeof out, true, 2, 2, name);
+    check(std::strcmp(out, "B3_tech") == 0, "technological motion file: B3_tech");
+    logFileName(out, sizeof out, false, -1, 2, name);
+    check(std::strcmp(out, "nieznana-B3") == 0, "unknown start station in the name");
+    logFileName(out, sizeof out, true, 5, 5, name);
+    check(std::strcmp(out, "A_B__tech") == 0, "characters FAT does not allow become '_'");
+  }
+
   std::printf(failures ? "%d FAILURE(S)\n" : "all ok\n", failures);
   return failures ? 1 : 0;
 }

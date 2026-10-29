@@ -3,12 +3,12 @@
 #include "SignalHistory.h"
 
 // Minimal MPU6050 driver over I2C (no library): wakes the chip, sets +-8 g,
-// +-500 deg/s, a ~185 Hz low-pass filter and a 1 kHz output rate, and raises
+// +-500 deg/s, a ~94 Hz low-pass filter and a 200 Hz output rate, and raises
 // INT (latched, active high) for every new sample; any read clears it. Returns
 // acceleration in m/s2 and angular rate in rad/s. Temperature is unused.
 class Mpu6050 {
 public:
-  static constexpr float kSampleRateHz = 1000.0f; // Matches kRateDiv in Mpu6050.cpp and LINE_SAMPLE_HZ.
+  static constexpr float kSampleRateHz = 200.0f; // Matches kRateDiv in Mpu6050.cpp and LINE_SAMPLE_HZ.
   // Probes 0x68 then 0x69 and configures the first that answers.
   bool begin(TwoWire &wire);
   // Reads the newest sample; false on any I2C error.

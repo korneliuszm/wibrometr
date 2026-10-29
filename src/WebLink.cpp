@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -26,7 +27,7 @@ uint32_t lastSend = 0, prevUs = 0;
 bool havePrev = false;
 // Text buffers (~25 KB) are allocated in begin(), so they land in PSRAM.
 constexpr int batchSize = maxRows * 64 + 512, moveSize = DisplacementMeter::trackPoints * 24 + 256,
-              lineSize = 8192, transitSize = line::envBins * 40 + 512;
+              lineSize = 65536, transitSize = line::envBins * 40 + 512;
 char *batch = nullptr, *moveText = nullptr, *lineText = nullptr, *transitText = nullptr;
 char ip[16] = "192.168.4.1";
 
@@ -171,33 +172,50 @@ void publishMove(const DisplacementMeter &meter) {
 }
 
 // Tables, spacings, every table's fingerprint, the last scan with its match
-// per table, and the names of the networks.
+// per table, and the names of the networks. 64 tables of fingerprints fill
+// most of the buffer; every append is clamped to it, the fingerprints and
+// names stop early when it runs short.
 void publishLine(const line::Tracker &t) {
   if (!lineText || ws.count() == 0) return;
   const int stations = t.learned.stations, room = lineSize;
-  int n = snprintf(lineText, room, "{\"t\":\"ln\",\"n\":%d,\"cur\":%d,\"k\":%d,\"fix\":%d,\"gaps\":[", stations,
-                   t.station(), t.known() ? 1 : 0, t.lastCorrected() ? 1 : 0);
-  for (int i = 0; i < stations - 1; ++i) n += snprintf(lineText + n, room - n, "%s%.2f", i ? "," : "", t.gap(i));
-  // Floor direction of each gap in degrees, null while not learned.
-  n += snprintf(lineText + n, room - n, "],\"gdir\":[");
+  int n = 0;
+  const auto add = [&](const char *fmt, auto... args) {
+    if (n >= room - 1) return;
+    const int w = snprintf(lineText + n, room - n, fmt, args...);
+    if (w > 0) n = std::min(n + w, room - 1);
+  };
+  add("{\"t\":\"ln\",\"n\":%d,\"cur\":%d,\"k\":%d,\"fix\":%d,\"gaps\":[", stations, t.station(), t.known() ? 1 : 0,
+      t.lastCorrected() ? 1 : 0);
+  for (int i = 0; i < stations - 1; ++i) add("%s%.2f", i ? "," : "", t.gap(i));
+  // Floor direction of each gap in degrees, null while not learned (and for a lift shaft).
+  add("],\"gdir\":[");
   for (int i = 0; i < stations - 1; ++i) {
-    if (t.learned.gapDirKnown[i]) n += snprintf(lineText + n, room - n, "%s%.1f", i ? "," : "", t.learned.gapDir[i] * 57.29578f);
-    else n += snprintf(lineText + n, room - n, "%snull", i ? "," : "");
+    if (t.learned.gapDirKnown[i]) add("%s%.1f", i ? "," : "", t.learned.gapDir[i] * 57.29578f);
+    else add("%snull", i ? "," : "");
   }
-  n += snprintf(lineText + n, room - n, "],\"vib\":[");
+  // Lift shafts: +1 up, -1 down, 0 on the floor.
+  add("],\"gz\":[");
+  for (int i = 0; i < stations - 1; ++i) add("%s%d", i ? "," : "", t.shaft(i));
+  // Names from config.csv (none without it).
+  add("],\"ids\":[");
+  for (int s = 0; s < stations; ++s) {
+    const line::StationRow *row = t.stationRow(s);
+    add("%s\"%s\"", s ? "," : "", row ? row->id : "");
+  }
+  add("],\"vib\":[");
   for (int s = 0; s < stations; ++s)
-    n += snprintf(lineText + n, room - n, "%s[%.3f,%.3f,%.3f]", s ? "," : "",
-                  t.stationVib(s, 0), t.stationVib(s, 1), t.stationVib(s, 2));
-  n += snprintf(lineText + n, room - n, "],\"fp\":[");
-  for (int s = 0; s < stations && n < room - 600; ++s) {
+    add("%s[%.3f,%.3f,%.3f]", s ? "," : "", t.stationVib(s, 0), t.stationVib(s, 1), t.stationVib(s, 2));
+  add("],\"fp\":[");
+  for (int s = 0; s < stations && n < room - 2000; ++s) {
     if (s) lineText[n++] = ',';
     n += appendFingerprint(lineText + n, room - n, t.learned.fp[s]);
   }
-  n += snprintf(lineText + n, room - n, "],\"scan\":");
-  n += appendFingerprint(lineText + n, room - n, t.lastScan());
-  n += snprintf(lineText + n, room - n, ",\"score\":[");
-  for (int s = 0; s < stations; ++s) n += snprintf(lineText + n, room - n, "%s%.1f", s ? "," : "", t.score(s));
-  n += snprintf(lineText + n, room - n, "],\"names\":{");
+  add("],\"scan\":");
+  if (n < room - 2000) n += appendFingerprint(lineText + n, room - n, t.lastScan());
+  else add("[]");
+  add(",\"score\":[");
+  for (int s = 0; s < stations; ++s) add("%s%.1f", s ? "," : "", t.score(s));
+  add("],\"names\":{");
   // Names of every access point mentioned above, once.
   bool first = true;
   const auto name = [&](const line::Fingerprint &f) {
@@ -212,13 +230,13 @@ void publishLine(const line::Tracker &t) {
       int c = 0;
       for (; ssidText[c] && c < 32; ++c) clean[c] = (ssidText[c] == '"' || ssidText[c] == '\\') ? '_' : ssidText[c];
       clean[c] = 0;
-      n += snprintf(lineText + n, room - n, "%s\"%s\":\"%s\"", first ? "" : ",", key, clean);
+      add("%s\"%s\":\"%s\"", first ? "" : ",", key, clean);
       first = false;
     }
   };
   for (int s = 0; s < stations; ++s) name(t.learned.fp[s]);
   name(t.lastScan());
-  n += snprintf(lineText + n, room - n, "}}");
+  add("}}");
   ws.textAll(lineText, n);
 }
 

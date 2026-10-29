@@ -68,6 +68,7 @@ struct Part {
   V g0{0.3f, -0.2f, 9.9f}; // Gravity in the sensor axes at the start.
   V bx{}, by{}, bz{};      // Sensor axes in floor coordinates (Z up).
   bool posed = false;
+  float elevatorV = 0.3f; // Lift shaft speed, m/s.
   float rnd() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) * (2.0f / 16777216.0f) - 1.0f; }
   // Horizontal axes of the mount, in the sensor axes.
   V up0() const { return unit(g0); }
@@ -153,6 +154,20 @@ struct Part {
     }
     x = tx; y = ty;
   }
+  // Lift shaft (elevator): `h` metres up (+) or down (-), ramp to 0.3 m/s
+  // in 1.5 s, steady, brake the same way. Level all the way.
+  void elevator(float h) {
+    const float ta = 1.5f, sign = h > 0 ? 1.0f : -1.0f;
+    const float vmax = std::fmin(elevatorV, std::fabs(h) / ta); // A short move never reaches full speed.
+    const float cruise = (std::fabs(h) - vmax * ta) / vmax, total = 2 * ta + cruise;
+    for (float tt = 0; tt < total; tt += step) {
+      const auto bell = [&](float u) { return vmax / ta * 6 * u * (1 - u); };
+      float a = 0;
+      if (tt < ta) a = bell(tt / ta);
+      else if (tt > ta + cruise) a = -bell((tt - ta - cruise) / ta);
+      sample(0, 0, sign * a, 0, 0, 0.3f);
+    }
+  }
   // Lifting table: up 0.4 m in 4 s tilting 1.5 deg, wait, down again.
   void lift() {
     const float T = 4, h = 0.4f, tiltTo = 1.5f * deg;
@@ -221,7 +236,7 @@ void suite(float shake) {
   check(allRight, "first pass counts every table (X, Y, after turns)");
   check(worst < 0.6f, "transit distances within 0.6 m");
   check(liftQuiet, "lifting table: no ride, same table");
-  check(worstLevel < (shake > 0 ? 0.15f : 0.08f), "lift and turns do not raise the thresholds");
+  check(worstLevel <= line::Tracker::minStartV + 1e-3f, "lift and turns do not raise the threshold above its floor");
   check(std::fabs(t.gap(3) - 8.0f) < 0.6f, "spacing 4-5 learned (8 m)");
   check(t.learned.gapDirKnown[2] && std::fabs(line::wrap(t.learned.gapDir[2] - 60 * deg)) < 10 * deg,
         "gap 3-4 learned along the floor's Y (90 deg from table 1's heading of 30)");
@@ -240,9 +255,10 @@ void suite(float shake) {
     tableX[s] = tableX[s - 1] + gaps[s - 1] * std::cos(dirs[s - 1] * deg);
     tableY[s] = tableY[s - 1] + gaps[s - 1] * std::sin(dirs[s - 1] * deg);
   }
-  part.carry(tableX[2], tableY[2], 20);
-  part.stand(4);
+  part.carry(tableX[2], tableY[2], 19.5f);
   check(t.carrying(), "being carried is recognised right away");
+  part.carry(tableX[2], tableY[2], 0.5f);
+  part.stand(4);
   part.stand(18);
   std::printf("      after the carry: table %d known %d (true 3), last transit carried %d to %d\n", t.station() + 1,
               t.known(), t.transit(t.transitCount() - 1).carried, t.transit(t.transitCount() - 1).to + 1);
@@ -386,12 +402,221 @@ int main() {
     check(t.newDistanceRow(), "a maneuver at the table produced a distance-log row");
     const std::string row = t.distanceRowCsv();
     std::printf("      nudge/maneuver row: %s", row.c_str());
+    check(std::string(t.distanceRowFile()) == "ST01_tech", "a maneuver is logged to ST01_tech");
     check(row.find("technological") != std::string::npos && row.find("z_transfer") != std::string::npos,
           "nudge is classified as technological motion (z_transfer), not a transport ride");
     check(row.find("transport") == std::string::npos,
           "nudge is NOT logged as a same-table transport");
     check(t.transitCount() == before,
           "a maneuver at the table does not add a transit record (that's for real rides/carries)");
+  }
+
+  // --- wifi_scan in config.csv: only those tables are scanned. ---
+  {
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "B1,X+,0,false,true,none,,,\n"
+      "B2,X+,6.5,false,false,none,,,\n"
+      "B3,X+,6.5,false,true,none,,,\n";
+    check(line::parseStationConfig(text, cfg), "setup: wifi_scan line parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    Part part{t, world};
+    part.stand(10);
+    t.home();
+    part.stand(1);
+    part.ride(6.5f, 30); part.stand(22);
+    part.ride(6.5f, 30); part.stand(22);
+    check(t.station() == 2, "wifi_scan: rode to B3");
+    check(std::string(t.distanceRowFile()) == "B2-B3", "the last ride is logged to B2-B3");
+    check(t.learned.fp[0].count > 0 && t.learned.fp[1].count == 0 && t.learned.fp[2].count > 0,
+          "wifi_scan: fingerprints at B1 and B3 only, none at B2");
+  }
+
+  // --- Carried and set down, with config.csv: 3 s still, a Wi-Fi scan, and
+  // the position is the best match at once. ---
+  {
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "B1,X+,0,false,true,none,,,\n"
+      "B2,X+,8,false,true,none,,,\n"
+      "B3,X+,8,false,true,none,,,\n"
+      "B4,X+,8,false,true,none,,,\n";
+    check(line::parseStationConfig(text, cfg), "setup: carry line parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    Part part{t, world};
+    part.stand(10);
+    t.home();
+    part.stand(1);
+    for (int s = 0; s < 3; ++s) { part.ride(8, 30); part.stand(22); }
+    check(t.station() == 3, "setup: rode to B4, every table has a fingerprint");
+    const float c30 = std::cos(30 * deg), s30 = std::sin(30 * deg);
+    part.carry(8 * c30, 8 * s30, 15); // By hand back to B2.
+    part.stand(5);                     // Set down: 3 s still, then the scan.
+    std::printf("      carried to B2 with config.csv: known %d at %d\n", t.known(), t.station() + 1);
+    check(t.known() && t.station() == 1, "5 s after setting it down Wi-Fi has put it at B2");
+    check(t.transit(t.transitCount() - 1).carried && t.transit(t.transitCount() - 1).to == 1, "the carry is listed, to B2");
+  }
+
+  // --- Turntable as a transition (RZ+ / RZ- in config.csv): turning while
+  // standing moves to the next position; a turntable at a station
+  // (rotation_z) or a small turn does not. ---
+  for (float shake : {0.0f, 1.0f}) {
+    std::printf("--- turntable transitions, structure shaking %s\n", shake > 0 ? "on" : "off");
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "B1,X+,0,false,true,none,,,\n"
+      "B2,X+,6.5,false,false,none,,,\n"
+      "B2r,RZ+,90,false,false,none,,,\n"
+      "B3,Y+,6.5,false,false,none,,,\n"
+      "B3r,RZ-,90,false,true,none,,,\n";
+    check(line::parseStationConfig(text, cfg), "setup: RZ+ / RZ- parse");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    check(t.turntable(1) == 1 && t.turntable(3) == -1 && t.turntable(0) == 0 && !t.learned.gapDirKnown[1],
+          "turntables 2-3 (left) and 4-5 (right) taken from the config");
+    Part part{t, world};
+    part.shake = shake;
+    part.stand(40); // Learning the shaking.
+    t.home();
+    part.stand(1);
+    part.ride(6.5f, 30); part.stand(22);
+    check(t.station() == 1, "ride to B2");
+    part.turntable(30); part.stand(5);
+    check(t.station() == 1, "a 30 deg turn (under half of 90) keeps B2");
+    part.turntable(-30); part.stand(5);
+    part.turntable(90); part.stand(5);
+    check(t.station() == 2 && std::string(t.distanceRowFile()) == "B2-B2r", "turned 90 deg left: B2r, logged to B2-B2r");
+    std::printf("      turntable row: %s", t.distanceRowCsv());
+    check(std::string(t.distanceRowCsv()).find(",RZ,0.000,90.000,") != std::string::npos, "the log row carries the angle");
+    part.stand(20);
+    part.ride(6.5f, 30 + 90); part.stand(22); // After the turn the line goes on along the floor's Y.
+    check(t.station() == 3, "ride along Y+ after the turntable: B3");
+    part.turntable(-90); part.stand(20);
+    check(t.station() == 4, "turned 90 deg right: B3r");
+    part.turntable(90); part.stand(20);
+    check(t.station() == 3, "turned back left: B3 again");
+  }
+
+  // --- Rides through passthrough tables: one ride over two or three gaps
+  // without stopping. The steady roll in the middle is as calm as standing,
+  // longer than `forcedStopS`; the ride must still end at its braking. ---
+  for (float shake : {0.0f, 1.0f}) {
+    std::printf("--- passthrough, structure shaking %s\n", shake > 0 ? "on" : "off");
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "AUF120,X+,0,false,true,none,,,\n"
+      "AUF130,X+,8,true,false,none,,,\n"
+      "AUF140,X+,8,false,false,none,,,\n"
+      "AUF150,X+,8,true,false,none,,,\n"
+      "AUF160,X+,8,true,false,none,,,\n"
+      "AUF170,X+,8,false,false,none,,,\n";
+    check(line::parseStationConfig(text, cfg), "setup: passthrough line parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    Part part{t, world};
+    part.shake = shake;
+    part.stand(10);
+    part.stand(30);
+    t.home();
+    part.stand(1);
+    part.ride(16, 30); part.stand(22);
+    const auto &a = t.transit(t.transitCount() - 1);
+    std::printf("      16 m ride: %.2f m, %d -> %d, carried %d\n", a.distance, a.from + 1, a.to + 1, a.carried);
+    check(t.station() == 2 && t.transitCount() == 1 && !a.carried, "16 m through AUF130: AUF140, one ride");
+    part.ride(24, 30); part.stand(22);
+    const auto &b = t.transit(t.transitCount() - 1);
+    std::printf("      24 m ride: %.2f m, %d -> %d, carried %d\n", b.distance, b.from + 1, b.to + 1, b.carried);
+    check(t.station() == 5 && t.transitCount() == 2 && !b.carried, "24 m through AUF150 and AUF160: AUF170, one ride");
+    part.ride(24, 210); part.stand(22);
+    part.ride(16, 210); part.stand(22);
+    check(t.station() == 0 && t.transitCount() == 4, "back 24 m and 16 m: AUF120");
+  }
+
+  // --- Lift shafts (Z- / Z+ in config.csv): an elevator ride moves to the
+  // next stop, a lifting table or the structure bobbing does not. ---
+  for (float shake : {0.0f, 1.0f}) {
+    std::printf("--- lift shafts, structure shaking %s\n", shake > 0 ? "on" : "off");
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "AUF120,X+,0,false,true,lift,Z-,0.5,\n"
+      "AUF130,X+,8,true,false,none,,,\n"
+      "AUF170,X+,8,false,false,none,,,\n"
+      "AUF170d,Z-,1,false,false,none,,,\n"
+      "AUF171,Y-,3,false,false,none,,,\n"
+      "AUF180,Y-,3,false,false,none,,,\n"
+      "AUF180u,Z+,1,false,false,none,,,\n"
+      "AUF181,X-,8,false,true,lift,Z-,0.5,\n";
+    check(line::parseStationConfig(text, cfg), "setup: line with two lift shafts parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    check(t.shaft(2) == -1 && t.shaft(5) == 1 && t.shaft(0) == 0 && !t.learned.gapDirKnown[2],
+          "shafts 3-4 (down) and 6-7 (up) taken from the config");
+    Part part{t, world};
+    part.shake = shake;
+    part.stand(10);
+    t.home();
+    part.stand(1);
+    // The body's heading at table 1 is 30 deg on the simulated floor.
+    const float X = 30, Ym = 30 - 90, Xm = 30 + 180;
+    part.lift(); // Lifting table at AUF120: not next to a shaft, ignored as before.
+    part.stand(5);
+    check(t.station() == 0 && t.transitCount() == 0, "lifting table at AUF120: same table, no transit");
+    part.ride(8, X); part.stand(22);
+    part.ride(8, X); part.stand(22);
+    check(t.station() == 2, "two rides along X: at AUF170 (next to the down shaft)");
+    part.stand(120);
+    check(t.station() == 2, "120 s standing next to the shaft: the structure bobbing moves nothing");
+    part.elevator(0.25f); part.stand(22);
+    check(t.station() == 2, "a 0.25 m jolt in the shaft (under 35% of 1 m) keeps the stop");
+    part.elevator(-1); part.stand(22);
+    const auto &down = t.transit(t.transitCount() - 1);
+    std::printf("      down the shaft: %.2f m lift %d, at %d\n", down.distance, down.lift, t.station() + 1);
+    check(t.station() == 3 && down.lift == -1 && std::fabs(down.distance - 1) < 0.2f,
+          "elevator 1 m down: AUF170d, transit marked as a lift ride");
+    check(std::string(t.distanceRowCsv()).find("transport") != std::string::npos, "lift ride logged as transport");
+    part.ride(3, Ym); part.stand(22);
+    part.ride(3, Ym); part.stand(22);
+    check(t.station() == 5, "two rides along Y- from the lower stop: AUF180");
+    part.elevator(1); part.stand(22);
+    check(t.station() == 6, "elevator 1 m up: AUF180u");
+    part.ride(8, Xm); part.stand(22);
+    check(t.station() == 7, "ride along X- from the upper stop: AUF181");
+    part.lift(); part.stand(5);
+    check(t.station() == 7, "lifting table at AUF181: same table");
+    // The tilt of the lifting table spoils the gyro offset for a while (it is
+    // learned at the slow ends of the tilt); riding off within seconds can
+    // then leave the ride without a calm stop. Not a lift-shaft matter.
+    part.stand(30);
+    // And all the way back.
+    part.ride(8, X); part.stand(22);
+    check(t.station() == 6, "back along X+: AUF180u");
+    part.elevator(-1); part.stand(22);
+    check(t.station() == 5, "back down the up-shaft: AUF180");
+    part.ride(3, Ym + 180); part.stand(22);
+    part.ride(3, Ym + 180); part.stand(22);
+    check(t.station() == 3, "back along Y+: AUF170d");
+    part.elevator(1); part.stand(22);
+    check(t.station() == 2, "back up the down-shaft: AUF170");
+    part.ride(8, X + 180); part.stand(22);
+    part.ride(8, X + 180); part.stand(22);
+    check(t.station() == 0, "back along X-: AUF120");
   }
 
   return failures ? 1 : 0;

@@ -2,6 +2,7 @@
 // g++ -std=c++17 -Iinclude test/station_config_checks.cpp -o scc && ./scc
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include "StationConfig.h"
 
 namespace {
@@ -30,6 +31,26 @@ int main() {
     check(cfg.row[2].direction == Direction::YPlus, "Y+ direction parsed");
     check(cfg.row[2].motion == Motion::RotationZ, "rotation_z motion parsed");
     check(std::fabs(cfg.row[2].motionRange - 90.0f) < 1e-6f, "rotation range in degrees parsed");
+  }
+  {
+    StationConfig cfg;
+    const char *text = "ST01,X+,8,false,true,none,,,\nST01d,Z-,1,false,false,none,,,\nST02,Y-,3,false,false,none,,,\n"
+                       "ST02u,Z+,1,false,false,none,,,\n";
+    check(parseStationConfig(text, cfg), "Z- / Z+ (lift shaft) directions parse");
+    StationConfig rz;
+    check(parseStationConfig("B1,X+,0,false,true,none,,,\nB1r,RZ+,90,false,false,none,,,\nB1l,RZ-,90,false,false,none,,,\n", rz) &&
+          rz.row[1].direction == Direction::RZPlus && rz.row[2].direction == Direction::RZMinus,
+          "RZ+ / RZ- (turntable) directions parse");
+    check(cfg.count == 4 && cfg.row[1].direction == Direction::ZMinus && cfg.row[3].direction == Direction::ZPlus,
+          "Z- and Z+ read as ZMinus / ZPlus");
+  }
+  {
+    StationConfig cfg;
+    std::string text;
+    for (int i = 0; i < StationConfig::maxRows; ++i) text += "ST,X+,8,false,false,none,,,\n";
+    check(StationConfig::maxRows == 64 && parseStationConfig(text.c_str(), cfg) && cfg.count == 64, "64 stations parse");
+    text += "ST,X+,8,false,false,none,,,\n";
+    check(!parseStationConfig(text.c_str(), cfg), "a 65th station rejects the file");
   }
   {
     StationConfig cfg;

@@ -11,7 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: g++ -std=c++17 -O2 -Iinclude test/line_checks.cpp -o lc && ./lc
-      - run: g++ -std=c++17 -O2 -DLINE_SAMPLE_HZ=1000 -Iinclude test/line_checks.cpp -o lc && ./lc
       - run: g++ -std=c++17 -Iinclude test/station_config_checks.cpp -o scc && ./scc
       - run: g++ -std=c++17 -Iinclude test/motion_classifier_checks.cpp -o mcc && ./mcc
       - run: g++ -std=c++17 -Iinclude test/distance_log_checks.cpp -o dlc && ./dlc

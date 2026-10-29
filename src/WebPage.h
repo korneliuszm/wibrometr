@@ -74,12 +74,16 @@ body {
 .state.moving { color: var(--amber); font-weight: 600; }
 .state.alert { color: var(--warn); }
 
+.tools { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; padding: 0 0 12px; }
+.tools .hint { color: var(--ink-soft); }
 button {
   font: inherit; font-stretch: inherit; color: var(--ink); background: var(--paper);
   border: 1px solid var(--grid-major); border-radius: 4px; padding: 6px 12px; cursor: pointer;
 }
 button:hover { background: color-mix(in srgb, var(--paper) 80%, var(--grid-major)); }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+label.check { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
+input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--ink); margin: 0; }
 
 /* Chart paper. */
 .sheet { background: var(--paper); border: 1px solid var(--edge); border-radius: 3px; margin-bottom: 14px; }
@@ -89,6 +93,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); out
 .legend { margin-left: auto; display: flex; gap: 14px; color: var(--ink-soft); }
 .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 canvas { display: block; width: 100%; }
+#accel canvas { height: 250px; }
+#gyro canvas { height: 170px; }
 
 /* Last move. */
 .move-body { display: grid; grid-template-columns: minmax(230px, 0.8fr) 1.3fr 1fr; gap: 0; }
@@ -210,6 +216,8 @@ footer { color: var(--ink-soft); padding-top: 6px; }
   #line .where { font-size: 1.7rem; }
   .move-body { grid-template-columns: 1fr; }
   .move-body > figure + figure { border-left: 0; }
+  #accel canvas { height: 200px; }
+  #gyro canvas { height: 150px; }
   .legend { margin-left: 0; width: 100%; }
 }
 </style>
@@ -253,6 +261,26 @@ footer { color: var(--ink-soft); padding-top: 6px; }
         <p class="meter-text" id="actText">Czekam na dane z płytki.</p>
       </div>
     </div>
+  </section>
+
+  <div class="tools">
+    <span class="hint" id="rideInfo">Wykresy pokażą ostatni przejazd, od ruszenia do zatrzymania.</span>
+    <label class="check"><input type="checkbox" id="dc"> Pokaż same drgania (bez grawitacji i offsetu)</label>
+  </div>
+
+  <section class="sheet" id="accel">
+    <header>
+      <h2>Przyspieszenie</h2><span class="unit">m/s²</span>
+      <span class="legend"><span><i style="background:var(--x)"></i>X</span><span><i style="background:var(--y)"></i>Y</span><span><i style="background:var(--z)"></i>Z</span></span>
+    </header>
+    <canvas></canvas>
+  </section>
+
+  <section class="sheet" id="gyro">
+    <header>
+      <h2>Prędkość kątowa</h2><span class="unit">°/s, offset zera odjęty</span>
+    </header>
+    <canvas></canvas>
   </section>
 
   <section class="sheet" id="move">
@@ -316,6 +344,160 @@ function setupCanvas(cv) {
   return { ctx, w: r.width, h: r.height };
 }
 
+// Rolling chart: newest at the right, each axis ends in a pen with its value.
+const CAP = 200 * 80; // 80 s at 200 Hz: the longest ride (60 s) with room before it.
+class Strip {
+  constructor(el, decimals, minSpan) {
+    this.cv = el.querySelector("canvas");
+    this.d = decimals; this.minSpan = minSpan;
+    this.t = new Float64Array(CAP);
+    this.v = [new Float32Array(CAP), new Float32Array(CAP), new Float32Array(CAP)];
+    this.head = 0; this.n = 0;
+    this.lo = -1; this.hi = 1;
+  }
+  push(t, a, b, c) {
+    const i = this.head;
+    this.t[i] = t; this.v[0][i] = a; this.v[1][i] = b; this.v[2][i] = c;
+    this.head = (i + 1) % CAP; if (this.n < CAP) this.n++;
+  }
+  clear() { this.n = 0; }
+  // Index range [first, last] of samples with t0 <= t <= t1, or null if the
+  // buffer does not reach back to t0.
+  range(t0, t1) {
+    if (!this.n) return null;
+    const oldest = (this.head - this.n + CAP) % CAP;
+    if (this.t[oldest] > t0) return null;
+    const out = [];
+    for (let k = 0; k < this.n; k++) {
+      const i = (oldest + k) % CAP;
+      if (this.t[i] >= t0 && this.t[i] <= t1) out.push(i);
+    }
+    return out;
+  }
+  // Samples from t0 to t1 across the whole width (the ride, from its start).
+  draw(t0, t1, removeDc, empty) {
+    const tSpan = Math.max(t1 - t0, 0.5);
+    const { ctx, w, h } = setupCanvas(this.cv);
+    const padL = 44, padR = 86, padT = 10, padB = 22;
+    const pw = w - padL - padR, ph = h - padT - padB;
+    ctx.clearRect(0, 0, w, h);
+    // Visible samples, newest first.
+    const idx = [];
+    for (let k = 0; k < this.n; k++) {
+      const i = (this.head - 1 - k + CAP) % CAP;
+      if (this.t[i] > t1) continue;
+      if (this.t[i] < t0) break;
+      idx.push(i);
+    }
+    const mean = [0, 0, 0];
+    if (removeDc && idx.length) for (let a = 0; a < 3; a++) { let s = 0; for (const i of idx) s += this.v[a][i]; mean[a] = s / idx.length; }
+    // Scale follows the data, eased so it does not jump.
+    let lo = Infinity, hi = -Infinity;
+    for (let a = 0; a < 3; a++) for (const i of idx) { const v = this.v[a][i] - mean[a]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    if (!idx.length) { lo = -this.minSpan / 2; hi = this.minSpan / 2; }
+    const mid = (lo + hi) / 2, span = Math.max(hi - lo, this.minSpan) * 1.15;
+    const tLo = mid - span / 2, tHi = mid + span / 2;
+    // Widen at once (nothing gets clipped), narrow slowly (no jumping).
+    this.lo = tLo < this.lo ? tLo : this.lo + (tLo - this.lo) * 0.08;
+    this.hi = tHi > this.hi ? tHi : this.hi + (tHi - this.hi) * 0.08;
+    const y = v => padT + (this.hi - v) / (this.hi - this.lo) * ph;
+    const x = t => padL + (t - t0) / tSpan * pw;
+    // Grid: values at a 1-2-5 step, time from the start of the ride.
+    ctx.font = `13px ${C.font}`; ctx.textBaseline = "middle"; ctx.lineWidth = 1;
+    const step = nice((this.hi - this.lo) / 5);
+    ctx.fillStyle = C["ink-soft"]; ctx.textAlign = "right";
+    for (let v = Math.ceil(this.lo / step) * step; v <= this.hi; v += step) {
+      const yy = Math.round(y(v)) + 0.5;
+      ctx.strokeStyle = Math.abs(v) < step / 2 ? C["grid-major"] : C.grid;
+      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(padL + pw, yy); ctx.stroke();
+      ctx.fillText(tick(v, step), padL - 6, yy);
+    }
+    const tStep = [0.5, 1, 2, 5, 10, 20].find(s => s * pw / tSpan >= 52) || 20; // Labels at least 52 px apart.
+    ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    for (let s = 0; s <= tSpan + 1e-9; s += tStep) {
+      const xx = Math.round(padL + s / tSpan * pw) + 0.5;
+      ctx.strokeStyle = C.grid;
+      ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + ph); ctx.stroke();
+      ctx.fillText(`${num(s)} s`, xx, h - 6);
+    }
+    if (!idx.length) {
+      ctx.fillStyle = C["ink-soft"]; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(empty || "Czekam na próbki z płytki", padL + pw / 2, padT + ph / 2);
+      return;
+    }
+    // Traces: per pixel column min/max, so 6000 samples stay cheap.
+    const pens = [];
+    ctx.save();
+    ctx.beginPath(); ctx.rect(padL, padT, pw, ph); ctx.clip();
+    ctx.lineWidth = 1.5; ctx.lineJoin = "round";
+    for (let a = 0; a < 3; a++) {
+      ctx.strokeStyle = C[AX[a]];
+      ctx.beginPath();
+      let col = null, mn = 0, mx = 0, first = true;
+      const flush = () => {
+        if (col === null) return;
+        if (first) { ctx.moveTo(col, y(mx)); first = false; } else ctx.lineTo(col, y(mx));
+        ctx.lineTo(col, y(mn));
+      };
+      for (let j = idx.length - 1; j >= 0; j--) {
+        const i = idx[j], v = this.v[a][i] - mean[a];
+        const c = Math.round(x(this.t[i]) * 2) / 2;
+        if (c !== col) { flush(); col = c; mn = mx = v; } else { if (v < mn) mn = v; if (v > mx) mx = v; }
+      }
+      flush();
+      ctx.stroke();
+      const last = this.v[a][idx[0]] - mean[a];
+      pens.push({ a, v: last, raw: this.v[a][idx[0]], y: y(last) });
+    }
+    ctx.restore();
+    // Pens: a nib at the trace end and the value beside it, pushed apart.
+    pens.sort((p, q) => p.y - q.y);
+    const gap = 19, top = padT + 8, bottom = padT + ph - 8;
+    for (let i = 0; i < pens.length; i++) pens[i].ly = Math.min(Math.max(pens[i].y, top + i * gap), bottom - (pens.length - 1 - i) * gap);
+    for (let i = 1; i < pens.length; i++) if (pens[i].ly - pens[i - 1].ly < gap) pens[i].ly = pens[i - 1].ly + gap;
+    const xe = padL + pw;
+    ctx.font = `600 15px ${C.font}`; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    for (const p of pens) {
+      const col = C[AX[p.a]];
+      const py = Math.min(Math.max(p.y, padT), padT + ph);
+      ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(xe, py); ctx.lineTo(xe + 10, p.ly); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(xe - 1, py); ctx.lineTo(xe + 6, py - 4); ctx.lineTo(xe + 6, py + 4); ctx.closePath(); ctx.fill();
+      ctx.fillText(fmt(removeDc ? p.v : p.raw, this.d), xe + 13, p.ly);
+    }
+  }
+}
+
+const accel = new Strip(document.getElementById("accel"), 2, 0.5);
+const gyro = new Strip(document.getElementById("gyro"), 1, 4);
+let removeDc = false, latestT = 0;
+document.getElementById("dc").addEventListener("change", e => { removeDc = e.target.checked; });
+
+// The last ride: from its start (the tracker counts 1.5 s of pre-roll into
+// it) while it lasts, then frozen from the start to the stop (the start of
+// the calm that ended it). A ride the page saw only partly starts where its
+// samples do.
+const PRE_ROLL_S = 1.5;
+let ride = null; // { t0, t1 (null while riding), from }
+function followRide(ln) {
+  if (!ln) return;
+  const moving = ln.ph === "move";
+  const riding = moving && !ln.arr;
+  if (riding && (!ride || (ride.t1 !== null && !ride.sameMove))) {
+    ride = { t0: Math.max(sampleT - PRE_ROLL_S, sampleT - (CAP - 1) / 200), t1: null, from: ln.cur, sameMove: true };
+  } else if (riding && ride && ride.t1 !== null) {
+    ride.t1 = null; // Moved again before the stop was confirmed: the same ride goes on.
+  } else if (ride && ride.t1 === null && !riding) {
+    ride.t1 = Math.max(ride.t0 + 0.5, sampleT - Math.max(0, ln.t || 0)); // Seconds since the calm began.
+  }
+  if (ride) ride.sameMove = moving; // Left Moving: the next ride is a new one.
+  const info = $("rideInfo");
+  if (!ride) return;
+  const dur = (ride.t1 ?? sampleT) - ride.t0;
+  info.textContent = ride.t1 === null ? `Przejazd w toku od stołu ${tableName(ride.from)}, ${num(dur)} s`
+    : `Ostatni przejazd od stołu ${tableName(ride.from)}: ${num(dur)} s, od ruszenia do zatrzymania`;
+}
+
 // Connection.
 let ws = null, lastMsg = 0, sampleT = 0;
 const linkEl = document.getElementById("link"), linkText = document.getElementById("linkText");
@@ -343,7 +525,11 @@ function onSamples(m) {
   else setLink(true, `Na żywo, ${Math.round(m.hz)} Hz`);
   for (const r of m.r) {
     sampleT += (r[0] > 0 && r[0] < 100000 ? r[0] : 5000) / 1e6;
+    accel.push(sampleT, r[1], r[2], r[3]);
+    gyro.push(sampleT, r[4], r[5], r[6]);
   }
+  latestT = sampleT;
+  followRide(m.ln);
   meterState = m.st;
   // The bar shows the line: standing, riding or turning.
   const ln = m.ln;
@@ -504,7 +690,8 @@ const macShort = b => b.slice(6).match(/../g).join(":");
 const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const similarity = dB => (dB >= 0 ? Math.max(0, Math.min(1, 1 - dB / 25)) : 0); // Mean |ΔRSSI| to 0..1.
 const M = 80, TABLE_H = 128, TABLE_W = 92; // Table box size, px; unchanged from today's frame.
-const SCALE = 14; // px per metre.
+const SCALE = 14; // px per metre; a short gap is drawn longer, see TABLE_GAP.
+const TABLE_GAP = 96; // px at least between neighbouring table frames (room for the gap's label).
 let stationPos = [{ x: 0, y: 0 }]; // Recomputed in buildScene() from lineInfo.
 function pos(s) { return stationPos[Math.max(0, Math.min(stationPos.length - 1, s))]; }
 // Fractional station index -> 2D point, for the car's live position.
@@ -512,6 +699,8 @@ function posAt(t) {
   const a = pos(Math.floor(t)), b = pos(Math.ceil(t)), f = t - Math.floor(t);
   return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
 }
+// Name from config.csv when there is one, else the table's number.
+function tableName(s) { return (lineInfo && lineInfo.ids && lineInfo.ids[s]) || `Stół ${s + 1}`; }
 function segDeg(s) { // Floor direction (deg) of the segment ahead of station s, for car rotation.
   const gdir = (lineInfo && lineInfo.gdir && lineInfo.gdir[s]) ?? 0;
   return gdir;
@@ -531,12 +720,27 @@ function buildScene(n) {
   const need = Math.max(0, n - 1);
   const gaps = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gaps && lineInfo.gaps[i]) || 0);
   const gdir = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gdir && lineInfo.gdir[i]) ?? null);
-  const metresPos = stationPositions(gaps.map(g => g > 0 ? g : 6.5), gdir);
+  // A lift shaft has no floor direction: in this top view it is drawn as a
+  // short piece going on the way the line came (or X at the start).
+  const gz = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gz && lineInfo.gz[i]) || 0);
+  const drawDir = [];
+  for (let i = 0; i < need; i++) drawDir.push(gz[i] ? (i ? drawDir[i - 1] : 0) : gdir[i]);
+  const metresPos = stationPositions(gaps.map((g, i) => gz[i] ? 7 : g > 0 ? g : 6.5), drawDir);
   // IMPORTANT: Y is negated here (M - ...), not added — stationPositions()
   // returns standard math CCW metres (same convention as arrow()/needle
   // rotation), but SVG y grows downward, so the sign must flip here or the
   // whole layout renders mirrored vs. the car's needle/compass.
-  stationPos = metresPos.map(p => ({ x: M + p.x * SCALE, y: M - p.y * SCALE }));
+  // Each gap to scale, but never so short that two frames come closer than
+  // TABLE_GAP (along X the frame's width counts, along Y its height): a
+  // schematic, not a map, wherever the line has short gaps.
+  stationPos = [{ x: M, y: M }];
+  for (let i = 0; i < need; i++) {
+    const a = metresPos[i], b = metresPos[i + 1], m = Math.hypot(b.x - a.x, b.y - a.y);
+    const ux = m > 1e-6 ? (b.x - a.x) / m : 1, uy = m > 1e-6 ? (b.y - a.y) / m : 0;
+    const len = Math.max(m * SCALE, Math.abs(ux) * TABLE_W + Math.abs(uy) * TABLE_H + TABLE_GAP);
+    const p = stationPos[i];
+    stationPos.push({ x: p.x + ux * len, y: p.y - uy * len }); // SVG y grows downward.
+  }
   const xs = stationPos.map(p => p.x), ys = stationPos.map(p => p.y);
   const pad = Math.max(TABLE_W, TABLE_H) / 2 + 50; // Room for table frames and the car sprite above them.
   const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
@@ -548,7 +752,7 @@ function buildScene(n) {
     const p = stationPos[s];
     const g = el("g", { class: "st" }, scene);
     el("rect", { class: "st-frame", x: p.x - TABLE_W / 2, y: p.y - TABLE_H / 2, width: TABLE_W, height: TABLE_H, rx: 4 }, g);
-    el("text", { class: "st-name", x: p.x - TABLE_W / 2 + 8, y: p.y - TABLE_H / 2 + 20 }, g).textContent = `Stół ${s + 1}`;
+    el("text", { class: "st-name", x: p.x - TABLE_W / 2 + 8, y: p.y - TABLE_H / 2 + 20 }, g).textContent = tableName(s);
     const bars = el("g", { class: "st-bars" }, g);
     const empty = el("text", { class: "st-empty", x: p.x, y: p.y + 12, "text-anchor": "middle" }, g);
     empty.textContent = "bez odcisku";
@@ -667,8 +871,10 @@ function renderTables() {
   });
   refs.dims.forEach((t, i) => {
     const g = lineInfo.gaps[i] || 0;
+    const z = (lineInfo.gz || [])[i] || 0;
     const a = arrow((lineInfo.gdir || [])[i]);
-    t.textContent = (g > 0 ? `${num(g)} m` : "≈ 6,5 m") + (a ? ` ${a}` : "");
+    if (z) t.textContent = `winda ${z > 0 ? "↑" : "↓"} ${num(g)} m`;
+    else t.textContent = (g > 0 ? `${num(g)} m` : "≈ 6,5 m") + (a ? ` ${a}` : "");
     t.classList.toggle("learned", g > 0);
   });
   const sc = lineInfo.score || [];
@@ -738,10 +944,12 @@ function arrChanged(a, b) {
 }
 function onLine(m) {
   const prevGaps = lineInfo && lineInfo.gaps, prevGdir = lineInfo && lineInfo.gdir;
+  const prevGz = lineInfo && lineInfo.gz, prevIds = lineInfo && lineInfo.ids;
   lineInfo = m;
-  if (sceneN !== m.n || arrChanged(prevGaps, m.gaps) || arrChanged(prevGdir, m.gdir)) buildScene(m.n); else renderTables();
+  if (sceneN !== m.n || arrChanged(prevGaps, m.gaps) || arrChanged(prevGdir, m.gdir) || arrChanged(prevGz, m.gz) ||
+      arrChanged(prevIds, m.ids)) buildScene(m.n); else renderTables();
   const sel = $("stations");
-  if (sel.options.length === 0) for (let i = 2; i <= 16; i++) sel.add(new Option(String(i), String(i)));
+  if (sel.options.length === 0) for (let i = 2; i <= 64; i++) sel.add(new Option(String(i), String(i)));
   sel.value = String(m.n);
   if (selected >= m.n) selected = -1;
   renderFingerprint();
@@ -790,10 +998,10 @@ function renderWhere() {
     main = `Jedzie ze stołu ${lst.cur + 1} na ${lst.cur + 1 + lst.dir}`;
     text = `${num(lst.d)} m od stołu ${lst.cur + 1}`;
   } else if (lst.ph === "settle") {
-    main = `Stół ${lst.cur + 1} z ${lst.n}`;
+    main = `${tableName(lst.cur)} (${lst.cur + 1} z ${lst.n})`;
     text = "Czekam, aż detal stanie nieruchomo";
   } else {
-    main = `Stół ${Math.round(lst.pos) + 1} z ${lst.n}`;
+    main = `${tableName(Math.round(lst.pos))} (${Math.round(lst.pos) + 1} z ${lst.n})`;
     if (lst.turn) text = `Obraca się na stole: ${turnWords(lst.tn)}`;
     else if (lst.ltS >= 0 && lst.ltS < 30) text = `Obrócony o ${turnWords(lst.lt)}` + (lst.wait >= 0 ? `, odcisk Wi-Fi za ${Math.ceil(lst.wait)} s` : "");
     else if (lst.scan) text = "Skanuję Wi-Fi, aby zapisać i porównać odcisk stołu…";
@@ -851,6 +1059,14 @@ $("forget").addEventListener("click", () => {
 
 function frame(ts) {
   animateLine(ts);
+  if (ride) {
+    const t1 = ride.t1 ?? latestT;
+    accel.draw(ride.t0, t1, removeDc);
+    gyro.draw(ride.t0, t1, removeDc);
+  } else {
+    accel.draw(latestT - 1, latestT, removeDc, "Jeszcze nie było przejazdu");
+    gyro.draw(latestT - 1, latestT, removeDc, "Jeszcze nie było przejazdu");
+  }
   if (drawProgress < 1) { drawProgress = Math.min(1, (ts - animStart) / 700); paintMove(); }
   requestAnimationFrame(frame);
 }

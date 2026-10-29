@@ -18,7 +18,7 @@ stole jest (`include/LineTracker.h`).
 
 **Obsługa:** postaw detal na pierwszym stole i na ekranie LINIA (pierwszy)
 przytrzymaj BOOT ≥1 s — albo na stronie „Detal jest na stole 1”. Od tej
-chwili pozycja liczy się sama. Liczbę stołów (domyślnie 8, do 16) ustawia
+chwili pozycja liczy się sama. Liczbę stołów (domyślnie 8, do 64) ustawia
 się na stronie.
 
 Linia może biec w osi X i Y hali, stoły podnoszone unoszą karoserię
@@ -44,16 +44,19 @@ drugą stronę — firmware obsługuje wszystkie te przypadki.
 - *Postój czy jazda (filtr drgań konstrukcji):* stoły wiszą na konstrukcji,
   która drga, więc samo przyspieszenie nie odróżnia postoju od jazdy.
   Wskaźnikiem jazdy jest pozioma „prędkość z przeciekiem” (przyspieszenie bez
-  grawitacji całkowane ze stałą zaniku 1 s): drgania o amplitudzie A i
+  grawitacji całkowane ze stałą zaniku 1,5 s): drgania o amplitudzie A i
   częstotliwości f dają tylko A/(2πf) (1 m/s² przy 5 Hz → 0,03 m/s), a ruszenie
   z rampą 0,3–0,5 m/s; pionowe bujanie się nie liczy. W postoju płytka stale
   mierzy poziom drgań (RMS tej prędkości i przyspieszenia poniżej ok. 1 Hz,
   pamięć ok. 10 s) i dopasowuje progi: ruszenie powyżej 4× poziomu
-  (0,05–0,25 m/s), cisza poniżej 3,5× (0,05–0,4 m/s²). Po włączeniu przez
+  (0,25–0,30 m/s — próg nie schodzi poniżej 0,25 m/s, żeby drgania konstrukcji
+  nie dawały fałszywych przejazdów), cisza poniżej 3,5× (0,05–0,4 m/s²).
+  Hamowanie wystarczy na połowę progu ruszenia. Po włączeniu przez
   pierwsze 8 s tylko uczy się drgań. Zatrzymanie to impuls hamowania
   (prędkość z przeciekiem przeciwna do kierunku ruszenia), a po nim cisza —
   równa jazda po rolkach też bywa cicha, ale nie ma przed nią hamowania;
-  awaryjnie wystarcza 20 s ciszy. Grawitacja i offset żyroskopu są w postoju
+  awaryjnie wystarcza 45 s ciszy (dłużej niż najdłuższa równa jazda przez
+  stoły PT: 24 m przy 0,6 m/s to ok. 38 s). Grawitacja i offset żyroskopu są w postoju
   śledzone dwustopniową średnią (tłumi drgania o ok. 4 rzędy), a grawitacja po
   zatrzymaniu jest średnią z całych 15 s ciszy. Poziom drgań liczony jest
   tylko ze zmienności (składowa stała odjęta), więc chwilowy rozjazd
@@ -103,8 +106,8 @@ czas, największe przyspieszenie rampy (start/hamowanie), RMS i szczyt
 drgań w X/Y/Z (składowa powyżej ok. 0,6 Hz) oraz obwiednię przyspieszenia
 (min–maks w czasie, do 160 punktów). Pamięta ostatnie 12. Strona pokazuje
 je w tabeli z wykresem i pozwala pobrać obwiednię jako CSV, a jeśli była
-otwarta przez cały przejazd — także próbki 200 Hz (średnie z 1 kHz, CSV).
-RMS, szczyt i obwiednia liczone są z pełnego 1 kHz (pasmo do ok. 185 Hz).
+otwarta przez cały przejazd — także próbki 200 Hz (CSV).
+RMS, szczyt i obwiednia liczone są z próbek 200 Hz (filtr czujnika 94 Hz).
 
 **Strona — linia:** widok z boku: stoły jako ramy, przez które biegnie
 przenośnik rolkowy, detal jako autko jadące po rolkach (koła i rolki kręcą
@@ -125,12 +128,68 @@ scenariusz przechodzi dwa razy: bez drgań konstrukcji i z drganiami
 0,15 m/s² 0,9 Hz, kołysanie dla żyroskopu) — w tym 120 s postoju bez
 fałszywego przejazdu, obroty rozpoznane jako 90,0°, podnoszenie bez wpływu
 na progi i stół; największy błąd odległości ok. 0,2 m bez drgań i ok. 0,4 m
-z drganiami (200 Hz i 1 kHz podobnie):
+z drganiami. Do tego: konfiguracja `config.csv` (odstępy z pliku, skan Wi-Fi
+tylko tam, gdzie `wifi_scan`), przejazdy przez stoły PT (16 i 24 m bez
+zatrzymania) oraz linia z windami (`Z-`/`Z+`, opis niżej):
 
 ```text
 g++ -std=c++17 -O2 -Iinclude test/line_checks.cpp -o lc && ./lc
-g++ -std=c++17 -O2 -DLINE_SAMPLE_HZ=1000 -Iinclude test/line_checks.cpp -o lc && ./lc
 ```
+
+## Konfiguracja linii (`config.csv`) i logi
+
+Płytka jest widoczna przez USB jako dysk **WIBROMTR SKID LOG** (obok portu
+szeregowego). Plik `config.csv` na nim, wczytywany przy starcie, opisuje
+linię (do 64 stacji); wtedy jest nadrzędny: odstępy i kierunki nie są
+uczone, a Wi-Fi nie poprawia stołu. Bez pliku — samouczenie jak opisano
+wyżej. Błędny wiersz odrzuca cały plik (log: `config.csv: not found or
+invalid`). Przykłady: `docs/configs/`.
+
+```csv
+station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed
+B1,X+,0,false,true,none,,,
+B2,X+,6.5,false,false,none,,,
+```
+
+- `direction`, `distance_m`: odcinek od poprzedniej stacji (dla pierwszej
+  pomijany). `X+ / X- / Y+ / Y-` — po rolkach na podłodze (kierunki względem
+  karoserii na pierwszej stacji); `Z+ / Z-` — winda w górę / w dół między
+  dwoma osobnymi miejscami postoju, `distance_m` to jej wysokość;
+  `RZ+ / RZ-` — stół obrotowy między dwiema pozycjami (obrót w lewo / w
+  prawo wokół pionu), `distance_m` to kąt w stopniach (np. 90). Obrót w
+  postoju o co najmniej połowę tego kąta w tę stronę przenosi detal na
+  następną pozycję, w przeciwną — na poprzednią (log np. `B026-B026o.csv`).
+- `passthrough` — stół, przez który detal może przejechać bez zatrzymania.
+- `wifi_scan` — tylko na tych stacjach robiony jest odcisk Wi-Fi (oraz
+  zawsze, gdy stół jest nieznany).
+- `station_motion` (`none / lift / rotation_z / z_transfer / compound`),
+  `motion_axis`, `motion_range` (m albo °), `motion_speed` — ruch
+  technologiczny na stacji; zakres służy do oznaczenia `over_range`.
+- Nazwa stacji (`station_id`, do 11 znaków) jest pokazywana na ekranie
+  LINIA i na stronie.
+
+**Windy:** przy stacji sąsiadującej z windą płytka obserwuje też pionową
+„prędkość z przeciekiem” (stała 3 s, własny próg 0,05–0,25 m/s z pionowych
+drgań); ruch w pionie w stronę windy dłuższy niż 35% jej wysokości to
+przejazd do następnego miejsca postoju. W innych miejscach ruch pionowy dalej
+się nie liczy (stoły podnoszone). W symulacji windę widać od ok. 0,15 m/s,
+przy silnych pionowych drganiach konstrukcji (1 m/s² przy 5 Hz) od ok.
+0,3 m/s.
+
+**Przeniesienie:** gdy ruch rozpoznano jako przeniesienie (przechył,
+obrót w drodze), po odłożeniu wystarczą 3 s spokoju (także żyroskopu),
+potem skan Wi-Fi i pozycja od razu przechodzi na najlepiej pasujący stół
+(również z `config.csv`; liczą się tylko stoły z odciskiem).
+
+**Logi** (na tym samym dysku): każdy przejazd dopisuje wiersz do pliku
+nazwanego od stacji, np. `B2-B3.csv`, a ruch technologiczny — do
+`B3_tech.csv` (bez `config.csv` — numery stołów, stół nieznany:
+`nieznana`). Kolumny: `timestamp_ms, segment_type, from_station,
+to_station, station_id, motion_type, axis, measured_distance_m,
+measured_angle_deg, confidence, quality_flags`, a dla przejazdów dodatkowo
+`duration_s, ramp_m_s2, rms_x, rms_y, rms_z, peak_x, peak_y, peak_z`
+(m/s², drgania powyżej ok. 0,6 Hz). Gdy komputer ma dysk zamontowany, płytka
+nie zapisuje (wysuń dysk przed jazdą).
 
 Ograniczenia: drgania konstrukcji o bardzo niskiej częstotliwości (wolne
 bujanie poniżej ok. 0,5 Hz o dużej amplitudzie) wyglądają podobnie jak
@@ -168,15 +227,13 @@ Ta magistrala jest też wyprowadzona na złączu STEMMA QT.
   po ok. 100 ms firmware przechodzi na odpytywanie co 1 ms (komunikat na
   porcie szeregowym); pomiar działa, ale z mniej dokładnym czasem próbek.
 - Konfiguracja: akcelerometr ±8 g (4096 LSB/g), żyroskop ±500 °/s
-  (65,5 LSB/(°/s)), filtr dolnoprzepustowy 184/188 Hz, próbkowanie
-  **1 kHz** (maksimum MPU6050 z włączonym filtrem); obie wielkości
+  (65,5 LSB/(°/s)), filtr dolnoprzepustowy 94/98 Hz, próbkowanie
+  **200 Hz**; obie wielkości
   odczytywane jednym 14-bajtowym odczytem z tej samej próbki (ok. 0,4 ms
   na magistrali 400 kHz).
-- Pełne 1 kHz dostaje nawigacja na linii (orientacja z żyroskopu,
-  całkowanie, drgania przejazdów — pasmo do ok. 185 Hz). Miernik ruchu
-  ręcznego, strumień na stronę i ekrany analizy dostają średnie z 5 próbek
-  (200 Hz), co działa też jak filtr antyaliasingowy. Kolejka próbek mieści
-  ok. 1 s (na czas skanu Wi-Fi).
+- Te same próbki 200 Hz dostają nawigacja na linii, miernik ruchu ręcznego,
+  strumień na stronę i ekrany analizy. Kolejka próbek mieści ok. 5 s (na czas
+  skanu Wi-Fi).
 - Moduły GY-521 mają własne rezystory podciągające I2C; Feather ma swoje.
   Krótkie przewody i wspólna masa.
 - Gdy czujnik nie odpowiada, ekran pokazuje `BRAK MPU6050 (I2C 0x68/0x69)`,
@@ -198,7 +255,7 @@ dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 5.
 - Trzy wiersze: X czerwony, Y zielony, Z niebieski; wartość w m/s² i w g
   oraz pasek od środka (zero) w skali ±20 m/s²; na dole moduł |a|.
 - Odczyt jest lekko wygładzony (ok. 0,15 s), żeby cyfry dało się czytać;
-  nagłówek podaje faktyczną liczbę próbek na sekundę (ok. 1000 Hz).
+  nagłówek podaje faktyczną liczbę próbek na sekundę (ok. 200 Hz).
 - Czujnik w spoczynku mierzy reakcję podłoża, więc położony płasko pokazuje
   Z ≈ +9,81 m/s² (1 g), a X i Y bliskie zeru. Osie X i Y mają znak odwrócony
   względem nadruku modułu (czujnik zamocowany obrócony o 180° wokół Z).
@@ -277,7 +334,7 @@ Płytka tworzy własną sieć Wi-Fi (punkt dostępowy, bez internetu):
 - ekran „WYKRESY W PRZEGLADARCE” na płytce (przedostatni) podaje te dane
   i liczbę otwartych stron.
 
-Strona pokazuje na żywo próbki 200 Hz (średnie z 1 kHz): przyspieszenie X/Y/Z
+Strona pokazuje na żywo próbki 200 Hz: przyspieszenie X/Y/Z
 i prędkość kątową X/Y/Z jako przewijane wykresy (okno 5, 10 albo 30 s,
 wstrzymanie, opcja „same drgania” odejmująca średnią z okna) z bieżącą
 wartością przy końcu każdego śladu. Niżej ostatni ruch z miernika
@@ -536,7 +593,7 @@ COM6 to port wykryty podczas tworzenia projektu; może zmienić się po
 resecie lub na innym komputerze. Sprawdzenie: `pio device list`.
 Po wgraniu monitor podaje adres MPU6050 i `WHO_AM_I` (0x68 — oryginał; inna
 wartość to prawdopodobnie klon, zwykle też działa), informację „INT works”,
-a co sekundę `rate=` (oczekiwane ok. 1000 Hz) i liczbę utraconych próbek.
+a co sekundę `rate=` (oczekiwane ok. 200 Hz) i liczbę utraconych próbek.
 Jeżeli automatyczny upload nie działa: przytrzymaj BOOT, naciśnij RESET,
 puść BOOT, sprawdź port i ponów upload.
 
@@ -569,7 +626,7 @@ g++ -std=c++17 -O2 -Iinclude test/displacement_checks.cpp -o dc && ./dc
 ```
 
 1. Po starcie potwierdź na porcie szeregowym `MPU6050: addr 0x68 ...` oraz
-   `MPU6050: INT works`; `rate=` ok. 1000 Hz, drops=0.
+   `MPU6050: INT works`; `rate=` ok. 200 Hz, drops=0.
 2. Połóż płytkę płasko: Z ≈ +9,8 m/s², X i Y bliskie zeru. MPU6050 bez
    kalibracji ma typowo ±0,5 m/s² przesunięcia zera — to normalne; tara
    (BOOT ≥1 s) je odejmuje.
@@ -592,9 +649,8 @@ tanich modułów: przesunięcie zera rzędu ±50 mg (ok. ±0,5 m/s²), błąd
 czułości kilka procent i dryf z temperaturą; ta wersja niczego nie
 kalibruje.
 
-Czujnik próbkuje 1 kHz z filtrem 184/188 Hz, więc drgania przejazdów są
-mierzone do ok. 185 Hz; strona, miernik ruchu ręcznego i FFT pracują na
-średnich 200 Hz (Nyquist 100 Hz). To nie wystarcza do szerokopasmowej
+Czujnik próbkuje 200 Hz z filtrem 94/98 Hz, więc drgania przejazdów są
+mierzone do ok. 90 Hz (Nyquist 100 Hz). To nie wystarcza do szerokopasmowej
 diagnostyki łożysk. FFT to podgląd do połowy częstotliwości próbek; nie ma
 klasyfikacji usterek, zapisu ani oceny według norm przemysłowych.
 Sztywność mocowania magnetycznego i przewód również wpływają na wynik.

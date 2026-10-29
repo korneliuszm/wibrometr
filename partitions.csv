@@ -1,5 +1,7 @@
 # Name,   Type, SubType, Offset,  Size,     Flags
-nvs,      data, nvs,     0x9000,  0x5000,
+# nvs at the end of flash: 64 stations of learned data (~20 KB blob, written
+# as a new copy before the old one is dropped) need far more than 20 KB.
 otadata,  data, ota,     0xe000,  0x2000,
 app0,     app,  ota_0,   0x10000, 0x300000,
 ffat,     data, fat,     0x310000,0x80000,
+nvs,      data, nvs,     0x390000,0x20000,

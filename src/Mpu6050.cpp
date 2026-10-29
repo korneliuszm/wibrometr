@@ -8,8 +8,8 @@ constexpr uint8_t kIntPinCfg = 0x37, kIntEnable = 0x38;
 constexpr uint8_t kAccelXoutH = 0x3B, kPwrMgmt1 = 0x6B, kPwrMgmt2 = 0x6C, kWhoAmI = 0x75;
 constexpr uint8_t kRange = 2;     // +-8 g: 4096 LSB/g, headroom for hand movement and knocks.
 constexpr uint8_t kGyroRange = 1; // +-500 deg/s: 65.5 LSB/(deg/s), enough for a turning wrist.
-constexpr uint8_t kDlpf = 1;      // Bandwidth 184 Hz accel / 188 Hz gyro; internal rate 1 kHz.
-constexpr uint8_t kRateDiv = 0;   // Output rate 1 kHz / (1 + 0) = 1 kHz, the most with the filter on.
+constexpr uint8_t kDlpf = 2;      // Bandwidth 94 Hz accel / 98 Hz gyro (under 200 Hz's Nyquist); internal rate 1 kHz.
+constexpr uint8_t kRateDiv = 4;   // Output rate 1 kHz / (1 + 4) = 200 Hz.
 // INT: active high, push-pull, held until any register read (LATCH_INT_EN |
 // INT_RD_CLEAR) so a slow task never misses an edge; data-ready interrupt on.
 constexpr uint8_t kIntLatchedClearOnRead = 0x30, kDataReadyEnable = 0x01;

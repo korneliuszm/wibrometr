@@ -7,7 +7,11 @@
 
 namespace line {
 
-enum class Direction : uint8_t { XPlus, XMinus, YPlus, YMinus };
+// X/Y: a stretch of rollers on the floor; Z: a lift shaft between two stops
+// (elevator), up or down; RZ: a turntable between two positions, turning the
+// body about the vertical, left (CCW, +) or right (CW, -), by `distanceM`
+// degrees.
+enum class Direction : uint8_t { XPlus, XMinus, YPlus, YMinus, ZPlus, ZMinus, RZPlus, RZMinus };
 enum class Motion : uint8_t { None, Lift, RotationZ, ZTransfer, Compound };
 
 struct StationRow {
@@ -27,7 +31,7 @@ struct StationConfig {
   // circular include between StationConfig.h and LineTracker.h). Checked
   // against the real line::maxStations by a static_assert in LineTracker.h,
   // once both are visible there.
-  static constexpr int maxRows = 16;
+  static constexpr int maxRows = 64;
   int count = 0;
   StationRow row[maxRows];
 };
@@ -55,6 +59,10 @@ inline bool parseDirection(const char *s, Direction &out) {
   if (std::strcmp(s, "X-") == 0) { out = Direction::XMinus; return true; }
   if (std::strcmp(s, "Y+") == 0) { out = Direction::YPlus; return true; }
   if (std::strcmp(s, "Y-") == 0) { out = Direction::YMinus; return true; }
+  if (std::strcmp(s, "Z+") == 0) { out = Direction::ZPlus; return true; }
+  if (std::strcmp(s, "Z-") == 0) { out = Direction::ZMinus; return true; }
+  if (std::strcmp(s, "RZ+") == 0) { out = Direction::RZPlus; return true; }
+  if (std::strcmp(s, "RZ-") == 0) { out = Direction::RZMinus; return true; }
   return false;
 }
 inline bool parseMotion(const char *s, Motion &out) {

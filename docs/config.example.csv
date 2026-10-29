@@ -1,0 +1,7 @@
+station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed
+AUF120,X+,0,false,true,lift,Z-,0.5,
+AUF130,X+,8,true,false,none,,,
+AUF140,X+,8,false,false,lift,Z-,0.5,
+AUF150,X+,8,true,false,none,,,
+AUF160,X+,8,false,false,lift,Z-,0.5,
+AUF170,X+,8,false,false,none,,,

@@ -80,9 +80,8 @@ SampleWindow<fftSize> window;
 StrokeCounter strokes; // Hand strokes in any direction; fed regardless of pause.
 // Large objects live in PSRAM: created on first use (after PSRAM is up, i.e.
 // not during static initialisation); malloc puts blocks over 4 KB there.
-// The sensor runs at 1 kHz. The hand-move meter, the page stream and the
-// analysis screens are built for 200 Hz: they get means of 5 samples, which
-// also keeps faster shaking from folding into their band.
+// The hand-move meter, the page stream and the analysis screens are built
+// for 200 Hz: at a faster sensor rate they get block means (at 200 Hz, n = 1).
 struct BlockMean {
   static constexpr int n = int(Mpu6050::kSampleRateHz / 200);
   Accel sa{}, sw{};
@@ -157,7 +156,8 @@ void serviceLine(uint32_t now) {
     weblink::publishLine(tracker());
   }
   if (tracker().newDistanceRow()) {
-    storage::appendDistanceRow(tracker().distanceRowCsv());
+    storage::appendLogRow(tracker().distanceRowFile(), tracker().distanceRowCsv());
+    Serial.printf("log %s.csv: %s", tracker().distanceRowFile(), tracker().distanceRowCsv());
   }
   if (tracker().newTurn()) {
     Serial.printf("line: turned %+.0f deg (turntable), heading %+.0f deg\n", tracker().lastTurn() * 57.29578f,
@@ -600,8 +600,13 @@ void drawLine(uint32_t now) {
     canvas.setTextColor(ST77XX_YELLOW);
     canvas.printf("%d>%d", tracker().station() + 1, tracker().station() + 1 + tracker().direction());
   } else {
+    const int s = tracker().arrived() ? int(lroundf(tracker().position())) : tracker().station();
+    const line::StationRow *row = tracker().stationRow(s);
     canvas.setTextColor(ST77XX_WHITE);
-    canvas.printf("STOL %d", (tracker().arrived() ? int(lroundf(tracker().position())) : tracker().station()) + 1);
+    if (row && row->id[0]) { // Name from config.csv; size 3 fits 7 characters before the right column.
+      if (strlen(row->id) > 7) canvas.setTextSize(2);
+      canvas.print(row->id);
+    } else canvas.printf("STOL %d", s + 1);
   }
   canvas.setTextSize(1);
   canvas.setCursor(150, 16);
@@ -626,13 +631,19 @@ void drawLine(uint32_t now) {
   const int y = 58, x0 = 10, x1 = 230;
   canvas.drawFastHLine(x0, y + 10, x1 - x0, muted);
   const float span = float(x1 - x0) / (n - 1);
+  // Lift shafts: that piece of the track in cyan.
+  for (int i = 0; i < n - 1; ++i)
+    if (tracker().shaft(i))
+      canvas.fillRect(x0 + int(lroundf(i * span)), y + 9, int(lroundf(span)) + 1, 3, ST77XX_CYAN);
+  const int half = std::max(1, std::min(8, int(span / 2) - 1)); // Boxes narrow down with many tables.
+  const int every = (n + 9) / 10;                                // At most ~10 numbers under the track.
   for (int s = 0; s < n; ++s) {
     const int x = x0 + int(lroundf(s * span));
     const bool here = tracker().known() && !moving && s == tracker().station();
     const bool fp = tracker().learned.fp[s].count > 0;
-    canvas.fillRect(x - 8, y, 17, 9, here ? ST77XX_GREEN : (fp ? grid : bg));
-    canvas.drawRect(x - 8, y, 17, 9, here ? ST77XX_GREEN : muted);
-    if (n <= 10 || s % 2 == 0) {
+    canvas.fillRect(x - half, y, 2 * half + 1, 9, here ? ST77XX_GREEN : (fp ? grid : bg));
+    canvas.drawRect(x - half, y, 2 * half + 1, 9, here ? ST77XX_GREEN : muted);
+    if (s % every == 0) {
       canvas.setCursor(x - (s >= 9 ? 5 : 2), y + 14);
       canvas.setTextColor(here ? ST77XX_GREEN : muted);
       canvas.printf("%d", s + 1);
@@ -876,7 +887,7 @@ void setup() {
   // CSV wins over learned/auto state, not the other way around (NVS used to
   // run second and silently erase the CSV-applied geometry).
   if (storage::begin()) {
-    line::StationConfig cfg;
+    static line::StationConfig cfg; // ~2 KB with 64 rows: not on the setup stack.
     if (storage::readConfig(cfg)) {
       tracker().applyStationConfig(cfg);
       Serial.println("config.csv: loaded, CSV is authoritative");
@@ -888,7 +899,7 @@ void setup() {
   }
   if (ipsEnabled) positioning.begin();
   else weblink::begin(); // The positioning prototype owns the radio when enabled.
-  events = xQueueCreate(1024, sizeof(Event)); // ~1 s at 1 kHz: rides out a Wi-Fi scan or a slow frame.
+  events = xQueueCreate(1024, sizeof(Event)); // ~5 s at 200 Hz: rides out a Wi-Fi scan or a slow frame.
   if (!events || xTaskCreate(sensorTask, "MPU6050", 8192, nullptr, 1, &sensorHandle) != pdPASS) {
     workerState = "BLAD PAMIECI / TASK";
     Serial.printf("sensor task/queue: no memory (internal free %u B)\n",
@@ -921,10 +932,10 @@ void loop() {
         }
         gyroUs = e.us;
         gyroPrimed = true;
-        tracker().add(e.value, e.gyro, e.us); // Full 1 kHz: ride integration and vibration.
+        tracker().add(e.value, e.gyro, e.us); // Full rate: ride integration and vibration.
         Accel a = e.value, w = e.gyro;
         uint32_t us = e.us;
-        if (!slow.add(a, w, us)) continue;  // The rest runs on 200 Hz block means.
+        if (!slow.add(a, w, us)) continue;  // The rest runs at 200 Hz.
         displacement().add(a, w, us);
         {
           const float toDeg = 1 / mpu6050::kRadPerDeg;
