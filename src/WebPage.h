@@ -536,7 +536,7 @@ function buildScene(n) {
   const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
   const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
   scene.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
-  refs = { st: [], dims: [], match: [] };
+  refs = { st: [], dims: [], match: [], rollers: [] };
   // Tables: frames the line runs through; each carries its Wi-Fi barcode.
   for (let s = 0; s < n; s++) {
     const p = stationPos[s];
@@ -555,7 +555,7 @@ function buildScene(n) {
   for (let s = 0; s < n - 1; s++) {
     const a = stationPos[s], b = stationPos[s + 1];
     const deg = segDeg(s);
-    el("line", { class: "rollers", x1: a.x, y1: a.y, x2: b.x, y2: b.y }, scene);
+    refs.rollers.push(el("line", { class: "rollers", x1: a.x, y1: a.y, x2: b.x, y2: b.y }, scene));
     el("rect", { class: "band", x: a.x - 5, y: a.y - 5, width: Math.hypot(b.x - a.x, b.y - a.y) + 10, height: 10,
                  rx: 5, transform: `rotate(${-deg} ${a.x} ${a.y})` }, scene);
     const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -796,7 +796,7 @@ function animateLine(ts) {
   refs.car.setAttribute("transform", `translate(${carX.x.toFixed(1)},${carX.y.toFixed(1)}) rotate(${-segDeg(Math.floor(lst.pos))})`);
   refs.body.setAttribute("transform", carDir < 0 ? "scale(-1,1)" : "");
   refs.wheels.forEach(h => h.setAttribute("transform", `rotate(${wheelAngle.toFixed(1)})`));
-  refs.rollers.style.strokeDashoffset = rollerShift.toFixed(1);
+  refs.rollers.forEach(r => r.style.strokeDashoffset = rollerShift.toFixed(1));
   refs.car.classList.toggle("moving", moving);
   refs.car.style.opacity = lst.k ? 1 : 0.3;
   const waiting = lst.wait >= 0 && !lst.scan;
