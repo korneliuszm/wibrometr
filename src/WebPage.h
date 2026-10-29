@@ -817,7 +817,8 @@ function animateLine(ts) {
   if (moving && lst.dir) carDir = lst.dir;
   wheelAngle += dx / 7.5 * 57.3;
   rollerShift -= dx;
-  refs.car.setAttribute("transform", `translate(${carX.x.toFixed(1)},${carX.y.toFixed(1)}) rotate(${-segDeg(Math.floor(lst.pos))})`);
+  const floorDeg = segDeg(Math.floor(lst.pos));
+  refs.car.setAttribute("transform", `translate(${carX.x.toFixed(1)},${carX.y.toFixed(1)}) rotate(${-floorDeg})`);
   refs.body.setAttribute("transform", carDir < 0 ? "scale(-1,1)" : "");
   refs.wheels.forEach(h => h.setAttribute("transform", `rotate(${wheelAngle.toFixed(1)})`));
   refs.rollers.forEach(r => r.style.strokeDashoffset = rollerShift.toFixed(1));
@@ -830,7 +831,14 @@ function animateLine(ts) {
     refs.rtext.textContent = Math.ceil(lst.wait);
   }
   refs.compass.style.display = lst.hk ? "" : "none";
-  refs.needle.setAttribute("transform", `rotate(${(-lst.hd).toFixed(1)})`); // CCW on the floor, SVG y points down.
+  // refs.compass is a child of refs.car, which is already rotated by
+  // -floorDeg above; lst.hd is an ABSOLUTE heading (0 = as the body faced
+  // at table 1, see the comment on the compass's construction in
+  // buildScene()), so rotating the needle by -hd here double-applies the
+  // segment direction (total would be -floorDeg + -hd instead of -hd).
+  // Subtract floorDeg so the two rotations compose back to the absolute
+  // heading: -floorDeg + -(hd - floorDeg) = -hd.
+  refs.needle.setAttribute("transform", `rotate(${(-(lst.hd - floorDeg)).toFixed(1)})`); // CCW on the floor, SVG y points down.
   refs.compass.classList.toggle("turning", !!lst.turn);
   refs.wifi.style.display = lst.scan ? "" : "none";
   refs.wifi.classList.toggle("on", !!lst.scan);
