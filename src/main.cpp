@@ -868,6 +868,13 @@ void setup() {
     tft.print("Brak RAM dla wykresu");
     while (true) delay(1000);
   }
+  binStart = lastFrame = rateStart = millis();
+  draw(millis());
+  prefs.begin("line");
+  loadLearned();
+  // config.csv is applied AFTER the NVS load so it is always the last write:
+  // CSV wins over learned/auto state, not the other way around (NVS used to
+  // run second and silently erase the CSV-applied geometry).
   if (storage::begin()) {
     line::StationConfig cfg;
     if (storage::readConfig(cfg)) {
@@ -879,10 +886,6 @@ void setup() {
   } else {
     Serial.println("USB storage: FFat.begin failed");
   }
-  binStart = lastFrame = rateStart = millis();
-  draw(millis());
-  prefs.begin("line");
-  loadLearned();
   if (ipsEnabled) positioning.begin();
   else weblink::begin(); // The positioning prototype owns the radio when enabled.
   events = xQueueCreate(1024, sizeof(Event)); // ~1 s at 1 kHz: rides out a Wi-Fi scan or a slow frame.
@@ -977,9 +980,15 @@ void loop() {
       weblink::publishLine(tracker());
       break;
     case weblink::Command::Stations:
-      tracker().setStations(arg);
-      saveLearned();
-      weblink::publishLine(tracker());
+      // config.csv (if present) owns the station count; the web command
+      // must not override the authoritative CSV geometry.
+      if (!tracker().configAuthoritative()) {
+        tracker().setStations(arg);
+        saveLearned();
+        weblink::publishLine(tracker());
+      } else {
+        showNotice("CONFIG.CSV AUTORYTATYWNY - LICZBA STOLOW BEZ ZMIAN", now);
+      }
       break;
     case weblink::Command::ForgetWifi:
       tracker().forgetWifi();
@@ -987,9 +996,19 @@ void loop() {
       weblink::publishLine(tracker());
       break;
     case weblink::Command::ForgetAll:
-      tracker().forgetAll();
-      saveLearned();
-      weblink::publishLine(tracker());
+      // Same as above: do not erase CSV-sourced gaps/directions when the
+      // CSV is authoritative. Only the non-CSV-managed Wi-Fi fingerprints
+      // may still be cleared.
+      if (!tracker().configAuthoritative()) {
+        tracker().forgetAll();
+        saveLearned();
+        weblink::publishLine(tracker());
+      } else {
+        tracker().forgetWifi();
+        saveLearned();
+        weblink::publishLine(tracker());
+        showNotice("CONFIG.CSV AUTORYTATYWNY - GEOMETRIA ZACHOWANA", now);
+      }
       break;
     case weblink::Command::None: break;
   }

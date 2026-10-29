@@ -868,24 +868,33 @@ private:
                                    T > maxTransitS || !slow_);
     if (carried && known_) { known_ = false; lost_ = Lost::Carried; }
     const bool ride = moved && slow_ && !carried;
+    // `targetFor()` resolves a short ride to the *same* table (a "nudge",
+    // see its comment) whenever `ride` holds: `!carried` with `moved` true
+    // already forces `slow_` true (see `carried`'s `!slow_` term above), so
+    // `ride` is never false here — a maneuver at the current table (lift,
+    // z_transfer) can still land on `to == from` and must be classified as
+    // technological motion, not logged as a same-table "transport" ride.
+    // This check must run, and `maneuver` must be known, before `station_`
+    // is (not) mutated below.
+    bool maneuver = false;
+    MotionResult motionResult; // Default: invalid, nothing technological happened.
     if (ride && known_) {
       const int to = targetFor(ph, d);
-      if (std::abs(to - from) == 1 && !configAuthoritative_) { // Learn this gap: spacing and floor direction.
-        const int i = to > from ? from : to;
-        float &g = learned.gap[i];
-        g = g > 0 ? g + 0.5f * (d - g) : d;
-        if (headingKnown_) {
-          const float dir = to > from ? floorDir : wrap(floorDir + pi);
-          if (!learned.gapDirKnown[i]) { learned.gapDir[i] = dir; learned.gapDirKnown[i] = true; }
-          else learned.gapDir[i] = wrap(learned.gapDir[i] + 0.3f * wrap(dir - learned.gapDir[i]));
+      maneuver = to == from;
+      if (!maneuver) {
+        if (std::abs(to - from) == 1 && !configAuthoritative_) { // Learn this gap: spacing and floor direction.
+          const int i = to > from ? from : to;
+          float &g = learned.gap[i];
+          g = g > 0 ? g + 0.5f * (d - g) : d;
+          if (headingKnown_) {
+            const float dir = to > from ? floorDir : wrap(floorDir + pi);
+            if (!learned.gapDirKnown[i]) { learned.gapDir[i] = dir; learned.gapDirKnown[i] = true; }
+            else learned.gapDir[i] = wrap(learned.gapDir[i] + 0.3f * wrap(dir - learned.gapDir[i]));
+          }
+          learnedChanged_ = true;
         }
-        learnedChanged_ = true;
-      }
-      station_ = to;
-    }
-    MotionResult motionResult; // Default: invalid, nothing technological happened.
-    if (!ride && !carried && known_ && moved) {
-      if (const StationRow *row = stationRow(station_); row && row->motion != Motion::RotationZ) {
+        station_ = to;
+      } else if (const StationRow *row = stationRow(station_); row && row->motion != Motion::RotationZ) {
         // Same station before and after: not a transport ride. `flat()`
         // split `p` into the horizontal component `ph` (its norm is `d`)
         // and whatever lies along gravity, which `flat()` removed — that
@@ -898,7 +907,7 @@ private:
         motionResult = classifyMotion(*row, std::fabs(verticalM), 0);
       }
     }
-    if (ride && !carried) {
+    if (ride && !carried && !maneuver) {
       formatDistanceRow(distanceRow_, sizeof(distanceRow_), uint32_t(clock_ * 1000),
                          "transport", knownBefore ? from : -1, known_ ? station_ : -1,
                          "", Motion::None, "", d, 0, slow_ ? 1.0f : 0.5f, "");
@@ -911,7 +920,7 @@ private:
                          1.0f, motionResult.overRange ? "over_range" : "");
       newDistanceRow_ = true;
     }
-    if (ride || carried) {
+    if ((ride && !maneuver) || carried) {
       Transit &t = transits_[transitHead_];
       t = Transit{};
       t.id = lastTransitId_ = nextId_++;

@@ -359,5 +359,40 @@ int main() {
           "rotation_z: measured_angle_deg is ~90 deg, not 0");
   }
 
+  // --- A ride that settles back at the same table ("nudge", d >=
+  // minTransitM but under nudgeShare * gap) is a maneuver (lift/z_transfer),
+  // not a same-table "transport": astra audit finding 4. Gap here is 20 m,
+  // nudgeShare is 0.35, so a 2 m ride (>= minTransitM=1.5, < 7 m) resolves
+  // to the same table via targetFor() and must log "technological". ---
+  {
+    line::StationConfig cfg;
+    const char *text =
+      "station_id,direction,distance_m,passthrough,wifi_scan,station_motion,motion_axis,motion_range,motion_speed\n"
+      "ST01,X+,20,false,true,z_transfer,Z,0.3,\n"
+      "ST02,X+,20,false,true,none,,,\n";
+    check(line::parseStationConfig(text, cfg), "setup: z_transfer station config parses");
+    World world;
+    auto tracker = std::make_unique<line::Tracker>();
+    line::Tracker &t = *tracker;
+    t.applyStationConfig(cfg);
+    Part part{t, world};
+    part.stand(10);
+    t.home();
+    part.stand(1);
+    const int before = t.transitCount();
+    part.ride(2.0f, 0); // >= minTransitM, < nudgeShare * 20 m: a nudge, same table.
+    part.stand(18);
+    check(t.station() == 0, "a nudge-sized ride stays at the same table");
+    check(t.newDistanceRow(), "a maneuver at the table produced a distance-log row");
+    const std::string row = t.distanceRowCsv();
+    std::printf("      nudge/maneuver row: %s", row.c_str());
+    check(row.find("technological") != std::string::npos && row.find("z_transfer") != std::string::npos,
+          "nudge is classified as technological motion (z_transfer), not a transport ride");
+    check(row.find("transport") == std::string::npos,
+          "nudge is NOT logged as a same-table transport");
+    check(t.transitCount() == before,
+          "a maneuver at the table does not add a transit record (that's for real rides/carries)");
+  }
+
   return failures ? 1 : 0;
 }
