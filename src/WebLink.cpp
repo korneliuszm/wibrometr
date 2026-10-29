@@ -196,6 +196,9 @@ void publishLine(const line::Tracker &t) {
   // Lift shafts: +1 up, -1 down, 0 on the floor.
   add("],\"gz\":[");
   for (int i = 0; i < stations - 1; ++i) add("%s%d", i ? "," : "", t.shaft(i));
+  // Turntables between positions: +1 left, -1 right (their gap is an angle, degrees).
+  add("],\"gr\":[");
+  for (int i = 0; i < stations - 1; ++i) add("%s%d", i ? "," : "", t.turntable(i));
   // Names from config.csv (none without it).
   add("],\"ids\":[");
   for (int s = 0; s < stations; ++s) {

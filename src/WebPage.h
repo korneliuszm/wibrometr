@@ -723,9 +723,17 @@ function buildScene(n) {
   // A lift shaft has no floor direction: in this top view it is drawn as a
   // short piece going on the way the line came (or X at the start).
   const gz = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gz && lineInfo.gz[i]) || 0);
+  // A turntable between positions (its gap is an angle): the turned
+  // position is drawn beside the line, left of it for a left turn.
+  const gr = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gr && lineInfo.gr[i]) || 0);
   const drawDir = [];
-  for (let i = 0; i < need; i++) drawDir.push(gz[i] ? (i ? drawDir[i - 1] : 0) : gdir[i]);
-  const metresPos = stationPositions(gaps.map((g, i) => gz[i] ? 7 : g > 0 ? g : 6.5), drawDir);
+  let along = 0; // Direction the line came from, for shafts and turntables.
+  for (let i = 0; i < need; i++) {
+    if (gz[i]) drawDir.push(along);
+    else if (gr[i]) drawDir.push(along + (gr[i] > 0 ? 90 : -90));
+    else { drawDir.push(gdir[i]); along = gdir[i] ?? along; }
+  }
+  const metresPos = stationPositions(gaps.map((g, i) => gz[i] || gr[i] ? 7 : g > 0 ? g : 6.5), drawDir);
   // IMPORTANT: Y is negated here (M - ...), not added — stationPositions()
   // returns standard math CCW metres (same convention as arrow()/needle
   // rotation), but SVG y grows downward, so the sign must flip here or the
@@ -764,7 +772,7 @@ function buildScene(n) {
   // band only worked because the line was always drawn straight).
   for (let s = 0; s < n - 1; s++) {
     const a = stationPos[s], b = stationPos[s + 1];
-    const deg = segDeg(s);
+    const deg = -Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI; // As drawn (shafts, turntables too).
     refs.rollers.push(el("line", { class: "rollers", x1: a.x, y1: a.y, x2: b.x, y2: b.y }, scene));
     el("rect", { class: "band", x: a.x - 5, y: a.y - 5, width: Math.hypot(b.x - a.x, b.y - a.y) + 10, height: 10,
                  rx: 5, transform: `rotate(${-deg} ${a.x} ${a.y})` }, scene);
@@ -871,9 +879,10 @@ function renderTables() {
   });
   refs.dims.forEach((t, i) => {
     const g = lineInfo.gaps[i] || 0;
-    const z = (lineInfo.gz || [])[i] || 0;
+    const z = (lineInfo.gz || [])[i] || 0, r = (lineInfo.gr || [])[i] || 0;
     const a = arrow((lineInfo.gdir || [])[i]);
-    if (z) t.textContent = `winda ${z > 0 ? "↑" : "↓"} ${num(g)} m`;
+    if (r) t.textContent = `obrót ${r > 0 ? "↺" : "↻"} ${Math.round(g)}°`;
+    else if (z) t.textContent = `winda ${z > 0 ? "↑" : "↓"} ${num(g)} m`;
     else t.textContent = (g > 0 ? `${num(g)} m` : "≈ 6,5 m") + (a ? ` ${a}` : "");
     t.classList.toggle("learned", g > 0);
   });
@@ -944,9 +953,9 @@ function arrChanged(a, b) {
 }
 function onLine(m) {
   const prevGaps = lineInfo && lineInfo.gaps, prevGdir = lineInfo && lineInfo.gdir;
-  const prevGz = lineInfo && lineInfo.gz, prevIds = lineInfo && lineInfo.ids;
+  const prevGz = lineInfo && lineInfo.gz, prevGr = lineInfo && lineInfo.gr, prevIds = lineInfo && lineInfo.ids;
   lineInfo = m;
-  if (sceneN !== m.n || arrChanged(prevGaps, m.gaps) || arrChanged(prevGdir, m.gdir) || arrChanged(prevGz, m.gz) ||
+  if (sceneN !== m.n || arrChanged(prevGaps, m.gaps) || arrChanged(prevGdir, m.gdir) || arrChanged(prevGz, m.gz) || arrChanged(prevGr, m.gr) ||
       arrChanged(prevIds, m.ids)) buildScene(m.n); else renderTables();
   const sel = $("stations");
   if (sel.options.length === 0) for (let i = 2; i <= 64; i++) sel.add(new Option(String(i), String(i)));
