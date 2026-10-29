@@ -523,8 +523,14 @@ let carX = null, carDir = 1, wheelAngle = 0, rollerShift = 0, lastFrameTs = 0;
 function buildScene(n) {
   sceneN = n;
   scene.innerHTML = "";
-  const gaps = lineInfo ? lineInfo.gaps.slice(0, n - 1) : new Array(Math.max(0, n - 1)).fill(0);
-  const gdir = lineInfo ? lineInfo.gdir.slice(0, n - 1) : new Array(Math.max(0, n - 1)).fill(null);
+  // Normalize to exactly n-1 entries regardless of what lineInfo carries —
+  // the onLineState() emergency-fallback path (see onLineState() below)
+  // builds a line-info object with gaps:[] and no gdir field at all, so a
+  // plain .slice() here would leave both arrays too short (or gdir
+  // undefined) and crash/misrender once n > 1.
+  const need = Math.max(0, n - 1);
+  const gaps = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gaps && lineInfo.gaps[i]) || 0);
+  const gdir = Array.from({ length: need }, (_, i) => (lineInfo && lineInfo.gdir && lineInfo.gdir[i]) ?? null);
   const metresPos = stationPositions(gaps.map(g => g > 0 ? g : 6.5), gdir);
   // IMPORTANT: Y is negated here (M - ...), not added — stationPositions()
   // returns standard math CCW metres (same convention as arrow()/needle
@@ -625,14 +631,23 @@ function renderTables() {
     r.g.classList.toggle("no-fp", !fp.length);
     r.empty.style.display = fp.length ? "none" : "";
     r.bars.innerHTML = "";
-    if (!fp.length) return;
-    const map = new Map(fp), x0 = pos(s).x - 40, bw = 80 / Math.max(order.length, 1);
-    order.forEach((b, i) => {
-      const v = map.get(b);
-      if (v === undefined) return;
-      const h = Math.max(1.5, (v + 95) / 65 * 32);
-      el("rect", { class: "st-bar", x: x0 + i * bw + 0.3, y: 152 - h, width: Math.max(1, bw - 0.6), height: h }, r.bars);
-    });
+    if (fp.length) {
+      const { p } = r;
+      const map = new Map(fp), x0 = p.x - 40, bw = 80 / Math.max(order.length, 1);
+      order.forEach((b, i) => {
+        const v = map.get(b);
+        if (v === undefined) return;
+        const h = Math.max(1.5, (v + 95) / 65 * 32);
+        // y relative to the station's own p.y (not an absolute scene
+        // coordinate) so the bars stay inside their tile on non-horizontal
+        // segments too; 72 keeps the bars at the same spot in the tile as
+        // before on a horizontal line, where p.y was always M (=80).
+        el("rect", { class: "st-bar", x: x0 + i * bw + 0.3, y: p.y + 72 - h, width: Math.max(1, bw - 0.6), height: h }, r.bars);
+      });
+    }
+    // Vibration bars + tile tint are independent of the Wi-Fi fingerprint
+    // (fp) — they must render whenever vib data exists, even on stations
+    // that have no fingerprint yet (see finding 10).
     const VIB_SCALE = 2.0; // m/s2 RMS at "full bar" — placeholder ceiling, retune from real recordings.
     // ponytail: VIB_SCALE is a hardcoded constant, not computed from data —
     // the spec explicitly says thresholds aren't established yet; retune this
@@ -713,9 +728,18 @@ function renderFacts() {
   ];
   $("lineFacts").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 }
+// Shallow array-equality check (treats missing/undefined as empty), used
+// to detect gaps/gdir changes that need a scene rebuild (see onLine()).
+function arrChanged(a, b) {
+  a = a || []; b = b || [];
+  if (a.length !== b.length) return true;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return true;
+  return false;
+}
 function onLine(m) {
+  const prevGaps = lineInfo && lineInfo.gaps, prevGdir = lineInfo && lineInfo.gdir;
   lineInfo = m;
-  if (sceneN !== m.n) buildScene(m.n); else renderTables();
+  if (sceneN !== m.n || arrChanged(prevGaps, m.gaps) || arrChanged(prevGdir, m.gdir)) buildScene(m.n); else renderTables();
   const sel = $("stations");
   if (sel.options.length === 0) for (let i = 2; i <= 16; i++) sel.add(new Option(String(i), String(i)));
   sel.value = String(m.n);
@@ -793,7 +817,8 @@ function animateLine(ts) {
   if (moving && lst.dir) carDir = lst.dir;
   wheelAngle += dx / 7.5 * 57.3;
   rollerShift -= dx;
-  refs.car.setAttribute("transform", `translate(${carX.x.toFixed(1)},${carX.y.toFixed(1)}) rotate(${-segDeg(Math.floor(lst.pos))})`);
+  const floorDeg = segDeg(Math.floor(lst.pos));
+  refs.car.setAttribute("transform", `translate(${carX.x.toFixed(1)},${carX.y.toFixed(1)}) rotate(${-floorDeg})`);
   refs.body.setAttribute("transform", carDir < 0 ? "scale(-1,1)" : "");
   refs.wheels.forEach(h => h.setAttribute("transform", `rotate(${wheelAngle.toFixed(1)})`));
   refs.rollers.forEach(r => r.style.strokeDashoffset = rollerShift.toFixed(1));
@@ -806,7 +831,14 @@ function animateLine(ts) {
     refs.rtext.textContent = Math.ceil(lst.wait);
   }
   refs.compass.style.display = lst.hk ? "" : "none";
-  refs.needle.setAttribute("transform", `rotate(${(-lst.hd).toFixed(1)})`); // CCW on the floor, SVG y points down.
+  // refs.compass is a child of refs.car, which is already rotated by
+  // -floorDeg above; lst.hd is an ABSOLUTE heading (0 = as the body faced
+  // at table 1, see the comment on the compass's construction in
+  // buildScene()), so rotating the needle by -hd here double-applies the
+  // segment direction (total would be -floorDeg + -hd instead of -hd).
+  // Subtract floorDeg so the two rotations compose back to the absolute
+  // heading: -floorDeg + -(hd - floorDeg) = -hd.
+  refs.needle.setAttribute("transform", `rotate(${(-(lst.hd - floorDeg)).toFixed(1)})`); // CCW on the floor, SVG y points down.
   refs.compass.classList.toggle("turning", !!lst.turn);
   refs.wifi.style.display = lst.scan ? "" : "none";
   refs.wifi.classList.toggle("on", !!lst.scan);
