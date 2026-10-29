@@ -159,6 +159,8 @@ B2,X+,6.5,false,false,none,,,
   prawo wokół pionu), `distance_m` to kąt w stopniach (np. 90). Obrót w
   postoju o co najmniej połowę tego kąta w tę stronę przenosi detal na
   następną pozycję, w przeciwną — na poprzednią (log np. `B026-B026o.csv`).
+  Kierunki kolejnych wierszy obracają się razem z detalem: po `RZ-` o 90°
+  „X+” oznacza dalej przed siebie w nowym ustawieniu (w hali o 90° w prawo).
 - `passthrough` — stół, przez który detal może przejechać bez zatrzymania.
 - `wifi_scan` — tylko na tych stacjach robiony jest odcisk Wi-Fi (oraz
   zawsze, gdy stół jest nieznany).

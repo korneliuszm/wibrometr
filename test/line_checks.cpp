@@ -476,7 +476,7 @@ int main() {
       "B1,X+,0,false,true,none,,,\n"
       "B2,X+,6.5,false,false,none,,,\n"
       "B2r,RZ+,90,false,false,none,,,\n"
-      "B3,Y+,6.5,false,false,none,,,\n"
+      "B3,X+,6.5,false,false,none,,,\n" // The body's X+ after turning left: the floor's Y.
       "B3r,RZ-,90,false,true,none,,,\n";
     check(line::parseStationConfig(text, cfg), "setup: RZ+ / RZ- parse");
     World world;
@@ -485,6 +485,7 @@ int main() {
     t.applyStationConfig(cfg);
     check(t.turntable(1) == 1 && t.turntable(3) == -1 && t.turntable(0) == 0 && !t.learned.gapDirKnown[1],
           "turntables 2-3 (left) and 4-5 (right) taken from the config");
+    check(std::fabs(t.learned.gapDir[2] - 90 * deg) < 1e-4f, "X+ after a left turn is the floor's +90 deg");
     Part part{t, world};
     part.shake = shake;
     part.stand(40); // Learning the shaking.
@@ -501,7 +502,7 @@ int main() {
     check(std::string(t.distanceRowCsv()).find(",RZ,0.000,90.000,") != std::string::npos, "the log row carries the angle");
     part.stand(20);
     part.ride(6.5f, 30 + 90); part.stand(22); // After the turn the line goes on along the floor's Y.
-    check(t.station() == 3, "ride along Y+ after the turntable: B3");
+    check(t.station() == 3, "ride on (the body's X+) after the turntable: B3");
     part.turntable(-90); part.stand(20);
     check(t.station() == 4, "turned 90 deg right: B3r");
     part.turntable(90); part.stand(20);

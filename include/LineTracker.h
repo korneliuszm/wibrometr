@@ -217,6 +217,9 @@ public:
   // Call once, at boot, before `home()`.
   void applyStationConfig(const StationConfig &cfg) {
     setStations(cfg.count);
+    // Directions are the body's own: after a turntable (RZ+/RZ-) the rows
+    // that follow are turned with it ("X+" goes on the way the body faces).
+    float turned = 0;
     for (int i = 0; i < cfg.count; ++i) {
       stationRow_[i] = cfg.row[i];
       if (i + 1 < cfg.count) {
@@ -224,7 +227,8 @@ public:
         learned.gap[i] = cfg.row[i + 1].distanceM;
         shaft_[i] = d == Direction::ZPlus ? 1 : d == Direction::ZMinus ? -1 : 0;
         turn_[i] = d == Direction::RZPlus ? 1 : d == Direction::RZMinus ? -1 : 0;
-        learned.gapDir[i] = shaft_[i] || turn_[i] ? 0 : directionAngle(d);
+        if (turn_[i]) turned += turn_[i] * cfg.row[i + 1].distanceM * pi / 180;
+        learned.gapDir[i] = shaft_[i] || turn_[i] ? 0 : wrap(directionAngle(d) + turned);
         learned.gapDirKnown[i] = !shaft_[i] && !turn_[i]; // No floor direction: not ridden along the floor.
       }
     }
