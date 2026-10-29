@@ -4,11 +4,18 @@
 #include <FFat.h>
 #include <USB.h>
 #include <USBMSC.h>
+#include <atomic>
 
 namespace storage {
 namespace {
 USBMSC msc;
-bool mounted = false;
+// Written from the USB MSC onStartStop callback, read from the main loop;
+// those can run on either core on the dual-core S3. A single aligned bool
+// read/write is not torn on this architecture, but the two sides still need
+// a memory-ordering guarantee the plain bool doesn't give -- std::atomic is
+// a one-line fix with no measurable cost here, so just use it instead of
+// arguing about whether the race is benign.
+std::atomic<bool> mounted{false};
 constexpr const char *kConfigPath = "/config.csv";
 constexpr const char *kDistancesPath = "/distances_last_run.csv";
 constexpr const char *kDistancesHeader =
@@ -38,7 +45,7 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buf, uint32_t size) {
 }
 bool onStartStop(uint8_t power, bool start, bool eject) {
   (void)power;
-  mounted = start && !eject;
+  mounted.store(start && !eject, std::memory_order_relaxed);
   return true;
 }
 } // namespace
@@ -76,13 +83,13 @@ bool readConfig(line::StationConfig &out) {
 }
 
 void appendDistanceRow(const char *csvRow) {
-  if (mounted) return; // Host owns the drive right now; device is parked.
+  if (mounted.load(std::memory_order_relaxed)) return; // Host owns the drive right now; device is parked.
   File f = FFat.open(kDistancesPath, FILE_APPEND);
   if (!f) return;
   f.print(csvRow);
   f.close();
 }
 
-bool isMounted() { return mounted; }
+bool isMounted() { return mounted.load(std::memory_order_relaxed); }
 
 } // namespace storage
