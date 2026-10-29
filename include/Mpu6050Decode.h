@@ -31,4 +31,8 @@ constexpr Accel decodeGyro(const uint8_t *raw, uint8_t range) {
   return {be16(raw[0], raw[1]) * scale, be16(raw[2], raw[3]) * scale, be16(raw[4], raw[5]) * scale};
 }
 
+// Sensor as mounted: turned 180 deg about Z, so X and Y change sign (the frame
+// stays right-handed). Applied to accel and gyro alike.
+constexpr Accel mounted(Accel v) { return {-v.x, -v.y, v.z}; }
+
 } // namespace mpu6050

@@ -200,8 +200,8 @@ dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 5.
 - Odczyt jest lekko wygładzony (ok. 0,15 s), żeby cyfry dało się czytać;
   nagłówek podaje faktyczną liczbę próbek na sekundę (ok. 1000 Hz).
 - Czujnik w spoczynku mierzy reakcję podłoża, więc położony płasko pokazuje
-  Z ≈ +9,81 m/s² (1 g), a X i Y bliskie zeru. Osie są takie, jak na
-  nadruku modułu.
+  Z ≈ +9,81 m/s² (1 g), a X i Y bliskie zeru. Osie X i Y mają znak odwrócony
+  względem nadruku modułu (czujnik zamocowany obrócony o 180° wokół Z).
 - **BOOT:** krótko — następny ekran; przytrzymanie ≥1 s — **tara**:
   bieżący wektor jest odejmowany (np. grawitacja przy ustalonym ułożeniu),
   na ekranie pojawia się „TARA”; kolejne ≥1 s wyłącza tarę.

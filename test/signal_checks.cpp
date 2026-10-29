@@ -121,4 +121,9 @@ constexpr bool gyroDecodes() {
 }
 static_assert(gyroDecodes(), "MPU6050 gyro samples must decode to rad/s with the right sign");
 static_assert(mpu6050::lsbPerDps(0) == 131.0f && mpu6050::lsbPerDps(3) == 16.375f, "FS_SEL scales");
+constexpr bool mountFlipsXY() {
+  const Accel m = mpu6050::mounted({1, -2, 3});
+  return m.x == -1 && m.y == 2 && m.z == 3;
+}
+static_assert(mountFlipsXY(), "Mounting turns X and Y around and keeps Z");
 static_assert(mpu6050::be16(0x7F, 0xFF) == 32767 && mpu6050::be16(0x80, 0x00) == -32768, "int16 limits");

@@ -69,12 +69,12 @@ bool Mpu6050::begin(TwoWire &wire) {
 }
 
 // One burst: accel (6 bytes), temperature (2, unused), gyro (6), all from the
-// same sample.
+// same sample, turned into the mounting axes.
 bool Mpu6050::read(Accel &accel, Accel &gyro) {
   uint8_t raw[14];
   if (!readBytes(kAccelXoutH, raw, sizeof raw)) return false;
   const uint8_t a[6] = {raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]};
-  accel = mpu6050::decode(a, kRange);
-  gyro = mpu6050::decodeGyro(raw + 8, kGyroRange);
+  accel = mpu6050::mounted(mpu6050::decode(a, kRange));
+  gyro = mpu6050::mounted(mpu6050::decodeGyro(raw + 8, kGyroRange));
   return true;
 }

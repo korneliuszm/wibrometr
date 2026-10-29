@@ -857,7 +857,7 @@ void setup() {
   Wire.setTimeOut(20);
   SPI.begin(SCK, MISO, MOSI);
   tft.init(135, 240);
-  tft.setRotation(3);
+  tft.setRotation(1); // Landscape, turned 180 deg from rotation 3.
   tft.setSPISpeed(32000000);
   canvas.setTextSize(1);
   canvas.setTextWrap(false);
