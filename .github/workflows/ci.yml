@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: g++ -std=c++17 -O2 -Iinclude test/line_checks.cpp -o lc && ./lc
+      - run: g++ -std=c++17 -O2 -DLINE_SAMPLE_HZ=1000 -Iinclude test/line_checks.cpp -o lc && ./lc
+      - run: g++ -std=c++17 -Iinclude test/station_config_checks.cpp -o scc && ./scc
+      - run: g++ -std=c++17 -Iinclude test/motion_classifier_checks.cpp -o mcc && ./mcc
+      - run: g++ -std=c++17 -Iinclude test/distance_log_checks.cpp -o dlc && ./dlc
+      - run: g++ -std=c++17 -O2 -Iinclude test/displacement_checks.cpp -o dc && ./dc
+      - run: g++ -std=c++17 -Iinclude -fsyntax-only test/signal_checks.cpp
+      - run: >
+          g++ -std=c++17 -Isrc/indoor_positioning test/ips_checks.cpp
+          src/indoor_positioning/WifiFingerprint.cpp
+          src/indoor_positioning/FingerprintLocator.cpp
+          src/indoor_positioning/PositionFilter.cpp
+          -o ips_checks && ./ips_checks
+      - run: node test/scene_geometry.mjs
+      - run: node test/arr_changed.mjs
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install platformio
+      - run: pio run
