@@ -17,6 +17,7 @@
 #include "Displacement.h"
 #include "DisplacementScreen.h"
 #include "WebLink.h"
+#include "ClientNetwork.h"
 #include "LineTracker.h"
 #include "WifiScan.h"
 #include <Preferences.h>
@@ -158,9 +159,20 @@ void serviceLine(uint32_t now) {
     weblink::publishLine(tracker());
   }
   const char *file = nullptr, *row = nullptr;
+  const int64_t epoch = net::epochMs();
+  const uint32_t clock = tracker().clockMs();
   while (tracker().takeDistanceRow(file, row)) {
-    storage::appendLogRow(file, row);
-    Serial.printf("log %s.csv: %s", file, row);
+    char *end = nullptr;
+    const unsigned long event = strtoul(row, &end, 10);
+    char time[32], csv[288];
+    if (end == row || *end != ',' || event > UINT32_MAX ||
+        !line::formatEventTime(time, sizeof time, epoch, clock, uint32_t(event)) ||
+        !line::prependLogTime(csv, sizeof csv, row, time)) {
+      Serial.println("logs: nieprawidlowy wiersz lub brak miejsca w buforze");
+      continue;
+    }
+    storage::appendLogRow(file, csv);
+    Serial.printf("log logs/%s.csv: %s", file, csv);
   }
   if (tracker().newRefFix()) {
     static char text[40];
@@ -700,28 +712,27 @@ void drawLine(uint32_t now) {
                 tracker().shaking());
 }
 void drawWeb(uint32_t now) {
-  drawHeader(now, "WYKRESY W PRZEGLADARCE", ST77XX_WHITE);
-  label(0, 18, muted, "1. Polacz sie z siecia Wi-Fi:");
-  canvas.setTextSize(2);
-  canvas.setTextColor(ST77XX_WHITE);
-  canvas.setCursor(0, 30);
-  canvas.print(weblink::ssid);
+  drawHeader(now, "SIEC I STRONA WWW", ST77XX_WHITE);
+  const auto &s = net::status();
   canvas.setTextSize(1);
+  label(0, 20, muted, "Siec:");
+  canvas.setTextColor(ST77XX_WHITE); canvas.setCursor(36, 20);
+  canvas.printf("%.32s", s.ssid[0] ? s.ssid : "--");
+  canvas.setCursor(0, 36);
+  canvas.setTextColor(s.state == net::State::Connected ? ST77XX_GREEN : ST77XX_YELLOW);
+  canvas.printf("%.39s", s.message);
   canvas.setCursor(0, 50);
   canvas.setTextColor(muted);
-  canvas.print("haslo: ");
-  canvas.setTextColor(ST77XX_WHITE);
-  canvas.print(weblink::password);
-  label(0, 68, muted, "2. Otworz w przegladarce:");
-  canvas.setTextSize(2);
-  canvas.setTextColor(ST77XX_GREEN);
-  canvas.setCursor(0, 80);
-  canvas.printf("http://%s", weblink::address());
-  canvas.setTextSize(1);
-  canvas.setCursor(0, 106);
-  const int n = weblink::clients();
-  canvas.setTextColor(n ? ST77XX_GREEN : muted);
-  if (n) canvas.printf("otwarte strony: %d", n); else canvas.print("brak otwartych stron");
+  if (s.errorLine) canvas.printf("wifi.txt: wiersz %d", s.errorLine);
+  else if (s.state == net::State::Disconnected) canvas.printf("powod Wi-Fi: %d", s.disconnectReason);
+  canvas.setCursor(0, 66); canvas.setTextColor(ST77XX_WHITE);
+  canvas.printf("IP: %s", s.ip[0] ? s.ip : "--");
+  canvas.setCursor(0, 82); canvas.setTextColor(ST77XX_GREEN);
+  canvas.printf("http://%.25s.local", s.hostname);
+  canvas.setCursor(0, 100); canvas.setTextColor(muted);
+  canvas.printf("Zegar: %s", s.clockReady ? "NTP OK" : "brak czasu NTP");
+  canvas.setCursor(0, 116);
+  canvas.printf("Otwarte strony: %d", weblink::clients());
 }
 void drawBattery(uint32_t now) {
   drawHeader(now, "AKUMULATOR", ST77XX_WHITE);
@@ -910,7 +921,8 @@ void setup() {
   // config.csv is applied AFTER the NVS load so it is always the last write:
   // CSV wins over learned/auto state, not the other way around (NVS used to
   // run second and silently erase the CSV-applied geometry).
-  if (storage::begin()) {
+  const bool storageReady = storage::begin();
+  if (storageReady) {
     static line::StationConfig cfg; // ~2 KB with 64 rows: not on the setup stack.
     configOk = storage::readConfig(cfg, configErr);
     if (!configOk) weblink::setConfigProblem(configErr.line, configErr.what);
@@ -926,7 +938,8 @@ void setup() {
     Serial.println("USB storage: FFat.begin failed - the line is not tracked");
   }
   if (ipsEnabled) positioning.begin();
-  else weblink::begin(); // The positioning prototype owns the radio when enabled.
+  else { net::begin(storageReady); weblink::begin(); } // Prototype owns radio when enabled.
+  storage::startUsb(); // Configuration reads finish before host sector access.
   events = xQueueCreate(1024, sizeof(Event)); // ~5 s at 200 Hz: rides out a Wi-Fi scan or a slow frame.
   if (!events || xTaskCreate(sensorTask, "MPU6050", 8192, nullptr, 1, &sensorHandle) != pdPASS) {
     workerState = "BLAD PAMIECI / TASK";
@@ -1004,6 +1017,7 @@ void loop() {
   uint32_t now = millis();
   advanceTo(now);
   pollButton(now);
+  if (!ipsEnabled) net::loop(now, wifiscan::busy());
   serviceLine(now);
   weblink::loop(now, displacement(), tracker(), actualHz, fresh(now), wifiscan::busy());
   switch (weblink::takeCommand()) {
@@ -1037,6 +1051,11 @@ void loop() {
     rateStart = now;
     Serial.printf("rate=%.1f Hz, drops=%lu, state=%s\n",
                   actualHz, (unsigned long)dropped.load(), fresh(now) ? "live" : workerState);
+    const auto &network = net::status();
+    char clockText[32];
+    line::formatEventTime(clockText, sizeof clockText, net::epochMs(), 0, 0);
+    Serial.printf("network=%s ip=%s time=%s usb_host=%d\n", net::stateName(network.state),
+                  network.ip[0] ? network.ip : "--", clockText[0] ? clockText : "--", storage::isMounted());
     if (fresh(now))
     {
       Serial.printf("accel_xyz=%.3f,%.3f,%.3f m/s2\n", latest.x, latest.y, ui::shown(latest.z, 2));

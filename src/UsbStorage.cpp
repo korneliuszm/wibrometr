@@ -1,5 +1,6 @@
 // src/UsbStorage.cpp
 #include "UsbStorage.h"
+#include "CsvLog.h"
 #include <Arduino.h>
 #include <USB.h>
 #include <USBMSC.h>
@@ -8,6 +9,8 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <cerrno>
+#include <sys/stat.h>
 #include "esp_vfs_fat.h"
 #include "ff.h"
 #include "diskio.h"
@@ -30,12 +33,9 @@ constexpr const char *kConfigPath = "/ffat/config.csv";
 // ("B3_tech.csv"), plus every row in distances_last_run.csv; all with this
 // header, rides fill the last 8 columns; declared / delta compare the measured
 // value with config.csv (m, or degrees for a turn).
-constexpr const char *kAllRowsPath = "/ffat/distances_last_run.csv";
-constexpr const char *kLogHeader =
-  "timestamp_ms,segment_type,from_station,to_station,station_id,motion_type,"
-  "axis,measured_distance_m,measured_angle_deg,confidence,quality_flags,declared,delta,"
-  "duration_s,ramp_m_s2,rms_x,rms_y,rms_z,peak_x,peak_y,peak_z\n";
-
+constexpr const char *kLogsPath = "/ffat/logs";
+constexpr const char *kAllRowsPath = "/ffat/logs/distances_last_run.csv";
+bool logsReady = false;
 // There used to be a separate "/usbdrive.img" file on this same FFat
 // partition, exposed to USB MSC as a nested FAT image, while config.csv /
 // distances_last_run.csv were plain files on FFat's OWN filesystem. Those
@@ -72,13 +72,17 @@ constexpr const char *kLogHeader =
 wl_handle_t wlHandle = WL_INVALID_HANDLE;
 BYTE pdrv = 0xFF;
 WORD sectorSize = 512;
+DWORD sectorCount = 0;
+bool usbReady = false;
 
 int32_t onRead(uint32_t lba, uint32_t offset, void *buf, uint32_t size) {
   if (pdrv == 0xFF || offset != 0 || sectorSize == 0 || size % sectorSize != 0) return -1;
+  mounted.store(true, std::memory_order_relaxed); // Sector access means the host owns the volume.
   return disk_read(pdrv, (BYTE *)buf, lba, size / sectorSize) == RES_OK ? (int32_t)size : -1;
 }
 int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buf, uint32_t size) {
   if (pdrv == 0xFF || offset != 0 || sectorSize == 0 || size % sectorSize != 0) return -1;
+  mounted.store(true, std::memory_order_relaxed);
   return disk_write(pdrv, (const BYTE *)buf, lba, size / sectorSize) == RES_OK ? (int32_t)size : -1;
 }
 bool onStartStop(uint8_t power, bool start, bool eject) {
@@ -119,12 +123,23 @@ bool begin() {
   if (esp_vfs_fat_spiflash_mount(kBasePath, kPartitionLabel, &conf, &wlHandle) != ESP_OK) return false;
 
   pdrv = ff_diskio_get_pdrv_wl(wlHandle);
-  DWORD sectorCount = 0;
+  sectorCount = 0;
   if (pdrv == 0xFF || disk_ioctl(pdrv, GET_SECTOR_COUNT, &sectorCount) != RES_OK || sectorCount == 0) return false;
   WORD ss = 512;
   if (disk_ioctl(pdrv, GET_SECTOR_SIZE, &ss) == RES_OK && ss > 0) sectorSize = ss;
 
 
+  struct stat st{};
+  logsReady = (mkdir(kLogsPath, 0775) == 0 || errno == EEXIST) &&
+              stat(kLogsPath, &st) == 0 && S_ISDIR(st.st_mode);
+  if (!logsReady) Serial.printf("logs: katalog niedostepny (%d)\n", errno);
+  else Serial.println("logs: /logs ready");
+  return true;
+}
+
+void startUsb() {
+  if (usbReady || pdrv == 0xFF) return;
+  usbReady = true;
   msc.vendorID("WIBROMTR");
   msc.productID("SKID LOG");
   msc.productRevision("1.0");
@@ -134,7 +149,6 @@ bool begin() {
   msc.mediaPresent(true);
   msc.begin(sectorCount, sectorSize);
   USB.begin();
-  return true;
 }
 
 bool readConfig(line::StationConfig &out, line::ConfigError &err) {
@@ -162,34 +176,16 @@ bool readConfig(line::StationConfig &out, line::ConfigError &err) {
 
 namespace {
 void appendTo(const char *path, const char *csvRow) {
-  bool fresh = true;
-  if (FILE *f = fopen(path, "r")) {
-    char first[256] = {};
-    const bool same = fgets(first, sizeof first, f) && strcmp(first, kLogHeader) == 0;
-    fclose(f);
-    fresh = false;
-    if (!same) { // Older columns: keep that file aside, start a new one.
-      char old[72];
-      snprintf(old, sizeof old, "%.*s_old.csv", int(strlen(path) - 4), path);
-      remove(old);
-      rename(path, old);
-      fresh = true;
-    }
-  }
-  FILE *f = fopen(path, "a");
-  if (!f) return;
-  if (fresh) fputs(kLogHeader, f);
-  fputs(csvRow, f);
-  fclose(f);
+  if (!appendCsvFile(path, csvRow)) Serial.printf("logs: zapis/rotacja %s nieudane (%d)\n", path, errno);
 }
 } // namespace
 
 void appendLogRow(const char *file, const char *csvRow) {
-  if (mounted.load(std::memory_order_relaxed)) return; // Host owns the drive right now; device is parked.
+  if (!logsReady || pdrv == 0xFF || mounted.load(std::memory_order_relaxed)) return; // Host owns the drive right now; device is parked.
   appendTo(kAllRowsPath, csvRow);
   if (!file || !file[0]) return;
   char path[64];
-  snprintf(path, sizeof path, "%s/%s.csv", kBasePath, file);
+  snprintf(path, sizeof path, "%s/%s.csv", kLogsPath, file);
   appendTo(path, csvRow);
 }
 

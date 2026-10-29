@@ -2,8 +2,8 @@
 #include "LineTracker.h"
 
 // Wi-Fi fingerprint for the line tracker: a few asynchronous scans (the
-// board's own access point keeps running; its clients pause while the radio
-// visits other channels), averaged per access point. An access point missed
+// client connection remains active where possible while the radio
+// visits other channels), averaged per access point. Failed scans retry. An access point missed
 // by a scan counts as line::missingDbm for that scan. Loop task only.
 namespace wifiscan {
 void start();

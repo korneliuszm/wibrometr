@@ -2,7 +2,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <cstring>
-#include "WebLink.h"
 
 namespace wifiscan {
 namespace {
@@ -12,7 +11,8 @@ constexpr int maxSeen = 48;
 struct Seen { uint8_t bssid[6]; float sum; int hits; };
 Seen seen[maxSeen];
 int seenCount = 0, scansDone = 0;
-bool running = false, ready = false;
+bool running = false, ready = false, pending = false;
+uint32_t retryAt = 0;
 line::Fingerprint result;
 struct Name { uint8_t bssid[6]; char ssid[33]; };
 Name names[64];
@@ -29,7 +29,6 @@ void remember(const uint8_t *bssid, const char *ssid) {
 void collect(int found) {
   for (int i = 0; i < found; ++i) {
     const String ssid = WiFi.SSID(i);
-    if (ssid == weblink::ssid) continue; // Never our own access point.
     const uint8_t *b = WiFi.BSSID(i);
     if (!b) continue;
     remember(b, ssid.c_str());
@@ -69,15 +68,29 @@ void start() {
   seenCount = scansDone = 0;
   running = true;
   ready = false;
-  WiFi.scanNetworks(true, false, false, msPerChannel);
+  pending = true;
+  retryAt = millis();
+  poll();
 }
 
 void poll() {
   if (!running) return;
+  if (pending) {
+    if (int32_t(millis() - retryAt) < 0) return;
+    const int16_t started = WiFi.scanNetworks(true, false, false, msPerChannel);
+    if (started == WIFI_SCAN_FAILED) { retryAt = millis() + 1000; return; }
+    pending = false;
+  }
   const int16_t n = WiFi.scanComplete();
   if (n == WIFI_SCAN_RUNNING) return;
-  if (n >= 0) collect(n); else WiFi.scanDelete();
-  if (++scansDone < scansPerPrint) WiFi.scanNetworks(true, false, false, msPerChannel);
+  if (n < 0) {
+    WiFi.scanDelete();
+    pending = true;
+    retryAt = millis() + 1000;
+    return; // Failed scans do not count as an empty successful observation.
+  }
+  collect(n);
+  if (++scansDone < scansPerPrint) { pending = true; retryAt = millis(); }
   else finish();
 }
 

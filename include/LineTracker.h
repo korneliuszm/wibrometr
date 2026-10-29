@@ -554,6 +554,7 @@ public:
     csv = r.csv;
     return true;
   }
+  uint32_t clockMs() const { return uint32_t(clock_ * 1000); }
   int droppedRows() const { return droppedRows_; }
   // A reference point (a turn or a move in Z only some stations make) has
   // just set the station: true once; `refFixStation()` names it.

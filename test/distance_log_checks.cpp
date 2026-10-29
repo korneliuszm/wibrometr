@@ -2,6 +2,9 @@
 // g++ -std=c++17 -Iinclude test/distance_log_checks.cpp -o dlc && ./dlc
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <ctime>
+#include <initializer_list>
 #include "DistanceLog.h"
 
 namespace {
@@ -66,6 +69,38 @@ int main() {
     check(std::strcmp(out, "nieznana-B3") == 0, "unknown start station in the name");
     logFileName(out, sizeof out, true, 5, 5, name);
     check(std::strcmp(out, "A_B__tech") == 0, "characters FAT does not allow become '_'");
+  }
+
+  {
+    setenv("TZ", "UTC0", 1); tzset();
+    char time[32], csv[288];
+    check(formatEventTime(time, sizeof time, 1735689600123LL, 10000, 8500) &&
+          !strcmp(time,"2024-12-31 23:59:58.623"), "event time accounts for queue age and midnight");
+    check(prependLogTime(csv,sizeof csv,"1234,transport,...\n",time) &&
+          !strcmp(csv,"2024-12-31 23:59:58.623,1234,transport,...\n"),"time column preserves CSV");
+    for (int64_t epoch : {int64_t(0),int64_t(1704067200000LL)}) {
+      check(formatEventTime(time,sizeof time,epoch,10000,8500) && !time[0],"unset time empty");
+      check(prependLogTime(csv,sizeof csv,"1234,transport,...\n",time) && csv[0]==',',"empty first column");
+    }
+    check(formatEventTime(time,sizeof time,1704067200001LL,0,0) && time[0],"time above threshold");
+    check(formatEventTime(time,sizeof time,1735689600123LL,0x100,0xffffff00) &&
+          !strcmp(time,"2024-12-31 23:59:59.611"),"uint32 wrap age");
+    char tiny[3]={'x','x','x'};
+    check(!prependLogTime(tiny,sizeof tiny,"1234\n","t") && tiny[0]==0,"reject truncated CSV");
+    check(!formatEventTime(tiny,sizeof tiny,1735689600123LL,0,0) && tiny[0]==0,"reject truncated time");
+    setenv("TZ","CET-1CEST,M3.5.0,M10.5.0/3",1); tzset();
+    std::tm utc{}; utc.tm_year=126; utc.tm_mon=9; utc.tm_mday=25; utc.tm_hour=1;
+    const int64_t transition=int64_t(timegm(&utc))*1000;
+    check(formatEventTime(time,sizeof time,transition,1000,0) && !strcmp(time,"2026-10-25 02:59:59.000"),"DST before transition");
+    check(formatEventTime(time,sizeof time,transition,1000,1000) && !strcmp(time,"2026-10-25 02:00:00.000"),"DST after transition");
+    setenv("TZ","UTC0",1); tzset();
+    for (uint32_t event : {8500u,9000u,10000u}) {
+      char raw[256]; memset(raw,'a',sizeof raw); snprintf(raw,32,"%u,transport,",event);
+      size_t n=strlen(raw); memset(raw+n,'a',254-n); raw[254]='\n';raw[255]=0;
+      check(formatEventTime(time,sizeof time,1735689600123LL,10000,event) && prependLogTime(csv,sizeof csv,raw,time) &&
+            !strcmp(strchr(csv,',')+1,raw) && strlen(csv)==279,"batch age and maximum raw CSV preserved");
+    }
+    check(formatEventTime(time,sizeof time,1735689601123LL,10000,10000) && !strcmp(time,"2025-01-01 00:00:01.123"),"fresh epoch each batch");
   }
 
   std::printf(failures ? "%d FAILURE(S)\n" : "all ok\n", failures);

@@ -233,6 +233,8 @@ footer { color: var(--ink-soft); padding-top: 6px; }
     </div>
   </div>
 
+  <div class="sub" id="networkStatus" aria-live="polite"></div>
+
   <section class="sheet" id="line">
     <div class="head">
       <div>
@@ -520,6 +522,11 @@ setInterval(() => {
 
 let meterState = "settling", liveCm = [0, 0, 0], totals = [0, 0, 0];
 function onSamples(m) {
+  if (m.network) {
+    const n = m.network;
+    document.getElementById("networkStatus").textContent =
+      `Sieć: ${n.ssid || "—"} · ${n.message}${n.error_line ? ` (wiersz ${n.error_line})` : ""} · IP: ${n.ip || "—"} · ${n.hostname}.local · Zegar: ${n.clock_ready ? "NTP OK" : "brak czasu NTP"}`;
+  }
   if (!m.live) { setLink(false, "Płytka nie widzi czujnika"); }
   else setLink(true, `Na żywo, ${Math.round(m.hz)} Hz`);
   for (const r of m.r) {

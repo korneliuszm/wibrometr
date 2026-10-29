@@ -1030,5 +1030,15 @@ int main() {
           "transport row: declared 6.000, delta about +1 (7 m ridden)");
   }
 
+  {
+    line::Tracker t;
+    line::StationConfig cfg;
+    check(line::parseStationConfig("A,X+,0,true,none,,\nB,X+,6,true,none,,\n",cfg),"clock test config");
+    t.applyStationConfig(cfg);
+    for (uint32_t us=1000;us<=1001000;us+=5000) t.add({0,0,9.81f},{0,0,0},us);
+    check(t.clockMs()>=999 && t.clockMs()<=1001,"tracker clock follows sample time");
+    auto before=t.clockMs(); t.home(); t.breakSignal();
+    check(t.clockMs()==before,"home and signal break preserve tracker clock");
+  }
   return failures ? 1 : 0;
 }

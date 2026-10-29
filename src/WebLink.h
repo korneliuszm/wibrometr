@@ -3,7 +3,7 @@
 #include "Displacement.h"
 #include "LineTracker.h"
 
-// Wi-Fi access point with a web page that plots the sensor live.
+// HTTP/WebSocket server on the client network managed by Network.
 // The page (src/WebPage.h) opens a WebSocket at /ws. Every 50 ms the board
 // sends one JSON batch with all new samples (accel m/s2, gyro deg/s without
 // its offset), the displacement meter and the line state. It also sends the
@@ -11,8 +11,6 @@
 // changes; a new page gets both.
 // All calls come from the Arduino loop task; the server runs on its own task.
 namespace weblink {
-constexpr const char *ssid = "Wibrometr";
-constexpr const char *password = "wibrometr"; // WPA2 needs at least 8 characters.
 
 // Requests from a page, handled by the loop task.
 enum class Command : uint8_t { None, ResetTotals, Home, ForgetWifi };
@@ -30,5 +28,5 @@ void setConfigProblem(int line, const char *what);
 // The next request from a page.
 Command takeCommand();
 int clients();
-const char *address(); // "192.168.4.1"
+const char *address(); // Current DHCP address, empty offline.
 } // namespace weblink

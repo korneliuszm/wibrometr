@@ -16,10 +16,12 @@ namespace storage {
 // ponytail: no RAM queue for writes attempted while mounted — add one if
 // a write-while-mounted case ever shows up on real hardware.
 bool begin();
+// Expose MSC only after startup configuration and PEM reads have finished.
+void startUsb();
 // false without a valid config.csv; `err` says why (line 0, "brak pliku"
 // when there is none).
 bool readConfig(line::StationConfig &out, line::ConfigError &err);
-// Appends `csvRow` to distances_last_run.csv and to "/ffat/<file>.csv"
+// Appends time-prefixed `csvRow` to logs/distances_last_run.csv and to "/ffat/logs/<file>.csv"
 // (header first when new): one file per ride between two stations ("B2-B3")
 // and per station's technological motions ("B3_tech"). A file whose header
 // is not the current one (older columns) is moved aside to "<file>_old.csv"

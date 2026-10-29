@@ -226,11 +226,11 @@ akcelerometr widzi jak ruch poziomy. Gdy detal obraca się wokół pionu bez
 przechyłu (stół, nie ręka), ruszenie jest zablokowane, a po obrocie
 detektor jazdy jest zerowany — obrót jest ruchem technologicznym stacji.
 
-**Logi** (na tym samym dysku): każdy przejazd dopisuje wiersz do pliku
+**Logi** (w katalogu `logs/` na tym samym dysku): każdy przejazd dopisuje wiersz do pliku
 nazwanego od stacji, np. `B2-B3.csv`, a ruch technologiczny — do
 `B3_tech.csv`; wszystkie wiersze trafiają też do wspólnego
 `distances_last_run.csv` (stół nieznany: `nieznana`). Kolumny:
-`timestamp_ms, segment_type, from_station, to_station, station_id,
+`time, timestamp_ms, segment_type, from_station, to_station, station_id,
 motion_type, axis, measured_distance_m, measured_angle_deg, confidence,
 quality_flags, declared, delta`, a dla przejazdów dodatkowo
 `duration_s, ramp_m_s2, rms_x, rms_y, rms_z, peak_x, peak_y, peak_z`
@@ -393,12 +393,53 @@ Ograniczenia:
 
 ### Wykresy w przeglądarce (Wi-Fi)
 
-Płytka tworzy własną sieć Wi-Fi (punkt dostępowy, bez internetu):
+Płytka łączy się z siecią użytkownika jako klient (STA), bez własnego AP.
+Skopiuj [wifi.example.txt](docs/wifi.example.txt) jako `wifi.txt` do korzenia
+dysku USB, wpisz dane sieci, wysuń dysk i naciśnij RESET. Ekran 7
+„SIEC I STRONA WWW” pokazuje SSID, stan, IP z DHCP, adres
+**http://wibrometr.local/** (domyślnie) i stan zegara. Stronę można otworzyć
+też pod wyświetlonym IP. Komputer musi mieć dostęp do tej samej sieci;
+mDNS może być niedostępne przez niektóre routery/VLAN.
 
-- sieć **Wibrometr**, hasło **wibrometr**;
-- strona: **http://192.168.4.1/** (każdy inny adres też przekierowuje na nią);
-- ekran „WYKRESY W PRZEGLADARCE” na płytce (przedostatni) podaje te dane
-  i liczbę otwartych stron.
+Układ dysku:
+
+```text
+config.csv
+wifi.txt
+cert/ca.pem, client.crt, client.key  (opcjonalne pliki Enterprise)
+logs/<A>-<B>.csv, <A>_tech.csv, distances_last_run.csv
+```
+
+`wifi.txt`: `klucz=wartość`, BOM i CRLF dozwolone, spacje na końcach
+obcinane. Pierwszy `#` zaczyna komentarz (również w haśle; cytowanie i escape
+nie są obsługiwane). Kolejne `=` zostają w wartości. Nieznany/powtórzony
+klucz lub błędny wiersz odrzuca cały plik z numerem wiersza. Limit pliku
+4096 B, SSID 32 B, pozostałe wartości 255 B. `hostname`: 1–63 litery/cyfry
+ASCII/myślniki, bez myślnika na końcach.
+
+- WPA2-PSK: `ssid`, `password` (oba wymagane).
+- PEAP/TTLS: `eap=peap` lub `eap=ttls`, `ssid`, `username`, `password`;
+  `identity` domyślnie równe `username`, opcjonalnie `ca=cert/ca.pem`.
+- TLS: `eap=tls`, `ssid`, `identity`, `cert=cert/client.crt`,
+  `key=cert/client.key`; opcjonalnie `ca=cert/ca.pem`.
+
+Bez `ca` serwer RADIUS nie jest sprawdzany. Ścieżki względne do korzenia
+bez `..`, pliki PEM do 8192 B, klucz niezaszyfrowany. Arduino Enterprise
+ogranicza identity/username/password do 64 B; przekroczenie daje błąd.
+Bufory certyfikatów pozostają w pamięci na czas ponownych połączeń.
+`cert`/`key`/`ca` bez `eap` są błędem. Pliki są czytane tylko przy starcie.
+Bez poprawnego `wifi.txt` linia, skany i logi działają, strona i NTP nie.
+
+Opcjonalne `ntp` (domyślnie `pool.ntp.org`), `tz` (domyślnie
+`CET-1CEST,M3.5.0,M10.5.0/3`) i `hostname` (domyślnie `wibrometr`). Czas
+pochodzi wyłącznie z NTP; odświeżanie co godzinę. Po synchronizacji
+odliczanie czasu trwa także bez sieci, ale utrata zasilania wymaga nowej synchronizacji. Po resecie programowym
+zegar może zachować czas; strefa jest stosowana od razu po odczycie konfiguracji.
+Nowa pierwsza kolumna logów `time` to lokalne `YYYY-MM-DD HH:MM:SS.mmm`
+chwili zdarzenia, uwzględniające wiek w kolejce trackera, a bez czasu NTP —
+puste pole. Dotychczasowy `timestamp_ms` zostaje. Wszystkie nowe logi
+trafiają do `logs/`; stare pliki korzenia pozostają bez zmian. Zmiana
+nagłówka wewnątrz `logs/` powoduje rotację do `_old.csv` (kolejne kopie: `_old2.csv`, `_old3.csv`, bez nadpisywania).
 
 Strona pokazuje linię (opis wyżej), a pod nią próbki 200 Hz ostatniego
 przejazdu (od ruszenia do zatrzymania): przyspieszenie X/Y/Z i prędkość
@@ -411,7 +452,7 @@ Technicznie: ESPAsyncWebServer, WebSocket `/ws`; co 50 ms płytka wysyła
 paczkę JSON z nowymi próbkami, stanem miernika i linii, po każdym ruchu —
 ruch z torem, a po zmianie — opis linii (`src/WebLink.*`). Strona jest w `src/WebPage.h` (bez zewnętrznych
 plików, działa offline). Z włączonym prototypem nawigacji Wi-Fi
-(`ipsEnabled`) punkt dostępowy nie startuje.
+(`ipsEnabled`) moduł klienta sieci nie startuje (prototyp zarządza radiem).
 
 ### Ekrany analizy (`imuEnabled = true`)
 

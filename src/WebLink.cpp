@@ -1,6 +1,7 @@
 #include "WebLink.h"
 #include <Arduino.h>
-#include <WiFi.h>
+#include "ClientNetwork.h"
+#include "NetworkJson.h"
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <algorithm>
@@ -28,10 +29,10 @@ int rowCount = 0;
 uint32_t lastSend = 0, prevUs = 0;
 bool havePrev = false;
 // Text buffers (~25 KB) are allocated in begin(), so they land in PSRAM.
-constexpr int batchSize = maxRows * 64 + 512, moveSize = DisplacementMeter::trackPoints * 24 + 256,
+constexpr int batchSize = maxRows * 64 + 2048, moveSize = DisplacementMeter::trackPoints * 24 + 256,
               lineSize = 65536;
 char *batch = nullptr, *moveText = nullptr, *lineText = nullptr;
-char ip[16] = "192.168.4.1";
+bool started = false;
 
 const char *stateName(DisplacementMeter::State s) {
   switch (s) {
@@ -82,6 +83,8 @@ int appendFingerprint(char *out, int room, const line::Fingerprint &f) {
 } // namespace
 
 void begin() {
+  if (started) return;
+  started = true;
   batch = static_cast<char *>(malloc(batchSize));
   moveText = static_cast<char *>(malloc(moveSize));
   lineText = static_cast<char *>(malloc(lineSize));
@@ -89,9 +92,6 @@ void begin() {
     Serial.println("web: no memory for buffers, page disabled");
     return;
   }
-  WiFi.mode(WIFI_AP_STA); // STA side only scans for the line's Wi-Fi fingerprints.
-  WiFi.softAP(ssid, password, 6, 0, 4);
-  snprintf(ip, sizeof ip, "%s", WiFi.softAPIP().toString().c_str());
   ws.onEvent(onEvent);
   server.addHandler(&ws);
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -99,7 +99,7 @@ void begin() {
   });
   server.onNotFound([](AsyncWebServerRequest *request) { request->redirect("/"); });
   server.begin();
-  Serial.printf("Wi-Fi AP \"%s\" (password \"%s\"), page http://%s/\n", ssid, password, ip);
+  Serial.println("web: HTTP/WebSocket server ready");
 }
 
 void addSample(const Accel &accel, const Accel &gyroDps, uint32_t us) {
@@ -138,8 +138,10 @@ void loop(uint32_t now, const DisplacementMeter &meter, const line::Tracker &tra
                    tracker.stillThreshold(), tracker.heading() * 57.29578f, tracker.headingKnown() ? 1 : 0,
                    tracker.turning() ? 1 : 0, tracker.turnSoFar() * 57.29578f, tracker.lastTurn() * 57.29578f,
                    tracker.sinceTurnS(), int(tracker.lost()), tracker.carrying() ? 1 : 0);
+  const auto network = net::statusJson(net::status());
+  const int rowLimit = int(batchSize - network.size() - 100);
   // Rows: [microseconds since the previous sample, ax, ay, az, gx, gy, gz].
-  for (int i = 0; i < rowCount && n < int(batchSize) - 80; ++i) {
+  for (int i = 0; i < rowCount && n < rowLimit; ++i) {
     const Row &r = rows[i];
     const uint32_t d = havePrev ? r.us - prevUs : 0;
     prevUs = r.us;
@@ -147,7 +149,7 @@ void loop(uint32_t now, const DisplacementMeter &meter, const line::Tracker &tra
     n += snprintf(batch + n, batchSize - n, "%s[%lu,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f]", i ? "," : "",
                   (unsigned long)d, r.a.x, r.a.y, ui::shown(r.a.z, 2), r.g.x, r.g.y, ui::shown(r.g.z, 2));
   }
-  n += snprintf(batch + n, batchSize - n, "]}");
+  n += snprintf(batch + n, batchSize - n, "],\"network\":%s}", network.c_str());
   rowCount = 0;
   ws.textAll(batch, n);
 }
@@ -244,5 +246,5 @@ void publishLine(const line::Tracker &t) {
 Command takeCommand() { return Command(command.exchange(uint8_t(Command::None))); }
 void setConfigProblem(int line, const char *what) { configLine = line; configWhat = what; }
 int clients() { return ws.count(); }
-const char *address() { return ip; }
+const char *address() { return net::status().ip; }
 } // namespace weblink

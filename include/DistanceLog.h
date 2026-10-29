@@ -2,9 +2,37 @@
 #pragma once
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
+#include <ctime>
 #include "MotionClassifier.h"
 
 namespace line {
+
+// Match the tracker's uint32 timestamp domain, including wrap. Subtract the
+// age in UTC before localtime so midnight and DST transitions work correctly.
+inline bool formatEventTime(char *out, size_t size, int64_t nowEpochMs,
+                            uint32_t trackerNowMs, uint32_t eventMs) {
+  if (!out || !size) return false;
+  out[0] = 0;
+  if (nowEpochMs <= 1704067200000LL) return true;
+  const int64_t epoch = nowEpochMs - uint32_t(trackerNowMs - eventMs);
+  const time_t seconds = time_t(epoch / 1000);
+  std::tm local{};
+  char date[24];
+  if (!localtime_r(&seconds, &local) || !std::strftime(date, sizeof date, "%Y-%m-%d %H:%M:%S", &local)) return false;
+  const int n = std::snprintf(out, size, "%s.%03u", date, unsigned(epoch % 1000));
+  if (n < 0 || size_t(n) >= size) { out[0] = 0; return false; }
+  return true;
+}
+inline bool prependLogTime(char *out, size_t size, const char *rawCsv, const char *localTime) {
+  if (!out || !size) return false;
+  out[0] = 0;
+  if (!rawCsv || !localTime) return false;
+  const size_t needed = std::strlen(rawCsv) + std::strlen(localTime) + 2;
+  if (needed > size) return false;
+  std::snprintf(out, size, "%s,%s", localTime, rawCsv);
+  return true;
+}
 
 inline const char *motionName(Motion m) {
   switch (m) {
