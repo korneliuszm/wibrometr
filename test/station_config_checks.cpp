@@ -45,6 +45,41 @@ int main() {
     StationConfig cfg;
     check(!parseStationConfig("", cfg), "empty file is rejected (no fallback silently applied)");
   }
+  {
+    StationConfig cfg;
+    const char *text = "ST01,X+,abc,false,true,none,,,\n";
+    check(!parseStationConfig(text, cfg), "garbage distance_m (\"abc\") rejects the row, not silently 0");
+  }
+  {
+    StationConfig cfg;
+    const char *text = "ST01,X+,10xyz,false,true,none,,,\n";
+    check(!parseStationConfig(text, cfg), "trailing junk (\"10xyz\") rejects the row, not silently 10");
+  }
+  {
+    StationConfig cfg;
+    const char *text = "ST01,X+,nan,false,true,none,,,\n";
+    check(!parseStationConfig(text, cfg), "\"nan\" distance_m is non-finite and rejected");
+  }
+  {
+    StationConfig cfg;
+    const char *text = "ST01,X+,10,false,true,lift,Z,inf,0.1\n";
+    check(!parseStationConfig(text, cfg), "\"inf\" motion_range is non-finite and rejected");
+  }
+  {
+    StationConfig cfg;
+    const char *text = "ST01,X+,10,false,true,lift,Z,bogus,\n";
+    check(!parseStationConfig(text, cfg), "garbage motion_range (\"bogus\") rejects the row");
+  }
+  {
+    // Trailing optional columns (motion_axis, motion_range, motion_speed)
+    // may be omitted entirely, not just left empty: documented behaviour
+    // of StationRow (motionRange/motionSpeed default to 0, "unset").
+    StationConfig cfg;
+    const char *text = "ST01,X+,10,false,true,none\n";
+    check(parseStationConfig(text, cfg), "omitting all trailing optional columns is accepted");
+    check(cfg.row[0].motionRange == 0 && cfg.row[0].motionSpeed == 0,
+          "omitted trailing columns default to 0 (unset)");
+  }
 
   std::printf(failures ? "%d FAILURE(S)\n" : "all ok\n", failures);
   return failures ? 1 : 0;

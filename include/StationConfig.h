@@ -1,5 +1,6 @@
 // include/StationConfig.h
 #pragma once
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -65,6 +66,19 @@ inline bool parseMotion(const char *s, Motion &out) {
   return false;
 }
 inline bool isHeaderRow(const char *line) { return std::strncmp(line, "station_id,", 11) == 0; }
+// Parses the whole of `s` as a float: rejects anything strtof did not
+// consume entirely ("10xyz", "abc" -> 0 silently) and non-finite results
+// ("nan", "inf"). An empty `s` means "unset" (an omitted optional trailing
+// column) and parses as 0, not a failure -- callers that require the field
+// check `s[0] != 0` themselves before calling this.
+inline bool parseFloat(const char *s, float &out) {
+  if (s[0] == 0) { out = 0; return true; }
+  char *end = nullptr;
+  const float v = std::strtof(s, &end);
+  if (end == s || *end != 0 || !std::isfinite(v)) return false;
+  out = v;
+  return true;
+}
 
 inline bool parseRow(const char *line, StationRow &out) {
   const char *p = line;
@@ -78,8 +92,7 @@ inline bool parseRow(const char *line, StationRow &out) {
   if (!detail::parseDirection(field, r.direction)) return false;
 
   detail::nextField(p, field, sizeof(field));
-  if (field[0] == 0) return false;
-  r.distanceM = std::strtof(field, nullptr);
+  if (field[0] == 0 || !detail::parseFloat(field, r.distanceM)) return false;
 
   detail::nextField(p, field, sizeof(field));
   if (!detail::parseBool(field, r.passthrough)) return false;
@@ -94,10 +107,10 @@ inline bool parseRow(const char *line, StationRow &out) {
   (void)field;
 
   detail::nextField(p, field, sizeof(field)); // motion_range
-  r.motionRange = field[0] ? std::strtof(field, nullptr) : 0;
+  if (!detail::parseFloat(field, r.motionRange)) return false;
 
   detail::nextField(p, field, sizeof(field)); // motion_speed
-  r.motionSpeed = field[0] ? std::strtof(field, nullptr) : 0;
+  if (!detail::parseFloat(field, r.motionSpeed)) return false;
 
   if (*p != 0 && *p != '\n' && *p != '\r') return false;
 
