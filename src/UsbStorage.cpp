@@ -76,8 +76,14 @@ bool readConfig(line::StationConfig &out) {
   File f = FFat.open(kConfigPath, FILE_READ);
   if (!f) return false;
   char buf[2048];
+  const size_t fileSize = f.size();
+  // A file bigger than the buffer would otherwise be silently truncated
+  // (the trailing stations just disappear with no error): reject it
+  // outright instead, same as any other invalid config.
+  if (fileSize > sizeof(buf) - 1) { f.close(); return false; }
   const size_t n = f.read((uint8_t *)buf, sizeof(buf) - 1);
   f.close();
+  if (n != fileSize) return false; // Read came up short of the file's own size.
   buf[n] = 0;
   return line::parseStationConfig(buf, out);
 }
