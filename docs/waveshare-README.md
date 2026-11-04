@@ -31,7 +31,7 @@ urządzeniu (`tools/render_screens.sh`).*
 
 Piny pochodzą z tabeli GPIO na schemacie producenta (Rev 1.0 i Rev 2.0) i
 zgadzają się z przykładowym kodem producenta. Wszystkie są w jednym pliku:
-`src/hal/BoardPins.h`.
+`src/waveshare/hal/BoardPins.h`.
 
 **Rev 1.0 / Rev 2.0.** Linia stanu ładowania (`CHG_DET`, GPIO18, wysoki =
 ładowanie) istnieje tylko na płytce **Rev 2.0** (nadruk „Rev2.0” na PCB). Na
@@ -179,7 +179,7 @@ pasmach, żeby karta mogła pracować między nimi.
 
 ## Ustawienia pomiaru
 
-W `src/AppConfig.h`: częstotliwość próbek (`kSampleRateHz`, domyślnie
+W `src/waveshare/AppConfig.h`: częstotliwość próbek (`kSampleRateHz`, domyślnie
 500 Hz, nie więcej niż 500 — czujnik jest odpytywany co 1 ms), zakres
 (`kRange`, domyślnie ±8 g) i tryb filtra (`kLowPassMode`, domyślnie 13,37%
 ODR = 67 Hz). **Odpytywanie, a nie przerwanie:** sygnał „dane gotowe” jest w
