@@ -5,6 +5,8 @@
 #include "Keypad.h"
 #include "Qmi8658Decode.h"
 #include "UiTheme.h"
+#include "ui/Draw.h"
+#include "ui/LineScreens.h"
 
 namespace ui {
 
@@ -14,28 +16,12 @@ constexpr int W = 320, H = 240;
 constexpr int kContentTop = 24;
 constexpr int kNoticeY = NavBarLayout::kTop - 12;   // One text line above the bar.
 constexpr int kContentBottom = kNoticeY - 2;
-constexpr uint16_t kAxisColor[3] = {0xF800, 0x07E0, 0x3DFF}; // X red, Y green, Z blue.
-const char *const kTitles[] = {"PRZYSPIESZENIE", "PRZEBIEG",    "FFT OS X", "FFT OS Y",
-                               "FFT OS Z",       "LICZNIK",     "AKUMULATOR", "NAGRYWANIE"};
+const char *const kTitles[] = {"LINIA",   "PRZYSPIESZENIE", "ZYROSKOP", "PRZEMIESZCZENIE", "RUCH W CZASIE",
+                               "TOR RUCHU", "PRZEBIEG",     "FFT OS X", "FFT OS Y",        "FFT OS Z",
+                               "LICZNIK", "SIEC I WWW",     "AKUMULATOR", "NAGRYWANIE"};
+static_assert(sizeof kTitles / sizeof kTitles[0] == kPageCount, "one title per page");
 
-float component(const Accel &a, int i) { return i == 0 ? a.x : i == 1 ? a.y : a.z; }
 int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
-
-void text(GFXcanvas16 &c, int x, int y, int size, uint16_t color, const char *s) {
-  c.setTextSize(size);
-  c.setTextColor(color);
-  c.setCursor(x, y);
-  c.print(s);
-}
-
-// printf into the canvas at a position; returns the width in pixels.
-template <typename... Args>
-int textf(GFXcanvas16 &c, int x, int y, int size, uint16_t color, const char *fmt, Args... args) {
-  char buffer[64];
-  const int n = std::snprintf(buffer, sizeof buffer, fmt, args...);
-  text(c, x, y, size, color, buffer);
-  return (n < 0 ? 0 : n) * 6 * size;
-}
 
 void drawHeader(GFXcanvas16 &c, const Model &m) {
   text(c, 0, 2, 2, ui::white, kTitles[m.pageIndex % kPageCount]);
@@ -336,6 +322,11 @@ ActionLabels actionLabels(const Model &m) {
   a.a2Color = recording ? ui::white : ui::red;
   a.a2Enabled = card;
   switch (m.page) {
+  case Page::Line: a.a1 = "STOL 1"; a.a1Enabled = m.configOk; break;
+  case Page::Gyro: a.a1 = "KAT 0"; break;
+  case Page::Disp:
+  case Page::DispPlot:
+  case Page::DispPath: a.a1 = "SUMA 0"; break;
   case Page::Accel: a.a1 = m.tared ? "TARA OFF" : "TARA"; break;
   case Page::Wave:
   case Page::FftX:
@@ -360,6 +351,12 @@ void drawScreen(GFXcanvas16 &c, const Model &m) {
   c.setTextWrap(false);
   drawHeader(c, m);
   switch (m.page) {
+  case Page::Line: drawLinePage(c, m); break;
+  case Page::Gyro: drawGyroPage(c, m); break;
+  case Page::Disp: drawDisplacementPage(c, m); break;
+  case Page::DispPlot: drawDisplacementPlotPage(c, m); break;
+  case Page::DispPath: drawDisplacementPathPage(c, m); break;
+  case Page::Web: drawWebPage(c, m); break;
   case Page::Accel: drawAccel(c, m); break;
   case Page::Wave: drawWave(c, m); break;
   case Page::FftX: drawSpectrum(c, m, 0); break;

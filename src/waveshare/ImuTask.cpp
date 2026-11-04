@@ -20,12 +20,13 @@ ImuDiagnostics ImuTask::diagnostics() const {
   return d;
 }
 
-void ImuTask::emit(ImuEvent::Kind kind, uint32_t us, const Accel &a) {
+void ImuTask::emit(ImuEvent::Kind kind, uint32_t us, const Accel &a, const Accel &w) {
   ImuEvent e;
   e.kind = kind;
   e.ms = millis();
   e.us = us;
   e.value = a;
+  e.gyro = w;
   if (xQueueSend(events_, &e, 0) != pdTRUE) ++dropped_;
 }
 
@@ -78,12 +79,15 @@ void ImuTask::run() {
       continue;
     }
     vTaskDelayUntil(&wake, 1); // 1 kHz polling.
-    Accel a;
-    switch (imu.poll(a)) {
+    Accel a, w;
+    switch (imu.poll(a, w)) {
     case hal::Qmi8658::Poll::Sample: {
       errors = 0;
       const SampleClock::Stamp stamp = clock.stamp(micros(), periodUs);
-      emit(ImuEvent::Kind::Sample, stamp.us, a);
+      const float *sign = board::kMountSign;
+      a = {a.x * sign[0], a.y * sign[1], a.z * sign[2]};
+      w = {w.x * sign[0], w.y * sign[1], w.z * sign[2]};
+      emit(ImuEvent::Kind::Sample, stamp.us, a, w);
       if (logger_) logger_->pushSample(stamp.us, a);
       ++rateCount;
       break;

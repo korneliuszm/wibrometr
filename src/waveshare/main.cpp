@@ -1,6 +1,8 @@
 // Vibration monitor for the Waveshare ESP32-S3-Touch-LCD-2 (SKU 29667):
-// QMI8658 accelerometer, 2.0" touch screen, TF card logging, battery readout.
-// Screens: acceleration, waveform, FFT X/Y/Z, stroke counter, battery, recording.
+// QMI8658 accelerometer and gyro, 2.0" touch screen, TF card logging, battery readout,
+// plus the roller-line product (position on the line, displacement, Wi-Fi/web page).
+// Screens: line, acceleration, gyro, displacement (3), waveform, FFT X/Y/Z, stroke
+// counter, network, battery, recording.
 // Scroll with swipes, the on-screen arrows, or the BOOT button.
 #include <Arduino.h>
 #include <Preferences.h>
@@ -10,6 +12,7 @@
 #include <cstring>
 #include "AppConfig.h"
 #include "ImuTask.h"
+#include "LineApp.h"
 #include "Keypad.h"
 #include "SignalHistory.h"
 #include "Spectrum.h"
@@ -21,6 +24,8 @@
 #include "hal/Display.h"
 #include "hal/I2cBus.h"
 #include "hal/SdLogger.h"
+#include "WifiScan.h"
+#include "WebLink.h"
 #include "ui/Screens.h"
 
 namespace {
@@ -121,6 +126,17 @@ ui::Model buildModel(uint32_t now) {
   m.chargeKnown = batteryMonitor.chargeKnown();
   m.log = logger.status();
   std::strncpy(m.tag, tag, sizeof m.tag - 1);
+  m.tracker = &lineapp::tracker();
+  m.configOk = lineapp::configOk();
+  m.configLine = lineapp::configError().line;
+  m.configWhat = lineapp::configError().what;
+  m.scanBusy = wifiscan::busy();
+  m.meter = &lineapp::displacement();
+  m.gyroRate = lineapp::gyro().shown;
+  m.gyroAngle = lineapp::gyro().angle;
+  m.gyroBiasKnown = lineapp::displacement().biasKnown();
+  m.network = &net::status();
+  m.webClients = weblink::clients();
   m.keypadOpen = keypadOpen;
   std::strncpy(m.keypadDigits, keypadEntry.digits(), sizeof m.keypadDigits - 1);
   m.notice = int32_t(noticeUntil - now) > 0 ? notice : nullptr;
@@ -214,6 +230,20 @@ void onButton(NavButton b, uint32_t now) {
     if (!a.a1Enabled) break;
     if (keypadOpen) { closeKeypad(false, now); break; }
     switch (ui::Page(nav.index())) {
+    case ui::Page::Line:
+      lineapp::home();
+      setNotice("DETAL NA STOLE 1", now);
+      break;
+    case ui::Page::Gyro:
+      lineapp::zeroGyroAngle();
+      setNotice("KAT WYZEROWANY", now);
+      break;
+    case ui::Page::Disp:
+    case ui::Page::DispPlot:
+    case ui::Page::DispPath:
+      lineapp::resetTotals();
+      setNotice("SUMA WYZEROWANA", now);
+      break;
     case ui::Page::Accel: toggleTare(now); break;
     case ui::Page::Wave:
     case ui::Page::FftX:
@@ -270,6 +300,7 @@ void pollBoot(uint32_t now) {
 
 void applyEvent(const ImuEvent &e) {
   if (e.kind == ImuEvent::Kind::Sample) {
+    lineapp::onSample(e);
     latest = e.value;
     lastSampleMs = e.ms;
     haveSample = true;
@@ -284,6 +315,7 @@ void applyEvent(const ImuEvent &e) {
       window.add(e.value, e.us);
     }
   } else {
+    lineapp::onGap();
     history.discardPending();
     strokes.breakSignal();
     haveSample = false;
@@ -308,6 +340,7 @@ void setup() {
   batteryMonitor.begin();
   loadTag();
   logger.begin();
+  lineapp::begin(&logger);
   imuEvents = xQueueCreate(512, sizeof(ImuEvent));
   gestureEvents = xQueueCreate(8, sizeof(Gesture));
   imuTask.begin(imuEvents, &logger);
@@ -327,6 +360,8 @@ void loop() {
   advanceBins(now);
   batteryMonitor.update(now);
   pollBoot(now);
+  lineapp::service(now, fresh(now), actualHz);
+  if (const char *n = lineapp::takeNotice()) setNotice(n, now);
 
   static uint32_t batteryLogAt = 0;
   if (logger.recording() && now - batteryLogAt >= app::kBatteryLogMs) {

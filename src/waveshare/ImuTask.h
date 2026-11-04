@@ -12,7 +12,8 @@ struct ImuEvent {
   Kind kind = Kind::Sample;
   uint32_t ms = 0;   // millis() when queued.
   uint32_t us = 0;   // Sample time, uniform (see SampleClock).
-  Accel value{};
+  Accel value{};     // m/s2 in the device frame (see board::kMountSign).
+  Accel gyro{};      // rad/s, same frame.
 };
 
 struct ImuDiagnostics {
@@ -31,7 +32,7 @@ public:
 private:
   static void entry(void *self) { static_cast<ImuTask *>(self)->run(); }
   void run();
-  void emit(ImuEvent::Kind kind, uint32_t us = 0, const Accel &a = {});
+  void emit(ImuEvent::Kind kind, uint32_t us = 0, const Accel &a = {}, const Accel &w = {});
 
   QueueHandle_t events_ = nullptr;
   hal::SdLogger *logger_ = nullptr;

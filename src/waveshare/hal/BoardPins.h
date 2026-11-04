@@ -28,6 +28,13 @@ constexpr int kBatteryAdc = 5;
 constexpr int kChargeDetect = 18;
 constexpr bool kHasChargeDetect = true;
 
+// Sensor frame to the device frame used by the line configuration and the
+// screens: a sign per axis (+1 or -1). The QMI8658 sits on the board with X
+// right, Y up and Z out of the screen when the display faces the user in
+// landscape, so nothing is flipped. If config.csv directions come out
+// mirrored on the real device, flip the axis here, not in the configuration.
+constexpr float kMountSign[3] = {1, 1, 1};
+
 constexpr int kBootButton = 0;
 
 // Landscape orientation: Adafruit_ST7789 rotation 3 sets MADCTL 0x60, the same

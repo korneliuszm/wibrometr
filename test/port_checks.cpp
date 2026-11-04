@@ -6,6 +6,7 @@
 #include <random>
 #include <vector>
 #include "BatteryModel.h"
+#include "Decimator.h"
 #include "Keypad.h"
 #include "LogFormat.h"
 #include "Qmi8658Decode.h"
@@ -357,9 +358,62 @@ void testKeypad() {
   CHECK(tag.length() == 0, "set(null) clears");
 }
 
+void testGyroDecode() {
+  const uint8_t raw[6] = {0x00, 0x04, 0x00, 0xFC, 0x40, 0x00}; // +1024, -1024, +64 LSB.
+  Accel w = qmi8658::decodeGyro(raw, 5);                       // 512 dps: 64 LSB per dps.
+  CHECK(near(w.x, 16 * qmi8658::kRadPerDeg, 1e-4f) && near(w.y, -16 * qmi8658::kRadPerDeg, 1e-4f) &&
+            near(w.z, 1 * qmi8658::kRadPerDeg, 1e-4f),
+        "gyro scale: %.4f %.4f %.4f", w.x, w.y, w.z);
+  CHECK(qmi8658::lsbPerDps(7) == 16 && qmi8658::gyroRangeDps(0) == 16, "gyro ranges");
+}
+
+void testDecimator() {
+  Decimator d;
+  Decimator::Out out;
+  // 500 Hz ramp on X, constant gyro: 200 Hz out with uniform stamps.
+  uint32_t outputs = 0, last = 0;
+  bool uniform = true;
+  float maxErr = 0;
+  const uint32_t start = 4294960000u; // Crosses the 32-bit microsecond wrap.
+  for (int i = 0; i < 5000; ++i) {
+    const uint32_t us = start + uint32_t(i) * 2000;
+    if (d.add({float(i), 0, 0}, {0, 0, 1}, us, out)) {
+      if (outputs && out.us - last != 5000) uniform = false;
+      if (!near(out.w.z, 1, 1e-5f)) uniform = false;
+      // Mean of the 2 or 3 samples inside the bin lies near the bin's centre.
+      const float centre = float(out.us - 2500 - start) / 2000.0f;
+      maxErr = std::fmax(maxErr, std::fabs(out.a.x - centre));
+      last = out.us;
+      ++outputs;
+    }
+  }
+  CHECK(outputs >= 1995 && outputs <= 2000, "output count %u", outputs);
+  CHECK(uniform, "stamps 5000 us apart");
+  CHECK(maxErr < 1.0f, "bin mean near its centre: %.2f", maxErr);
+  // Input already at 200 Hz passes through (delayed by one bin).
+  d.reset();
+  uint32_t n = 0;
+  for (int i = 0; i < 100; ++i)
+    if (d.add({float(i), 0, 0}, {}, 1000 + uint32_t(i) * 5000, out)) {
+      CHECK(near(out.a.x, float(i - 1)), "200 Hz passthrough %f", out.a.x);
+      ++n;
+    }
+  CHECK(n == 99, "passthrough count %u", n);
+  // A gap skips bins; stamps stay on the grid and the step shows the gap.
+  d.reset();
+  d.add({1, 0, 0}, {}, 0, out);
+  d.add({1, 0, 0}, {}, 2000, out);
+  CHECK(!d.add({1, 0, 0}, {}, 1000000, out) || out.us == 5000, "first bin ends on the grid");
+  d.add({1, 0, 0}, {}, 1002000, out);
+  CHECK(d.add({1, 0, 0}, {}, 1006000, out), "bin after the gap completes");
+  CHECK((out.us - 5000) % 5000 == 0 && out.us > 900000, "stamp on grid after gap: %u", out.us);
+}
+
 } // namespace
 
 int main() {
+  testGyroDecode();
+  testDecimator();
   testQmiDecode();
   testClockUniform();
   testClockDriftAndGaps();

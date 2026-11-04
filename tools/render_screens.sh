@@ -8,8 +8,8 @@ GFX=${1:?path to Adafruit-GFX-Library}
 OUT=${2:-/tmp/wibrometr-render}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$OUT" && cd "$OUT"
-g++ -std=c++17 -w -DARDUINO=100 -I"$ROOT/tools/stubs" -I"$GFX" -I"$ROOT/src" -I"$ROOT/include" \
-  "$ROOT/tools/render_screens.cpp" "$ROOT/src/ui/Screens.cpp" "$GFX/Adafruit_GFX.cpp" -o render
+g++ -std=c++17 -w -DARDUINO=100 -I"$ROOT/tools/stubs" -I"$GFX" -I"$ROOT/src/waveshare" -I"$ROOT/src" -I"$ROOT/include" \
+  "$ROOT/tools/render_screens.cpp" "$ROOT/src/waveshare/ui/Screens.cpp" "$ROOT/src/waveshare/ui/LineScreens.cpp" "$GFX/Adafruit_GFX.cpp" -o render
 ./render
 python3 - <<'PY'
 import glob, struct

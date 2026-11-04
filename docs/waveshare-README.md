@@ -2,15 +2,17 @@
 
 Urządzenie do pomiaru drgań (szyny zawieszek, ramię robota) na płytce
 **Waveshare ESP32-S3-Touch-LCD-2** (SKU 29667): przyspieszenie XYZ na żywo,
-przebieg, FFT, licznik ruchów, stan akumulatora i **zapis pomiarów na kartę
-TF**. Obsługa dotykiem (przeciąganie palcem i przyciski na ekranie) oraz
+przebieg, FFT, licznik ruchów, stan akumulatora, **zapis pomiarów na kartę
+TF** oraz pełna funkcjonalność **linii rolkowej** z wersji na Feather
+(pozycja detalu na stołach, przemieszczenie, żyroskop, Wi-Fi, strona WWW,
+`config.csv` na dysku USB). Obsługa dotykiem (przeciąganie palcem i przyciski na ekranie) oraz
 przyciskiem BOOT. Projekt PlatformIO jest w tym katalogu.
 
 > **Stan:** kod buduje się (`pio run`), a logika niezależna od sprzętu jest
 > przetestowana na komputerze. **Nie był jeszcze uruchamiany na płytce** —
 > lista rzeczy do sprawdzenia przy pierwszym włączeniu jest niżej.
 
-![Ekrany: przyspieszenie, przebieg, FFT, licznik, akumulator, nagrywanie, klawiatura numeru zawieszki, brak czujnika](docs/screens.png)
+![Ekrany: linia, przyspieszenie, żyroskop, przemieszczenie, przebieg, FFT, licznik, sieć, akumulator, nagrywanie](waveshare-screens.png)
 
 *Podgląd wyrenderowany na komputerze tym samym kodem rysującym co na
 urządzeniu (`tools/render_screens.sh`).*
@@ -22,7 +24,7 @@ urządzeniu (`tools/render_screens.sh`).*
 | Procesor | ESP32-S3R8 (8 MB PSRAM oktalny, 16 MB flash) | — |
 | Wyświetlacz | 2,0" IPS 240×320, ST7789 | SPI: SCLK 39, MOSI 38, DC 42, CS 45, podświetlenie GPIO1 |
 | Dotyk | CST816D (pojedynczy punkt) | I2C 0x15 (SDA 48, SCL 47), odpytywany |
-| Akcelerometr | QMI8658 (6 osi, używany tylko akcelerometr) | I2C 0x6B, ta sama magistrala |
+| IMU | QMI8658 (akcelerometr + żyroskop, 500 Hz) | I2C 0x6B, ta sama magistrala |
 | Karta TF | gniazdo na płytce, tryb SPI | SCLK 39, MOSI 38, MISO 40 (wspólne z ekranem), CS 41 |
 | Akumulator | złącze MX1.25, ładowarka ETA6096 | napięcie: ADC GPIO5 (dzielnik 200 k/100 k, VBAT = 3×); ładowanie: GPIO18 |
 | Kamera | złącze 24-pin (OV2640/OV5640) | nieużywana, piny zarezerwowane (niżej) |
@@ -62,12 +64,19 @@ Dolny pasek ma cztery przyciski: `◀`, przycisk strony, `REC/STOP`, `▶`.
 
 | # | Strona | Przycisk strony | Opis |
 |---|---|---|---|
-| 1 | Przyspieszenie | TARA / TARA OFF | X, Y, Z w m/s² i g, paski od środka (±20 m/s²), moduł \|a\| |
-| 2 | Przebieg | PAUZA / WZNÓW | ostatnie 5,4 s, ±20 m/s²; **przytrzymanie PAUZA** = zero / pełny odczyt |
-| 3–5 | FFT osi X, Y, Z | PAUZA / WZNÓW | widmo amplitudowe, skala sztywna 0–5 m/s², do połowy częstotliwości próbek |
-| 6 | Licznik ruchów | KASUJ | pełne ruchy tam i z powrotem i tempo na minutę |
-| 7 | Akumulator | — | procent, napięcie, stan ładowania |
-| 8 | Nagrywanie | TAG | stan karty SD, sesja, numer zawieszki |
+| 1 | Linia | STÓŁ 1 | stoły wzdłuż toru, pozycja detalu, odciski Wi-Fi, przejazdy (jak na Feather) |
+| 2 | Przyspieszenie | TARA / TARA OFF | X, Y, Z w m/s² i g, paski od środka (±20 m/s²), moduł \|a\| |
+| 3 | Żyroskop | KĄT 0 | prędkości kątowe bez offsetu i kąt od wyzerowania |
+| 4–6 | Przemieszczenie | SUMA 0 | ruch od spoczynku do spoczynku: wartości, przebieg w czasie, tor |
+| 7 | Przebieg | PAUZA / WZNÓW | ostatnie 5,4 s, ±20 m/s²; **przytrzymanie PAUZA** = zero / pełny odczyt |
+| 8–10 | FFT osi X, Y, Z | PAUZA / WZNÓW | widmo amplitudowe, skala sztywna 0–5 m/s² |
+| 11 | Licznik ruchów | KASUJ | pełne ruchy tam i z powrotem i tempo na minutę |
+| 12 | Sieć i WWW | — | SSID, adres IP, `http://<nazwa>.local`, zegar NTP |
+| 13 | Akumulator | — | procent, napięcie, stan ładowania |
+| 14 | Nagrywanie | TAG | stan karty SD, sesja, numer zawieszki |
+
+Przyciski BOOT i przeciągnięcie przechodzą między stronami; dawne
+„przytrzymaj BOOT” z Feathera to teraz przycisk strony na ekranie.
 
 `REC` / `STOP` jest na każdej stronie. W nagłówku widać `●` i czas nagrania,
 gdy trwa zapis. Komunikaty (np. „TARA USTAWIONA”) pokazują się nad paskiem.
@@ -118,6 +127,18 @@ ramki z numerem) otwiera klawiaturę numeryczną: numer zawieszki (do 8 cyfr)
 trafia do nagłówka kolejnego pliku i jest zapamiętany w pamięci nieulotnej.
 Numer można zmieniać tylko, gdy nic się nie nagrywa. Docelowo ma go podawać
 rozpoznawanie numerów kamerą (niżej).
+
+## Linia rolkowa, Wi-Fi i WWW
+
+Ta sama logika co w wersji na Feather (`include/LineTracker.h`, moduły
+`Network`, `WebLink`, `WifiScan`, `UsbStorage` są wspólne). Konfiguracja:
+`config.csv` i `wifi.txt` na dysku USB `WIBROMTR` (partycja FFat 8 MB; USB-C
+pokazuje się jako dysk, nauczone dane są w NVS). Czujnik jest próbkowany
+500 Hz, a dla toru i przemieszczenia uśredniany do 200 Hz
+(`include/Decimator.h`). Wiersze przejazdów trafiają na FFat **i** na kartę TF
+(`/LOGS/<przejazd>.csv`, `/LOGS/distances_last_run.csv`). Układ osi
+czujnika względem urządzenia: `board::kMountSign` w `hal/BoardPins.h` — jeśli
+kierunki w `config.csv` wychodzą odwrotnie, odwróć tam znak osi.
 
 ## Zapis na kartę SD
 

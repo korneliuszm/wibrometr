@@ -1,6 +1,9 @@
 #pragma once
 #include <cstdint>
 #include "BatteryModel.h"
+#include "ClientNetwork.h"
+#include "Displacement.h"
+#include "LineTracker.h"
 #include "LogStatus.h"
 #include "SignalHistory.h"
 #include "Spectrum.h"
@@ -18,13 +21,15 @@ constexpr uint32_t kBinMs = 40;             // Waveform bin width: window = kBin
 constexpr float kWaveFullScale = 20.0f;     // Waveform vertical range, +-m/s2.
 constexpr float kFftRange = 5.0f;           // Fixed spectrum full scale, m/s2.
 
-enum class Page : uint8_t { Accel, Wave, FftX, FftY, FftZ, Strokes, Battery, Log, Count };
+// Line product pages first (as on the Feather), then the vibration analysis.
+enum class Page : uint8_t { Line, Accel, Gyro, Disp, DispPlot, DispPath, Wave, FftX, FftY, FftZ, Strokes, Web,
+                            Battery, Log, Count };
 constexpr int kPageCount = int(Page::Count);
 
 struct Model {
   uint32_t nowMs = 0;
   int pageIndex = 0;
-  Page page = Page::Accel;
+  Page page = Page::Line;
 
   // Accelerometer.
   bool live = false;
@@ -34,6 +39,18 @@ struct Model {
   const char *i2cScan = "";
   Accel shown{};                            // Smoothed and tared, m/s2.
   bool tared = false;
+
+  // Roller line, displacement, gyro, network (see LineApp).
+  const line::Tracker *tracker = nullptr;
+  bool configOk = false;
+  int configLine = 0;
+  const char *configWhat = "";
+  bool scanBusy = false;
+  const DisplacementMeter *meter = nullptr;
+  Accel gyroRate{}, gyroAngle{};            // deg/s without the rest offset, deg since zeroing.
+  bool gyroBiasKnown = false;
+  const net::Status *network = nullptr;
+  int webClients = 0;
 
   // Analysis (waveform, FFT, stroke counter).
   const SignalHistory<kBins> *history = nullptr;

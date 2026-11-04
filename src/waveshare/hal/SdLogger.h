@@ -23,11 +23,18 @@ public:
   // Never blocks; ignored unless recording.
   void pushSample(uint32_t tUs, const Accel &a);
   void pushBattery(uint32_t tUs, float millivolts, bool charging);
+  // Copy of a roller-line log row (already time-prefixed, see CsvLog.h) to
+  // /LOGS/<file>.csv and /LOGS/distances_last_run.csv on the card. Dropped when the
+  // card is not ready or the queue is full.
+  void appendRideRow(const char *file, const char *csvRow);
   Status status() const;
 
 private:
   struct Record { uint8_t kind; uint32_t tUs; float a, b, c; };
-  struct Command { uint8_t kind; float sampleRateHz, rangeG; char tag[logfmt::kMaxTagLen + 1]; };
+  struct Command {
+    uint8_t kind; float sampleRateHz, rangeG; char tag[logfmt::kMaxTagLen + 1];
+    char file[24]; char row[288];
+  };
 
   static void taskEntry(void *self) { static_cast<SdLogger *>(self)->run(); }
   void run();

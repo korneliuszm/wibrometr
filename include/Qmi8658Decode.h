@@ -39,4 +39,14 @@ constexpr Accel decode(const uint8_t (&raw)[6], uint8_t range) {
   return {le16(raw[0], raw[1]) * scale, le16(raw[2], raw[3]) * scale, le16(raw[4], raw[5]) * scale};
 }
 
+// Gyroscope, CTRL3 gFS (bits 6:4): 0..7 = 16, 32, 64, 128, 256, 512, 1024, 2048 dps full scale.
+constexpr float kRadPerDeg = 3.14159265f / 180;
+constexpr float lsbPerDps(uint8_t range) { return 32768.0f / float(16 << (range & 7)); }
+constexpr float gyroRangeDps(uint8_t range) { return float(16 << (range & 7)); }
+// GX_L..GZ_H (6 bytes) to rad/s, in the chip's own axes.
+constexpr Accel decodeGyro(const uint8_t (&raw)[6], uint8_t range) {
+  const float scale = kRadPerDeg / lsbPerDps(range);
+  return {le16(raw[0], raw[1]) * scale, le16(raw[2], raw[3]) * scale, le16(raw[4], raw[5]) * scale};
+}
+
 } // namespace qmi8658

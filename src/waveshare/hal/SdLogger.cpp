@@ -2,6 +2,7 @@
 #include <FS.h>
 #include <SD.h>
 #include <cstring>
+#include "CsvLog.h"
 #include "hal/BoardPins.h"
 #include "hal/Display.h"
 
@@ -9,7 +10,7 @@ namespace hal {
 
 namespace {
 enum : uint8_t { kSample = 0, kBattery = 1 };
-enum : uint8_t { kStart = 1, kStop = 2 };
+enum : uint8_t { kStart = 1, kStop = 2, kRideRow = 3 };
 constexpr size_t kBufferTarget = 3584;       // Write to the card in chunks of about this size.
 constexpr uint32_t kWriteEveryMs = 250;      // ...or at least this often.
 constexpr uint32_t kFlushEveryMs = 2000;     // File system flush: bounds data lost on power loss.
@@ -19,7 +20,7 @@ constexpr int kRecordsPerPass = 256;
 
 void SdLogger::begin() {
   records_ = xQueueCreate(1024, sizeof(Record)); // ~2 s of samples at 500 Hz.
-  commands_ = xQueueCreate(4, sizeof(Command));
+  commands_ = xQueueCreate(8, sizeof(Command));
   xTaskCreatePinnedToCore(taskEntry, "sdlog", 8192, this, 1, nullptr, 0);
 }
 
@@ -36,6 +37,15 @@ void SdLogger::stop() {
   Command c{};
   c.kind = kStop;
   if (commands_) xQueueSend(commands_, &c, 0);
+}
+
+void SdLogger::appendRideRow(const char *file, const char *csvRow) {
+  if (!commands_ || !csvRow || !file) return;
+  Command c{};
+  c.kind = kRideRow;
+  std::strncpy(c.file, file, sizeof c.file - 1);
+  std::strncpy(c.row, csvRow, sizeof c.row - 1);
+  xQueueSend(commands_, &c, 0);
 }
 
 void SdLogger::pushSample(uint32_t tUs, const Accel &a) {
@@ -175,6 +185,18 @@ void SdLogger::endSession() {
 }
 
 void SdLogger::handle(const Command &c) {
+  if (c.kind == kRideRow) {
+    if (status_.state != State::Idle && status_.state != State::Recording) return;
+    char path[64];
+    // "/sd" is the Arduino SD library's VFS mount point.
+    std::snprintf(path, sizeof path, "/sd%s/distances_last_run.csv", logfmt::kDirectory);
+    storage::appendCsvFile(path, c.row);
+    if (c.file[0]) {
+      std::snprintf(path, sizeof path, "/sd%s/%s.csv", logfmt::kDirectory, c.file);
+      storage::appendCsvFile(path, c.row);
+    }
+    return;
+  }
   if (c.kind == kStart) beginSession(c);
   else if (c.kind == kStop && status_.state == State::Recording) endSession();
 }
