@@ -16,6 +16,7 @@ jobs:
       - run: g++ -std=c++17 -Iinclude test/distance_log_checks.cpp -o dlc && ./dlc
       - run: g++ -std=c++17 -O2 -Iinclude test/displacement_checks.cpp -o dc && ./dc
       - run: g++ -std=c++17 -Iinclude -fsyntax-only test/signal_checks.cpp
+      - run: g++ -std=c++17 -Wall -Wextra -Iinclude test/port_checks.cpp -o pc && ./pc
       - run: >
           g++ -std=c++17 -Isrc/indoor_positioning test/ips_checks.cpp
           src/indoor_positioning/WifiFingerprint.cpp
