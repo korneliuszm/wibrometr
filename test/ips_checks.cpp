@@ -69,7 +69,8 @@ struct Sim {
   Sim() { for (bool &v : visible) v = true; }
 
   ScanResult scanAt(float x, float y) {
-    std::normal_distribution<float> noise(0, noiseDb);
+    // ponytail: stddev must be >0 for std::normal_distribution (noiseDb=0 means "no noise")
+    std::normal_distribution<float> noise(0, noiseDb > 0 ? noiseDb : 1e-6f);
     std::uniform_real_distribution<float> u(0, 1);
     ScanResult s;
     for (int i = 0; i < Room::kAps; ++i) {

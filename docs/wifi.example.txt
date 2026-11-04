@@ -1,0 +1,22 @@
+# Skopiuj jako wifi.txt do korzenia dysku USB i nacisnij RESET.
+# Pierwszy # zaczyna komentarz, nie ma cytowania ani escape dla # w hasle.
+ssid=YOUR_NETWORK
+password=YOUR_PASSWORD
+ntp=pool.ntp.org
+tz=CET-1CEST,M3.5.0,M10.5.0/3
+hostname=wibrometr
+
+# PEAP lub TTLS: dodaj eap=peap albo eap=ttls, username i opcjonalne identity.
+# password oznacza wtedy haslo uzytkownika.
+# eap=peap
+# username=YOUR_USERNAME
+# identity=YOUR_OUTER_IDENTITY
+# ca=cert/ca.pem
+
+# TLS: zamiast powyzszego wariantu uzyj eap=tls, identity, cert i key.
+# eap=tls
+# identity=YOUR_DEVICE_IDENTITY
+# ca=cert/ca.pem
+# cert=cert/client.crt
+# key=cert/client.key
+# Bez ca serwer RADIUS nie jest sprawdzany. PEM max 8192 B, klucz niezaszyfrowany.
