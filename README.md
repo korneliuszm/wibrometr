@@ -1,313 +1,185 @@
-# Przenośny monitor drgań — Feather ESP32-S3 TFT + MPU6050
+# Przenośny monitor drgań — Waveshare ESP32-S3-Touch-LCD-2
 
-Pierwsza wersja do obserwacji przyspieszeń ramienia robota podczas ruchu.
-Projekt PlatformIO znajduje się w tym katalogu. Płytka: Adafruit **5483**
-ESP32-S3 TFT Feather, nie wersja Reverse TFT. Akcelerometr: MPU6050 (moduł
-GY-521) przez I2C.
+Urządzenie do pomiaru drgań (szyny zawieszek, ramię robota) na płytce
+**Waveshare ESP32-S3-Touch-LCD-2** (SKU 29667): przyspieszenie XYZ na żywo,
+przebieg, FFT, licznik ruchów, stan akumulatora i **zapis pomiarów na kartę
+TF**. Obsługa dotykiem (przeciąganie palcem i przyciski na ekranie) oraz
+przyciskiem BOOT. Projekt PlatformIO jest w tym katalogu.
 
-> **Stan obecny:** ekrany 1/2 — przyspieszenie XYZ, 2/2 — akumulator.
-> Pozostałe funkcje są wyłączone flagami w `src/main.cpp`, a ich kod jest
-> zachowany: ekrany analizy (przebieg czasowy, FFT, licznik ruchów —
-> `imuEnabled`) oraz nawigacja po Wi-Fi (`ipsEnabled`; w praktyce działała
-> słabo). Wyłączony moduł nie trafia do firmware. Bluetooth został usunięty.
+> **Stan:** kod buduje się (`pio run`), a logika niezależna od sprzętu jest
+> przetestowana na komputerze. **Nie był jeszcze uruchamiany na płytce** —
+> lista rzeczy do sprawdzenia przy pierwszym włączeniu jest niżej.
 
-## Połączenia
+![Ekrany: przyspieszenie, przebieg, FFT, licznik, akumulator, nagrywanie, klawiatura numeru zawieszki, brak czujnika](docs/screens.png)
 
-Czujnik pracuje na magistrali I2C płytki (400 kHz), tej samej co układ
-pomiaru akumulatora (adres 0x36 — bez konfliktu z MPU6050 pod 0x68/0x69).
-Ta magistrala jest też wyprowadzona na złączu STEMMA QT.
+*Podgląd wyrenderowany na komputerze tym samym kodem rysującym co na
+urządzeniu (`tools/render_screens.sh`).*
 
-| MPU6050 (GY-521) | Feather |
-|---|---|
-| VCC | 3V (3,3 V) |
-| GND | GND |
-| SDA | SDA / GPIO42 |
-| SCL | SCL / GPIO41 |
-| INT | **A5 / GPIO8** |
-| AD0 | GND albo niepodłączony → adres 0x68; 3V → 0x69 |
-| XDA, XCL | niepodłączone |
+## Sprzęt
 
-- Firmware sam wybiera 0x68 lub 0x69.
-- INT (aktywny stan wysoki, zatrzask do odczytu) zgłasza każdą nową próbkę;
-  odczyt jest wtedy wyzwalany przerwaniem, a czas próbki to chwila
-  przerwania — bez duplikatów i pominięć. Gdy INT nie jest podłączony,
-  po ok. 100 ms firmware przechodzi na odpytywanie co 5 ms (komunikat na
-  porcie szeregowym); pomiar działa, ale z mniej dokładnym czasem próbek.
-- Konfiguracja: zakres ±8 g (4096 LSB/g), filtr dolnoprzepustowy 94 Hz,
-  próbkowanie 200 Hz; żyroskop wyłączony.
-- Moduły GY-521 mają własne rezystory podciągające I2C; Feather ma swoje.
-  Krótkie przewody i wspólna masa.
-- Gdy czujnik nie został wykryty, ekran przyspieszenia zamienia się w
-  panel diagnostyczny: **powód** (brak odpowiedzi na adresie, odrzucony
-  zapis, `WHO_AM_I` równe 0x00/0xFF, niezgodny odczyt konfiguracji),
-  **użyte piny i prędkość I2C** oraz **lista adresów, które odpowiedziały**
-  na magistrali. Układ akumulatora na płytce to 0x36: jeśli on jest na
-  liście, a 0x68/0x69 nie, magistrala działa i błąd jest w podłączeniu
-  MPU6050 (VCC, GND, SDA, SCL); jeśli lista jest pusta, sprawdź pierwsze
-  piny SDA/SCL i zasilanie. Próby co 2 s na przemian 400 kHz i 100 kHz
-  (długie przewody czasem działają tylko wolno); to samo wypisuje port
-  szeregowy.
+| Element | Układ | Połączenie |
+|---|---|---|
+| Procesor | ESP32-S3R8 (8 MB PSRAM oktalny, 16 MB flash) | — |
+| Wyświetlacz | 2,0" IPS 240×320, ST7789 | SPI: SCLK 39, MOSI 38, DC 42, CS 45, podświetlenie GPIO1 |
+| Dotyk | CST816D (pojedynczy punkt) | I2C 0x15 (SDA 48, SCL 47), odpytywany |
+| Akcelerometr | QMI8658 (6 osi, używany tylko akcelerometr) | I2C 0x6B, ta sama magistrala |
+| Karta TF | gniazdo na płytce, tryb SPI | SCLK 39, MOSI 38, MISO 40 (wspólne z ekranem), CS 41 |
+| Akumulator | złącze MX1.25, ładowarka ETA6096 | napięcie: ADC GPIO5 (dzielnik 200 k/100 k, VBAT = 3×); ładowanie: GPIO18 |
+| Kamera | złącze 24-pin (OV2640/OV5640) | nieużywana, piny zarezerwowane (niżej) |
 
-## Ekran i obsługa
+Piny pochodzą z tabeli GPIO na schemacie producenta (Rev 1.0 i Rev 2.0) i
+zgadzają się z przykładowym kodem producenta. Wszystkie są w jednym pliku:
+`src/hal/BoardPins.h`.
 
-Ekrany przełączane krótkim naciśnięciem BOOT (numer w prawym górnym rogu):
-1 — przyspieszenie XYZ, 2 — akumulator. Z flagą `imuEnabled = true`
-dochodzą ekrany analizy (opis niżej), wstawiane po ekranie 1.
+**Rev 1.0 / Rev 2.0.** Linia stanu ładowania (`CHG_DET`, GPIO18, wysoki =
+ładowanie) istnieje tylko na płytce **Rev 2.0** (nadruk „Rev2.0” na PCB). Na
+Rev 1.0 ustaw `kHasChargeDetect = false` w `BoardPins.h`: ekran akumulatora
+pokazuje wtedy tylko napięcie i procent.
 
-![Ekran przyspieszenia: płasko, przechylony, uderzenie, tara, brak czujnika, łączenie](docs/accel-screens.png)
+**Orientacja.** Obraz jest poziomy (320×240, `setRotation(3)` w Adafruit
+ST7789 = MADCTL 0x60, jak rotacja 1 w bibliotece producenta), a dotyk jest
+przeliczany tak samo jak w przykładzie producenta. Jeśli obraz albo dotyk
+okażą się odwrócone, zmień `kLcdRotation` (1 lub 3) i funkcję
+`mapTouchLandscape` w `include/TouchGestures.h`.
 
-*Podgląd wyrenderowany na komputerze tym samym kodem co na urządzeniu (skala 2×).*
+### Wolne GPIO i kamera
 
-### 1. Przyspieszenie XYZ
+Na złączach wyprowadzone są GPIO 2, 4, 6–21 (poza 19/20 = USB), 47, 48, TX
+i RX. Piny kamery z przykładu producenta: XCLK 8, SIOD 21, SIOC 16, PCLK 9,
+VSYNC 6, HREF 4, PWDN 17, dane 2, 7, 10, 14, 11, 15, 13, 12. Są więc
+zajęte, dopóki kamera jest włożona. GPIO47/48 to magistrala I2C ekranu
+dotykowego i IMU; urządzenia zewnętrzne można tam dołączyć równolegle.
 
-- Trzy wiersze: X czerwony, Y zielony, Z niebieski; wartość w m/s² i w g
-  oraz pasek od środka (zero) w skali ±20 m/s²; na dole moduł |a|.
-- Odczyt jest lekko wygładzony (ok. 0,15 s), żeby cyfry dało się czytać;
-  nagłówek podaje faktyczną liczbę próbek na sekundę (ok. 200 Hz).
-- Czujnik w spoczynku mierzy reakcję podłoża, więc położony płasko pokazuje
-  Z ≈ +9,81 m/s² (1 g), a X i Y bliskie zeru. Osie są takie, jak na
-  nadruku modułu.
-- **BOOT:** krótko — następny ekran; przytrzymanie ≥1 s — **tara**:
-  bieżący wektor jest odejmowany (np. grawitacja przy ustalonym ułożeniu),
-  na ekranie pojawia się „TARA”; kolejne ≥1 s wyłącza tarę.
-- Czujnik mierzy do ±8 g (ok. ±78 m/s²); mocniejsze uderzenia są obcinane
-  przez czujnik. Pasek jest obcinany na końcach.
+## Obsługa
 
-### Ekrany analizy (`imuEnabled = true`)
+Osiem stron. Przewijanie:
+- **przeciągnięcie palcem** w lewo (następna) lub w prawo (poprzednia) na
+  obszarze treści,
+- **strzałki ◀ ▶** na dolnym pasku,
+- **BOOT** (GPIO0): krótkie naciśnięcie = następna strona.
 
-Przebieg czasowy, FFT osi X/Y/Z i licznik ruchów korzystają z tych samych
-próbek 200 Hz. Wyłączone domyślnie (nie liczą się wtedy w ogóle).
+Dolny pasek ma cztery przyciski: `◀`, przycisk strony, `REC/STOP`, `▶`.
 
-**Przebieg czasowy**
-- X czerwony, Y zielony, Z niebieski; jednostka m/s².
-- Ostatnie 4 s, skala stała ±20 m/s², nowe dane po prawej.
-- Każdy przedział 40 ms pokazuje min/max oraz połączenie między próbkami.
-  To obwiednia pików z odczytów, a nie prezentacja wszystkich punktów.
-- POZA SKALA oznacza obcięcie widoku; dane nie są automatycznie skalowane.
-- Przerwy w próbkach pozostawiają puste przedziały, bez sztucznych zer.
-- UTRATA PROBEK: przepełnienie kolejki w dowolnym momencie od startu.
-
-**FFT osi X, Y, Z**
-- Widmo amplitudowe z ostatnich 512 próbek (ok. 2,6 s przy 200 Hz),
-  okno Hanna, usunięta składowa stała (grawitacja i offset nie wpływają
-  na wykres). Rozdzielczość ok. 0,4 Hz, zakres 0 Hz – połowa faktycznej
-  częstotliwości próbek (100 Hz). Filtr czujnika ma pasmo 94 Hz, więc
-  powyżej ok. 90 Hz sygnał jest już tłumiony. Oś Hz skaluje się według
-  zmierzonego tempa próbek, a czas każdej próbki to chwila przerwania INT.
-- Oś pionowa: amplituda sinusoidy w m/s² rysowana jako linia, skala sztywna
-  0–5 (stała `fftRange`); większe prążki są obcinane. Wiersz statusu podaje
-  częstotliwość i amplitudę największego prążka.
-- ZBIERANIE n/512: okno jeszcze się wypełnia (po starcie, wznowieniu
-  pauzy lub przerwie w próbkach dłuższej niż 100 ms).
-
-**Licznik ruchów**
-
-Licznik powtarzalnych ruchów posuwistych ręki trzymającej czujnik. Duża
-liczba to **pełne ruchy** (tam i z powrotem), obok tempo w ruchach na minutę.
-Dostrojony do 0,7–5 ruchów/s i skoku od kilku do kilkunastu cm.
-- MPU6050 nie ma fuzji czujników, więc licznik pracuje na zwykłym
-  przyspieszeniu z grawitacją, którą odfiltrowuje filtr górnoprzepustowy
-  (ok. 1 s). **Przechylanie ręki przesuwa grawitację między osiami tak samo
-  mocno jak sam ruch, więc wynik jest wyraźnie słabszy niż na czujniku
-  z przyspieszeniem liniowym** (tego licznik był strojony). Nie testowano
-  na prawdziwym ruchu.
-- Kierunek ruchu wyznaczany jest automatycznie ze wszystkich trzech osi
-  (dominujący kierunek z ostatnich ok. 0,5 s), więc ułożenie czujnika
-  w dłoni nie ma znaczenia. Ekran pokazuje bieżący kierunek w osiach czujnika.
-- Przyspieszenie jest wygładzane i całkowane do sygnału zbliżonego do
-  prędkości: każde przesunięcie daje jeden wyraźny impuls; dwa impulsy
-  w przeciwne strony to jeden ruch. Próg to 20% ostatniego szczytu
-  (zanik w ok. 1 s, minimum 0,04 m/s).
-- Pasek pokazuje bieżący sygnał względem progu (żółte znaczniki). Licznik
-  działa niezależnie od pauzy na innych ekranach.
-- **BOOT na tym ekranie:** krótkie naciśnięcie kasuje licznik, przytrzymanie
-  ≥1 s przechodzi do następnego ekranu.
-
-**BOOT na pozostałych ekranach analizy:**
-
-| Naciśnięcie | Działanie |
-|---|---|
-| krócej niż 1 s | następny ekran |
-| 1–3 s | pauza / wznowienie wykresu i FFT |
-| od 3 s | ustawienie zera (odjęcie ostatniego odczytu XYZ) albo, gdy zero jest ustawione, powrót do pełnego przyspieszenia |
-
-Pauza zatrzymuje tylko widok; odczyt i status działają dalej. Wznowienie
-i zmiana offsetu czyszczą historię.
-
-### Akumulator
-
-- Procent naładowania, napięcie ogniwa i pasek stanu z układu pomiaru
-  na płytce (I2C, ta sama magistrala co MPU6050). Odczyt co 2 s, w zadaniu
-  czujnika — jedynym, które używa magistrali.
-- Nowsze płytki 5483 mają MAX17048: stan ładowania wynika ze znaku
-  szybkości zmiany naładowania (%/h): LADOWANIE, ROZLADOWANIE,
-  NALADOWANY lub BEZ ZMIAN. Ładowarka nie ma wyjścia statusu na GPIO,
-  więc to jedyna dostępna informacja; po starcie wartość ustala się
-  przez pewien czas.
-- Starsze płytki z LC709203F pokazują tylko procent i napięcie — ten
-  układ nie odróżnia ładowania od rozładowania.
-- BRAK ODCZYTU UKLADU POMIARU: układ nie odpowiada (np. brak akumulatora,
-  bo MAX17048 jest zasilany z ogniwa). Ponowna próba co 5 s.
-
-**BOOT (GPIO0), akcja przy puszczeniu**, na ekranach przyspieszenia i
-akumulatora: krótko — następny ekran; na ekranie przyspieszenia ≥1 s — tara.
-Na ekranie widać wskazówkę zależną od czasu przytrzymania. RESET płytki
-restartuje firmware. Nie trzymaj BOOT podczas resetu, jeśli nie chcesz
-uruchomić bootloadera. Płytka 5483 ma tylko jeden przycisk użytkownika;
-nie używamy D1/D2.
-
-## Nawigacja wewnętrzna (Wi-Fi RSSI) — prototyp
-
-> Wyłączona (`ipsEnabled = false` w `src/main.cpp`): w praktyce działała
-> słabo. Opis poniżej dotyczy kodu, który pozostał w repozytorium.
-
-Eksperyment: szacowanie położenia w pomieszczeniu na podstawie siły
-sygnałów okolicznych punktów dostępowych Wi-Fi (fingerprinting RSSI).
-Działa autonomicznie — bez Internetu, serwera i bez łączenia się z siecią;
-ESP32 jedynie skanuje eter. **Pozycja jest szacunkiem z interpolacji trzech
-punktów odniesienia, a nie pomiarem w metrach.** Przy trzech punktach
-spodziewaj się błędów rzędu metrów; to demonstrator, który pozwala ocenić,
-na ile fingerprinting działa w danym miejscu.
-
-![Ekran nawigacji: brak kalibracji, kalibracja, pomiar, błąd punktu, pozycja OK, niska jakość](docs/indoor-navigation-screens.png)
-
-*Podgląd wyrenderowany na komputerze tym samym kodem i biblioteką GFX co
-na urządzeniu (skala 2×).*
-
-### Obsługa (ekran mapy)
-
-| Stan | BOOT krótko | BOOT ≥1 s | BOOT ≥3 s |
+| # | Strona | Przycisk strony | Opis |
 |---|---|---|---|
-| mapa (zwykły widok) | następny ekran | rozpocznij kalibrację | usuń kalibrację z pamięci |
-| kalibracja — czekanie na punkt | zmierz punkt | anuluj (stara kalibracja zostaje) | — |
-| kalibracja — pomiar | — | anuluj | — |
+| 1 | Przyspieszenie | TARA / TARA OFF | X, Y, Z w m/s² i g, paski od środka (±20 m/s²), moduł \|a\| |
+| 2 | Przebieg | PAUZA / WZNÓW | ostatnie 5,4 s, ±20 m/s²; **przytrzymanie PAUZA** = zero / pełny odczyt |
+| 3–5 | FFT osi X, Y, Z | PAUZA / WZNÓW | widmo amplitudowe, skala sztywna 0–5 m/s², do połowy częstotliwości próbek |
+| 6 | Licznik ruchów | KASUJ | pełne ruchy tam i z powrotem i tempo na minutę |
+| 7 | Akumulator | — | procent, napięcie, stan ładowania |
+| 8 | Nagrywanie | TAG | stan karty SD, sesja, numer zawieszki |
 
-Kalibracja zapisuje się w pamięci nieulotnej (NVS) i przetrwa restart.
-Nowa kalibracja zastępuje starą dopiero po pomiarze wszystkich trzech punktów.
+`REC` / `STOP` jest na każdej stronie. W nagłówku widać `●` i czas nagrania,
+gdy trwa zapis. Komunikaty (np. „TARA USTAWIONA”) pokazują się nad paskiem.
 
-### Kalibracja — trzy punkty
+### Strona 1 — przyspieszenie
 
-Trójkąt równoboczny o boku `CALIBRATION_SIDE_M` (domyślnie 5 m):
-A (0, 0), B (5, 0), C (2,5, 4,33) — współrzędne liczone z długości boku.
+Czujnik w spoczynku mierzy reakcję podłoża: płasko położona płytka daje
+Z ≈ +9,81 m/s². Odczyt jest lekko wygładzony (ok. 0,15 s). **TARA**
+odejmuje bieżący wektor (np. grawitację przy ustalonym ułożeniu); „TARA”
+na ekranie przypomina, że jest włączona. Gdy czujnik nie odpowiada, strona
+zamienia się w panel diagnostyczny: powód, lista adresów I2C, które
+odpowiedziały (oczekiwane 0x6B i 0x15).
 
-1. Przytrzymaj BOOT 1 s na ekranie mapy → „Przejdź do punktu A”
-   (punkt docelowy miga na mapie).
-2. Stań w punkcie A, naciśnij BOOT. Urządzenie wykonuje 15 skanów
-   (ok. 25 s, zależnie od czasu skanu) — ekran pokazuje np. „Kalibracja A: 7/15”. Stój w miejscu
-   i nie zasłaniaj urządzenia.
-3. To samo w B i C. Po C kalibracja zapisuje się i od razu włącza się
-   lokalizacja.
+### Strony 2–5 — przebieg i FFT
 
-Jeśli w punkcie zostanie mniej niż 3 użyteczne sieci, ekran pokaże „Za mało
-sieci” — pomiar tego punktu można powtórzyć tym samym przyciskiem.
+Przebieg: każdy przedział 40 ms pokazuje min/max i połączenie między
+próbkami. FFT: 1024 próbek (ok. 2 s przy 500 Hz), okno Hanna, usunięta
+składowa stała, rozdzielczość ok. 0,5 Hz, zakres 0–250 Hz (oś Hz liczona
+ze zmierzonego tempa próbek). Hardware'owy filtr czujnika ma pasmo ok. 67 Hz
+(13,37% ODR), więc powyżej niego sygnał jest tłumiony — patrz
+„Ustawienia pomiaru”.
 
-Agregacja punktu (dla każdego BSSID osobno; SSID i kanał są zapisywane
-pomocniczo, bo SSID nie jest unikalny):
-- odrzucenie wartości odstających: dalej niż max(6 dB, 3·1,4826·MAD)
-  od mediany;
-- zapis średniej, odchylenia, liczby wykryć i liczby skanów;
-- pominięcie AP widocznych w mniej niż 50% skanów, słabszych niż
-  −90 dBm albo z odchyleniem > 8 dB;
-- najwyżej 24 najsilniejsze AP na punkt.
+### Strona 6 — licznik ruchów
 
-### Algorytm lokalizacji
+Strojony wcześniej na przyspieszeniu liniowym z fuzji czujników (BNO085).
+QMI8658 jej nie ma, więc licznik pracuje na zwykłym przyspieszeniu z
+grawitacją, którą odfiltrowuje filtr górnoprzepustowy (1 s). **Obracanie
+ręki przesuwa grawitację między osiami tak mocno jak sam ruch, więc wynik
+jest słabszy niż poprzednio.** Kierunek ruchu jest wyznaczany ze wszystkich
+trzech osi. Nie testowano na prawdziwym ruchu.
 
-Co ok. 2,5 s (skan aktywny 120 ms na kanał, ok. 1,6 s; w tle — interfejs
-działa dalej):
-1. Bieżący wektor RSSI po BSSID porównywany jest z każdym punktem jako
-   ważony RMS różnic w dB (bez modelu tłumienia; RSSI nie jest liniowe
-   względem odległości):
-   - waga AP = wykrywalność / (σ² + 2²) — stabilne AP ważą więcej;
-   - AP nieobecny w profilu punktu liczy się jako −100 dBm (brak też
-     niesie informację);
-   - AP niewidoczny w bieżącym skanie ma połowę wagi i liczy się tylko
-     różnica między punktami (może to być chwilowy zanik albo wyłączony AP);
-   - każda różnica jest obcięta do 12 dB, a najgorzej pasujący AP
-     odrzucony — pojedynczy niestabilny AP nie przeważy wyniku;
-   - nowe, nieznane BSSID są pomijane.
-2. Wagi punktów `1 / (d + 1 dB)³`, pozycja = średnia ważona A, B, C.
-   W tej wersji wynik leży zawsze w trójkącie.
-3. Mniej niż 3 rozpoznane AP → `NO_POSITION`.
-4. Confidence 0–100% to heurystyka (nie gwarancja dokładności): jakość
-   najlepszego dopasowania × pokrycie znanych AP × rozróżnialność punktów
-   × liczba AP. Poniżej 40% → `LOW_CONFIDENCE`.
+### Strona 7 — akumulator
 
-Filtr pozycji: EMA (α = 0,35, mniejsza przy niskim confidence); skok
-> 2 m wymaga potwierdzenia drugim pomiarem w tym samym miejscu (rzeczywisty
-ruch pokaże się o jeden pomiar później, pojedynczy zły skan — wcale);
-strefa martwa 0,15 m. Bieżąca pozycja nie jest zapisywana do flash.
+Płytka nie ma układu pomiarowego (fuel gauge), więc procent jest
+**szacunkiem z napięcia ogniwa** (mediana z 16 odczytów ADC, krzywa typowego
+ogniwa Li-ion 3,27–4,20 V). Podczas ładowania napięcie na zaciskach jest
+podniesione, więc procent jest wtedy przybliżony (z poprawką −80 mV, znak „~”).
+Stany: `LADOWANIE` (CHG_DET wysoki), `NALADOWANY` (ładowarka bezczynna przy
+napięciu ≥ 4,15 V), `NA AKUMULATORZE`, `BRAK AKUMULATORA` (< 2,8 V). Płytka nie
+ma pomiaru obecności USB, więc „naładowany” i „zasilanie z USB bez
+ładowania” nie są rozróżnialne inaczej niż po napięciu.
 
-Na mapie: zielona/żółta kropka — pozycja po filtrze, mały okrąg — ostatni
-surowy wynik.
+### Strona 8 — nagrywanie
 
-### Konfiguracja i diagnostyka
+`REC` zakłada nowy plik na karcie; `STOP` zamyka go. Nagrywanie startuje
+tylko, gdy karta jest gotowa i czujnik daje dane. **TAG** (albo dotknięcie
+ramki z numerem) otwiera klawiaturę numeryczną: numer zawieszki (do 8 cyfr)
+trafia do nagłówka kolejnego pliku i jest zapamiętany w pamięci nieulotnej.
+Numer można zmieniać tylko, gdy nic się nie nagrywa. Docelowo ma go podawać
+rozpoznawanie numerów kamerą (niżej).
 
-Parametry w `src/indoor_positioning/IpsConfig.h`; najważniejsze można
-nadpisać w `platformio.ini` (`build_flags`, przykłady zakomentowane):
-`CALIBRATION_SIDE_M`, `IPS_SCANS_PER_POINT`, `IPS_DEBUG`.
+## Zapis na kartę SD
 
-`-D IPS_DEBUG=1` wypisuje na Serial: listę BSSID/RSSI z każdego skanu,
-zapisane fingerprinty A/B/C, odległości od nich, wagi interpolacji,
-pozycję przed i po filtrze, confidence, czas skanu i czas obliczeń.
-
-### Architektura
-
-`src/indoor_positioning/`:
-- `WifiFingerprint` — typy danych i agregacja kalibracji (czysty C++),
-- `FingerprintLocator` — dopasowanie i interpolacja (czysty C++, dowolna
-  liczba punktów ≥ 2 — gotowe na więcej punktów kalibracyjnych),
-- `PositionFilter` — wygładzanie (czysty C++),
-- `WifiScanner` — nieblokujące skanowanie bezpośrednio przez ESP-IDF
-  (`esp_wifi`); biblioteka Arduino `WiFi` jest celowo pominięta, bo ciągnie
-  źródła `Network`/lwIP, które na Windowsie nie kompilują się po skróceniu
-  ścieżek include przez pioarduino (`lwip/sockets.h: No such file`),
-- `FingerprintStore` — zapis w NVS (Preferences),
-- `IndoorPositioning` — maszyna stanów i API: `startCalibration()`,
-  `confirmCalibrationPoint()`, `cancelCalibration()`, `isCalibrated()`,
-  `startPositioning()`, `stopPositioning()`, `getPosition()`,
-  `getCalibrationProgress()`, `resetCalibration()`.
-
-`src/NavigationScreen` rysuje ekran ze stanu (bez dostępu do radia).
-Wszystkie bufory mają stały rozmiar (bez alokacji na skan). Po dodaniu
-Wi-Fi firmware zajmuje 61% flash (+0,5 MB) i 27% statycznego RAM (+45 KB);
-sterownik Wi-Fi rezerwuje dodatkowo pamięć dynamiczną w czasie działania.
-
-### Testy na komputerze
+Karta TF w FAT32. Pliki: `/LOGS/S0001.CSV`, `S0002.CSV`, … (numer sesji =
+największy istniejący + 1). Format:
 
 ```text
-g++ -std=c++17 -Isrc/indoor_positioning test/ips_checks.cpp src/indoor_positioning/WifiFingerprint.cpp src/indoor_positioning/FingerprintLocator.cpp src/indoor_positioning/PositionFilter.cpp -o ips_checks && ./ips_checks
+# wibrometr log v1
+# device: ESP32-S3-Touch-LCD-2, QMI8658
+# session: 7
+# uptime_ms_at_start: 345678
+# sample_rate_hz: 500.0
+# range_g: 8
+# tag: 4711
+# columns: t_us,ax_m_s2,ay_m_s2,az_m_s2
+1234567,0.123,-0.456,9.806
+1236567,0.119,-0.459,9.810
+# battery t_us=11234567 mV=3871 charging=0
 ```
 
-Syntetyczne pomieszczenie (AP, tłumienie, szum, zaniki) sprawdza:
-agregację i odrzucanie wartości odstających, pozycję w A/B/C i pomiędzy,
-brak części AP, nowe nieznane AP, duże wahania RSSI (8 dB), pojedynczy
-szalejący AP, brak danych, nierozróżnialne punkty, dzielenie przez zero
-i stabilność nieruchomego punktu z filtrem. Wynik nieruchomego punktu
-w środku trójkąta (najbardziej niejednoznaczne miejsce) waha się
-w symulacji w zakresie ok. ±0,65 m przy 2 dB szumu.
+- `t_us` — czas od startu urządzenia w mikrosekundach (jednolity: zegar
+  próbek wygładza opóźnienia odpytywania), przyspieszenie w m/s² w osiach
+  czujnika, trzy miejsca po przecinku.
+- Wiersze z `#` to nagłówek i zdarzenia (stan akumulatora co 10 s). Czytniki
+  CSV pomijają je jako komentarze (np. `pandas.read_csv(..., comment='#')`).
+- Płytka nie ma zegara czasu rzeczywistego, więc w pliku jest czas od
+  startu, a nie data.
+- Zapis idzie w tle: próbki trafiają do kolejki (ok. 2 s zapasu przy 500 Hz),
+  zadanie karty zapisuje je blokami po ok. 3,5 kB co najwyżej co 250 ms,
+  a `flush` co 2 s ogranicza utratę danych przy odcięciu zasilania. Utracone
+  próbki (kolejka pełna, karta za wolna) liczy ekran nagrywania.
+- Przybliżony rozmiar: ok. 28 B na próbkę, czyli ok. 14 kB/s (50 MB/h).
+- Brak karty, błąd zapisu albo wyjęcie karty: ekran pokazuje stan, a
+  ponowne montowanie jest próbowane co 3 s.
 
-### Sprawdzenie na urządzeniu
+Ekran i karta współdzielą magistralę SPI; ekran wysyłany jest w czterech
+pasmach, żeby karta mogła pracować między nimi.
 
-1. Wgraj firmware (najlepiej z `-D IPS_DEBUG=1`) i otwórz monitor portu.
-2. Odmierz trójkąt o boku 5 m (lub ustaw `CALIBRATION_SIDE_M`), zaznacz
-   punkty. Pomieszczenie powinno „widzieć” co najmniej kilka sieci.
-3. Wykonaj kalibrację A → B → C; po każdym punkcie Serial podaje liczbę
-   użytecznych AP. Zrestartuj płytkę i sprawdź, czy kalibracja wczytuje się
-   z NVS („IPS: calibration loaded from NVS”).
-4. Stań kolejno w A, B, C i w środku boków; zanotuj pozycję po ustaleniu
-   (kilka aktualizacji) i confidence. Postój 1–2 min w jednym miejscu
-   pokaże rozrzut pozycji.
-5. Przejdź z A do B: kropka powinna podążać z opóźnieniem 1–2 aktualizacji.
-6. Sprawdź „BOOT ≥3 s” (usunięcie kalibracji) i anulowanie kalibracji.
+## Ustawienia pomiaru
 
-Ograniczenia: trzy punkty dają tylko interpolację wewnątrz trójkąta;
-ludzie, drzwi i zmiana położenia AP zmieniają odczyty (kalibrację trzeba
-wtedy powtórzyć); telefony i hotspoty mogą się pojawiać i znikać; orientacja
-urządzenia i ciało użytkownika tłumią sygnał o kilka dB.
+W `src/AppConfig.h`: częstotliwość próbek (`kSampleRateHz`, domyślnie
+500 Hz, nie więcej niż 500 — czujnik jest odpytywany co 1 ms), zakres
+(`kRange`, domyślnie ±8 g) i tryb filtra (`kLowPassMode`, domyślnie 13,37%
+ODR = 67 Hz). **Odpytywanie, a nie przerwanie:** sygnał „dane gotowe” jest w
+QMI8658 na INT2, a na płytce wyprowadzone jest tylko INT1 (GPIO3), więc
+próbki są wykrywane odczytem rejestru statusu. Żeby opóźnienia
+odpytywania nie psuły FFT, znaczniki czasu liczy pętla fazowa
+(`include/SampleClock.h`): próbki mają równe odstępy, a brakujące są
+zliczane.
+
+## Kamera i rozpoznawanie numerów (plan)
+
+Kamera nie jest jeszcze obsługiwana. Przygotowane: piny są opisane, a numer
+zawieszki trafia do nagłówka pliku. Rozpoznawanie cyfr drukowanych da się
+zrobić na płytce małą siecią, ale numery malowane lub zabrudzone zwykle
+lepiej rozpoznawać poza urządzeniem na zapisanych zdjęciach (zdjęcie
+zawieszki zapisane obok pliku CSV tej samej sesji). Wybór ustalimy, gdy
+kamera będzie podłączona.
 
 ## Budowanie i wgranie
 
-PlatformIO Core lub rozszerzenie PlatformIO w VS Code:
+PlatformIO Core albo rozszerzenie do VS Code:
 
 ```powershell
 pio run
@@ -315,70 +187,79 @@ pio run -t upload --upload-port COM6
 pio device monitor --port COM6 --baud 115200
 ```
 
-COM6 to port wykryty podczas tworzenia projektu; może zmienić się po
-resecie lub na innym komputerze. Sprawdzenie: `pio device list`.
-Po wgraniu monitor podaje adres MPU6050 i `WHO_AM_I` (0x68 — oryginał; inna
-wartość to prawdopodobnie klon, zwykle też działa), informację „INT works”,
-a co sekundę `rate=` (oczekiwane ok. 200 Hz) i liczbę utraconych próbek.
-Jeżeli automatyczny upload nie działa: przytrzymaj BOOT, naciśnij RESET,
-puść BOOT, sprawdź port i ponów upload.
+Środowisko `waveshare` używa płytki ogólnej `esp32-s3-devkitc-1` z
+nadpisanymi ustawieniami pamięci: PSRAM oktalny (`qio_opi`), flash 16 MB,
+partycje `default_16MB.csv` (aplikacja ok. 6,25 MB). Dla tej płytki nie ma
+gotowej definicji PlatformIO. Platforma pioarduino 55.03.36 (Arduino 3.3.6,
+IDF 5.5.2); biblioteka: Adafruit ST7735/ST7789 1.11.0 (z Adafruit GFX).
+Pozostałe sterowniki (QMI8658, CST816D, ADC, karta SD, bus I2C) są własne lub
+z frameworka.
 
-Platforma jest przypięta do pioarduino 55.03.36 (Arduino 3.3.6, IDF 5.5.2).
-Biblioteki: ST7735/ST7789 1.11.0 i LC709203F 1.3.4; MPU6050 obsługuje własny
-sterownik (`src/Mpu6050.*`), bez biblioteki.
-Pakiety PlatformIO trafiają do ${sysenv.TEMP}/vibrationSensor-pio-core;
-pliki kompilacji do ${sysenv.TEMP}/vibrationSensor-pio-build.
-Oba katalogi znajdują się poza Dyskiem Google i ścieżką zawierającą polskie
-znaki (linker nie obsługuje jej poprawnie). Pierwsza instalacja
-pobiera kompilator i framework. Nie dodawać .pio do git.
+Gdy wgranie się nie udaje: przytrzymaj BOOT, podłącz USB, puść BOOT (tryb
+pobierania). Przy pustym flashu port USB może się ciągle restartować — wejście
+w tryb pobierania i wgranie programu to naprawia. Pakiety PlatformIO trafiają
+do `${sysenv.TEMP}/vibrationSensor-pio-core`, kompilacja do
+`${sysenv.TEMP}/vibrationSensor-pio-build` (poza Dyskiem Google i ścieżką z
+polskimi znakami).
 
-## Testy i sprawdzenie na sprzęcie
+## Testy
 
-Testy `test/signal_checks.cpp` wykonują rzeczywistą logikę jako
-C++17 constexpr/static_assert: min/max, przerwy, kolejność po zawinięciu
-bufora, offset, czyszczenie, rollover czasu, licznik ruchów oraz
-dekodowanie próbek MPU6050 (kolejność bajtów, znak, skala). Można je
-sprawdzić bez podłączonej płytki dowolnym kompilatorem C++17:
+Bez płytki, na komputerze (g++ z C++17):
 
 ```text
+g++ -std=c++17 -Wall -Wextra -Iinclude test/port_checks.cpp -o port_checks && ./port_checks
 g++ -std=c++17 -Iinclude -fsyntax-only test/signal_checks.cpp
 ```
 
-1. Po starcie potwierdź na porcie szeregowym `MPU6050: addr 0x68 ...` oraz
-   `MPU6050: INT works`; `rate=` ok. 200 Hz, drops=0.
-2. Połóż płytkę płasko: Z ≈ +9,8 m/s², X i Y bliskie zeru. MPU6050 bez
-   kalibracji ma typowo ±0,5 m/s² przesunięcia zera — to normalne; tara
-   (BOOT ≥1 s) je odejmuje.
-3. Obracaj czujnik: składowa grawitacji powinna przechodzić między osiami,
-   a moduł |a| zostać około 9,8 m/s² (1 g).
-4. Lekkie stuknięcie powinno być widoczne jako szczyt na paskach.
-5. Odłącz INT (A5) przy włączonym zasilaniu i zresetuj: powinien być
-   komunikat „no INT … polling every 5 ms”, a odczyt dalej działać.
-6. Odłącz SDA podczas pracy: ekran pokaże `BRAK MPU6050`, a po
-   podłączeniu odczyt wróci w ciągu kilku sekund. Nie zwieraj pinów.
-7. Sprawdź odczyt przez kilka minut w docelowym montażu na przewodzie
-   docelowej długości; zanotuj spadki częstotliwości.
+`port_checks` sprawdza: dekodowanie próbek QMI8658 (kolejność bajtów, znak,
+skale, kody ODR), zegar próbek (równomierność przy jitterze 1 ms, dryf 0,2%,
+zliczanie braków, zawinięcie licznika), gesty dotyku (tap, przeciągnięcia
+w czterech kierunkach, długie przytrzymanie, ignorowanie wolnego
+przeciągania i przekątnej, odporność na pojedynczy zgubiony odczyt),
+nawigację i przyciski paska, klawiaturę numeru, model akumulatora (krzywa,
+stany, mediana) oraz format plików (nazwy sesji, linie CSV, nagłówek).
+`signal_checks` sprawdza historię, FFT-owe okno i licznik ruchów.
 
-## Interpretacja i ograniczenia
+Podgląd ekranów: `tools/render_screens.sh <Adafruit-GFX> <katalog>` (potrzebny
+Python z Pillow).
 
-Akcelerometr mierzy grawitację razem z przyspieszeniami ruchu robota.
-Tara odejmuje stały wektor, a nie zmienną grawitację podczas obrotu
-ramienia ani przyspieszenia trajektorii. MPU6050 ma tolerancje typowe dla
-tanich modułów: przesunięcie zera rzędu ±50 mg (ok. ±0,5 m/s²), błąd
-czułości kilka procent i dryf z temperaturą; ta wersja niczego nie
-kalibruje.
+## Pierwsze włączenie — co sprawdzić
 
-Próbkowanie 200 Hz daje częstotliwość Nyquista 100 Hz, a filtr czujnika
-(94 Hz) tłumi wyższe składowe. Ten tryb nie wystarcza do szerokopasmowej
-diagnostyki łożysk. FFT to podgląd do połowy częstotliwości próbek; nie ma
-klasyfikacji usterek, zapisu ani oceny według norm przemysłowych.
-Sztywność mocowania magnetycznego i przewód również wpływają na wynik.
+Wszystko poniżej jest **niesprawdzone na sprzęcie**:
 
-I2C na ESP32-S3 pracuje tu z timeoutem 20 ms; po 20 kolejnych błędach
-odczytu firmware inicjuje magistralę od nowa, co uwalnia ją po zakłóceniu.
-Odczyt pracuje w osobnym zadaniu, aby ekran i przyciski nie opóźniały
-próbek.
+1. Port szeregowy: `IMU: QMI8658 ready, 500.0 Hz` i co sekundę `rate=` około
+   500. Wartość wyraźnie większa niż 500 oznacza, że flaga „dane gotowe” nie
+   czyści się przy odczycie (ostrzeżenie `duplicates?`).
+2. Obraz ma właściwe kolory (gdy kolory są odwrócone, to kwestia inwersji
+   ST7789) i orientację; dotknięcie lewej krawędzi powinno wywołać reakcję po
+   lewej (jeśli jest odwrócone — patrz „Orientacja”).
+3. Płasko: Z ≈ +9,8 m/s², X i Y blisko zera; po obróceniu grawitacja
+   przechodzi między osiami, a |a| zostaje ok. 9,8 m/s².
+4. Przeciągnięcie palcem zmienia strony w obu kierunkach; strzałki i BOOT
+   też.
+5. Karta SD: strona 8 pokazuje „KARTA GOTOWA”; `REC` → plik w `/LOGS`;
+   `STOP` → plik się zamyka; plik otwiera się w arkuszu/Pythonie.
+6. Akumulator: napięcie zgadza się z multimetrem; po podłączeniu USB stan
+   zmienia się na `LADOWANIE` (Rev 2.0). Jeśli stan ładowania jest odwrotny,
+   odwróć interpretację `kHasChargeDetect`/polaryzację w `hal/Battery.cpp`.
+7. Przy nagrywaniu 500 Hz sprawdź w liczniku „utracone próbki” przez kilka
+   minut (powinno być 0).
 
-Dokumentacja:
-- [Feather: piny, zasilanie, TFT i przyciski](https://learn.adafruit.com/adafruit-esp32-s3-tft-feather/pinouts)
-- [Platforma 55.03.36](https://github.com/pioarduino/platform-espressif32/releases/tag/55.03.36)
+## Ograniczenia
+
+- Pomiar jest szacunkiem tanim czujnikiem MEMS: typowo przesunięcie zera
+  rzędu ±0,1 m/s² i błąd czułości kilka procent; niczego nie kalibrujemy
+  (do usunięcia przesunięcia służy TARA).
+- 500 Hz próbek i filtr 67 Hz nie wystarczają do szerokopasmowej diagnostyki
+  łożysk; to podgląd drgań, a nie ocena według norm. Gdy potrzebne jest
+  więcej pasma, zwiększ `kLowPassMode`/ODR (z odpowiednim odpytywaniem).
+- Dotyk jest pojedynczy (bez gestów dwoma palcami).
+- Procent akumulatora to oszacowanie z napięcia, bez układu pomiarowego.
+
+## Wcześniejsze wersje
+
+Projekt powstał na Adafruit Feather ESP32-S3 TFT (BNO085, potem MPU6050).
+Kod prototypu nawigacji po Wi-Fi (`src/indoor_positioning/`,
+`src/NavigationScreen.*`, testy `test/ips_checks.cpp`) został w repozytorium,
+ale nie jest budowany dla tej płytki (`build_src_filter` w `platformio.ini`).
+Algorytmy (historia, FFT, licznik ruchów) są wspólne i mają testy.
