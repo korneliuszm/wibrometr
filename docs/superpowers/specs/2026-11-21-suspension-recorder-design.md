@@ -44,7 +44,7 @@ wykres XYZ w czasie z linią progu, pasek progu z przyciskami −/+, licznik
 pomiarów, rozmiar karty w MB.
 
 **CSV:** nagłówek `#` (numer, próg, częstotliwość, zakres, pre-trigger,
-cisza), kolumny `t_ms,ax_m_s2,ay_m_s2,az_m_s2` (osie czujnika), czas względem
+cisza), wiersz `# columns:` oraz zwykły wiersz nazw kolumn `t_ms,ax_m_s2,ay_m_s2,az_m_s2` (osie czujnika; pandas `comment='#'` i arkusze dostają nazwy kolumn), czas względem
 początku pliku (ujemny przed wyzwoleniem). Numer pomiaru = największy w `/MEAS`
 + 1. Plik kończy stopka `# end: samples=… dropped=…`.
 
@@ -71,8 +71,9 @@ Zmiany i doprecyzowania względem tekstu powyżej, podjęte w trakcie realizacji
    100 ms; wielkość kroku 0,1 poniżej 5,0, 0,5 od 5,0 do 20,0, 1,0 powyżej
    (zamiast „przyspieszenia”).
 4. **Brak karty przy starcie:** ekran pokazuje „BRAK KARTY - WLOZ I RESET”;
-   karta jest podejmowana dopiero po RESET (USB MSC jest rejestrowane przy
-   starcie).
+   napis dotyczy braku karty przy starcie. Zapis wznawia się sam po włożeniu
+   karty (ponowna próba montowania co 3 s); RESET jest potrzebny tylko dla
+   dysku USB (USB MSC jest rejestrowane przy starcie).
 5. **„USB podłączone”** = host wyliczył urządzenie, a magistrala nie jest
    uśpiona (`tud_mounted() && !tud_suspended()`); niesprawdzone na sprzęcie.
    Znane ryzyko: host usypiający zamontowany wolumin (uśpienie/autosuspend)

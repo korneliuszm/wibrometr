@@ -57,9 +57,14 @@ static void formatChecks() {
   char buf[512];
   const measfmt::Header h{7, 20, 500.f, 8.f, 1.f, 3.f};
   const std::string header(buf, measfmt::formatHeader(buf, sizeof buf, h));
-  bool allComments = !header.empty();
-  for (std::size_t i = 0; i < header.size(); ++i)
-    if ((i == 0 || header[i - 1] == '\n') && header[i] != '#') allComments = false;
+  // Every line is a '#' comment except the final plain column-names line.
+  const char *columnLine = "t_ms,ax_m_s2,ay_m_s2,az_m_s2\n";
+  const std::size_t columnLen = std::strlen(columnLine);
+  CHECK(header.size() > columnLen && header.compare(header.size() - columnLen, columnLen, columnLine) == 0);
+  const std::string comments = header.size() > columnLen ? header.substr(0, header.size() - columnLen) : "";
+  bool allComments = !comments.empty();
+  for (std::size_t i = 0; i < comments.size(); ++i)
+    if ((i == 0 || comments[i - 1] == '\n') && comments[i] != '#') allComments = false;
   CHECK(allComments);
   CHECK(contains(header, "# measurement: 7\n"));
   CHECK(contains(header, "# threshold_m_s2: 2.0\n"));
@@ -69,8 +74,8 @@ static void formatChecks() {
   CHECK(contains(header, "# quiet_s: 3.0\n"));
   CHECK(contains(header, "# trigger_at: t_ms = 0\n"));
   const char *columns = "# columns: t_ms,ax_m_s2,ay_m_s2,az_m_s2\n";
-  CHECK(header.size() >= std::strlen(columns) &&
-        header.compare(header.size() - std::strlen(columns), std::string::npos, columns) == 0);
+  CHECK(comments.size() >= std::strlen(columns) &&
+        comments.compare(comments.size() - std::strlen(columns), std::string::npos, columns) == 0);
 
   const std::string footer(buf, measfmt::formatFooter(buf, sizeof buf, 1234, 5));
   CHECK(footer == "# end: samples=1234 dropped=5\n");

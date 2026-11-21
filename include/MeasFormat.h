@@ -10,7 +10,9 @@
 // no file or Arduino access, tested on a PC.
 //
 // One file per measurement: /MEAS/M0001.CSV, M0002.CSV, ... A header of '#'
-// comment lines carries the parameters, then one CSV line per sample:
+// comment lines carries the parameters, then a plain column-names line (so
+// pandas comment='#' and spreadsheets get column names), then one CSV line per
+// sample:
 //   t_ms,ax,ay,az      time relative to the trigger (negative = pre-trigger)
 // The file ends with a '#' footer line with sample and drop counts.
 namespace measfmt {
@@ -65,7 +67,8 @@ inline std::size_t formatHeader(char *out, std::size_t size, const Header &h) {
                                 "# wibrometr measurement v1\n# device: ESP32-S3-Touch-LCD-2, QMI8658\n"
                                 "# measurement: %u\n# threshold_m_s2: %s%u.%u\n# sample_rate_hz: %.1f\n"
                                 "# range_g: %.0f\n# pre_trigger_s: %.1f\n# quiet_s: %.1f\n"
-                                "# trigger_at: t_ms = 0\n# columns: t_ms,ax_m_s2,ay_m_s2,az_m_s2\n",
+                                "# trigger_at: t_ms = 0\n# columns: t_ms,ax_m_s2,ay_m_s2,az_m_s2\n"
+                                "t_ms,ax_m_s2,ay_m_s2,az_m_s2\n",
                                 h.number, thr < 0 ? "-" : "", thrAbs / 10, thrAbs % 10, h.sampleRateHz,
                                 h.rangeG, h.preRollS, h.quietS),
                   size);

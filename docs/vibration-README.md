@@ -43,11 +43,11 @@ widać `pomiarow: -   brak karty`.
 | `CZUWAM` (zielony) | czujnik działa, karta gotowa, czeka na przekroczenie progu |
 | `● NAGRYWAM 3.2s M0007` (czerwona kropka) | trwa zapis pomiaru; czas od wyzwolenia i numer pliku |
 | `USB: KARTA U KOMPUTERA` (niebieski) | komputer ma kartę (albo oddawanie jest w toku); nic się nie nagrywa, na wykresie `ZAPIS WSTRZYMANY` |
-| `BRAK KARTY - WLOZ I RESET` (żółty) | brak karty; po włożeniu karty trzeba nacisnąć RESET |
+| `BRAK KARTY - WLOZ I RESET` (żółty) | brak karty przy starcie; zapis rusza sam po włożeniu karty (ponowna próba co 3 s), ale dysk USB pojawi się dopiero po RESET |
 | `BLAD: <przyczyna>` (czerwony) | błąd karty, np. `blad zapisu na karte`, `nie mozna utworzyc /MEAS`, `numeracja pelna` |
 | `BRAK CZUJNIKA` (żółty) | karta w porządku, ale czujnik nie daje próbek (komunikat jest też na wykresie) |
 
-Kolejność: USB, potem NAGRYWAM, potem problemy z kartą, potem brak czujnika,
+Kolejność: USB, potem NAGRYWAM (tylko gdy zapis działa), potem problemy z kartą, potem brak czujnika,
 na końcu CZUWAM.
 
 ### Próg
@@ -108,6 +108,7 @@ Przyspieszenia w m/s² w osiach czujnika, trzy miejsca po przecinku.
 # quiet_s: 3.0
 # trigger_at: t_ms = 0
 # columns: t_ms,ax_m_s2,ay_m_s2,az_m_s2
+t_ms,ax_m_s2,ay_m_s2,az_m_s2
 -1000.000,0.112,-0.087,9.791
 -998.000,0.109,-0.090,9.803
 -996.000,0.115,-0.085,9.798
@@ -115,16 +116,16 @@ Przyspieszenia w m/s² w osiach czujnika, trzy miejsca po przecinku.
 # end: samples=2750 dropped=0
 ```
 
-(Wartości w przykładzie są ilustracyjne.) Wiersze z `#` to nagłówek i stopka;
+(Wartości w przykładzie są ilustracyjne.) Wiersze z `#` to nagłówek i stopka, a zwykły wiersz `t_ms,ax_m_s2,…` to nazwy kolumn;
 `dropped` to próbki utracone przy zapisie (kolejka pełna, karta za wolna).
 Otwieranie w Pythonie:
 
 ```python
 import pandas as pd
-df = pd.read_csv("M0007.CSV", comment="#")
+df = pd.read_csv("M0007.CSV", comment="#")  # kolumny: t_ms, ax_m_s2, ay_m_s2, az_m_s2
 ```
 
-Arkusze kalkulacyjne zwykle też pomijają lub tolerują wiersze `#`.
+Arkusze kalkulacyjne pokażą wiersze `#` jako zwykły tekst; nazwy kolumn są w pierwszym wierszu bez `#`.
 
 ## Ustawienia stałe
 
@@ -211,8 +212,5 @@ Wszystko poniżej jest **niesprawdzone na sprzęcie**:
 - Żółte linie progu na wykresie dotyczą pojedynczych osi, a wyzwalacz liczy
   długość wektora, więc wyzwolenie może nastąpić, gdy żadna oś nie przekracza
   linii.
-- Nagłówek pokazuje `NAGRYWAM`, gdy rdzeń rejestratora nagrywa, nawet jeśli
-  zapis na kartę zawiódł (wtedy próbki są odrzucane); stan karty
-  sprawdzisz na porcie szeregowym (`SD ...`).
-- Brak karty przy starcie wymaga RESET po jej włożeniu.
+- Karta włożona po starcie: zapis wznawia się sam (próba co 3 s), napis `BRAK KARTY - WLOZ I RESET` znika. RESET jest potrzebny tylko dla dysku USB (rejestrowany przy starcie).
 - Płytka nie ma zegara czasu rzeczywistego: w plikach nie ma daty.
