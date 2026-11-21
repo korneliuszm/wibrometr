@@ -36,7 +36,8 @@ void notice(GFXcanvas16 &c, uint16_t color, const char *s) {
 // Header, by priority:
 //   1. USB (host owns the card, or the hand-over is still under way): nothing is
 //      recorded, and the card is not the recorder's to report on.
-//   2. NAGRYWAM: a measurement is being written.
+//   2. NAGRYWAM: a measurement is being written (core Recording and the writer
+//      Idle or Recording; with NoCard/Error samples are discarded, so fall through).
 //   3. Card problems (BRAK KARTY, BLAD): nothing could be recorded even with a sensor.
 //   4. BRAK CZUJNIKA: card fine, no samples. A lost sensor is also shown in the
 //      chart area whatever the header says (drawChart), so it is never hidden.
@@ -44,7 +45,8 @@ void notice(GFXcanvas16 &c, uint16_t color, const char *s) {
 void drawHeader(GFXcanvas16 &c, const VibModel &m) {
   if (m.hostOwns || m.mode == RecorderCore::Mode::Usb || m.sd.state == MeasStatus::State::Parked) {
     text(c, 0, kHeaderY, 2, ui::blue, "USB: KARTA U KOMPUTERA");
-  } else if (m.mode == RecorderCore::Mode::Recording) {
+  } else if (m.mode == RecorderCore::Mode::Recording &&
+             (m.sd.state == MeasStatus::State::Idle || m.sd.state == MeasStatus::State::Recording)) {
     c.fillCircle(7, kHeaderY + 7, 6, ui::red);
     textf(c, 18, kHeaderY, 2, ui::white, "NAGRYWAM %.1fs M%04u", m.sd.recordingMs / 1000.0f, m.sd.number);
   } else if (m.sd.state == MeasStatus::State::NoCard) {
