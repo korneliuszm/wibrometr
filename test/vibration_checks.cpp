@@ -13,6 +13,7 @@
 #include "ThresholdUi.h"
 #include "UsbOwnership.h"
 #include "CardGate.h"
+#include "CardHandover.h"
 
 static int failures = 0;
 #define CHECK(cond)                                                    \
@@ -435,6 +436,110 @@ static void gateChecks() {
   CHECK(g.release());
 }
 
+// Drives CardHandover like main.cpp does, with a fake gate and writer.
+struct HandoverRig {
+  CardHandover h;
+  CardGate gate;
+  bool coreUsb = false;     // RecorderCore reaches Usb one loop after the request.
+  bool usbRequested = false, parked = false;
+  int parks = 0, unparks = 0, releaseCalls = 0;
+  bool inflight = false;    // A USB transfer is inside the gate.
+  bool violation = false;   // unpark while a transfer runs, or without a park.
+
+  CardHandover::Actions loop(bool hostOwns) {
+    coreUsb = usbRequested;
+    const CardHandover::Actions a = h.step(hostOwns, coreUsb, [&] {
+      ++releaseCalls;
+      return gate.release();
+    });
+    if (a.grant) gate.grant();
+    if (a.usbOn) usbRequested = true;
+    if (a.park) { ++parks; parked = true; }
+    if (a.unpark) {
+      if (inflight || !parked || unparks >= parks) violation = true;
+      ++unparks;
+      parked = false;
+    }
+    if (a.usbOff) usbRequested = false;
+    return a;
+  }
+  // A host transfer attempt; true when it may touch the card (then in flight).
+  bool startTransfer() {
+    if (!gate.enter()) return false;
+    if (!parked) { gate.leave(); return false; }
+    inflight = true;
+    return true;
+  }
+  void endTransfer() { inflight = false; gate.leave(); }
+};
+
+static void handoverChecks() {
+  {  // Plain connect -> eject -> disconnect cycle.
+    HandoverRig r;
+    CardHandover::Actions a = r.loop(true);
+    CHECK(a.usbOn && a.grant && !a.park);
+    a = r.loop(true);
+    CHECK(a.park && !a.usbOn);
+    CHECK(r.loop(true).grant && r.parks == 1);
+    CHECK(r.startTransfer());
+    r.endTransfer();
+    a = r.loop(false);  // Eject.
+    CHECK(a.unpark && a.usbOff && r.unparks == 1);
+    a = r.loop(false);  // Disconnect: nothing more.
+    CHECK(!a.unpark && !a.usbOff && !a.grant && !a.park);
+    CHECK(!r.startTransfer() && !r.violation);
+  }
+  {  // Host re-accesses after the eject while the release is pending.
+    HandoverRig r;
+    r.loop(true);
+    r.loop(true);
+    CHECK(r.parked);
+    CHECK(r.startTransfer());     // Access after eject: transfer runs...
+    CardHandover::Actions a = r.loop(false);  // ...main saw hostOwns false first.
+    CHECK(!a.unpark && !a.usbOff && r.releaseCalls == 1);
+    r.endTransfer();
+    a = r.loop(true);             // onAccess gave the card back to the host.
+    CHECK(a.grant && !a.usbOn && !a.unpark && !a.park);
+    CHECK(r.startTransfer());     // Not left revoked.
+    r.endTransfer();
+    CHECK(r.loop(true).grant && r.parks == 1 && r.unparks == 0 && !r.violation);
+  }
+  {  // Rapid flap true -> false -> true before the park.
+    HandoverRig r;
+    CHECK(r.loop(true).usbOn);
+    CardHandover::Actions a = r.loop(false);
+    CHECK(a.usbOff && !a.unpark && !a.park);  // Never parked: nothing to unpark.
+    a = r.loop(true);
+    CHECK(a.usbOn && a.grant && !a.park);
+    CHECK(r.loop(true).park);
+    CHECK(r.startTransfer());
+    r.endTransfer();
+    CHECK(r.parks == 1 && r.unparks == 0 && !r.violation);
+  }
+  {  // Cable pulled while a transfer is running.
+    HandoverRig r;
+    r.loop(true);
+    r.loop(true);
+    CHECK(r.startTransfer());
+    for (int i = 0; i < 5; ++i) {
+      const CardHandover::Actions a = r.loop(false);
+      CHECK(!a.unpark && !a.usbOff);
+    }
+    CHECK(r.releaseCalls == 5);
+    r.endTransfer();
+    CHECK(!r.startTransfer());    // Revoked: refused while releasing.
+    CardHandover::Actions a = r.loop(false);
+    CHECK(a.unpark && a.usbOff && r.unparks == 1 && !r.violation);
+    CHECK(!r.startTransfer());
+    a = r.loop(true);             // Re-plugged later: works again.
+    CHECK(a.usbOn && a.grant);
+    r.loop(true);
+    CHECK(r.startTransfer());
+    r.endTransfer();
+    CHECK(r.parks == 2 && !r.violation);
+  }
+}
+
 int main() {
   formatChecks();
   ringChecks();
@@ -442,6 +547,7 @@ int main() {
   coreChecks();
   uiChecks();
   gateChecks();
+  handoverChecks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

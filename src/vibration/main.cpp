@@ -4,6 +4,7 @@
 // Skeleton: sensor task, SD writer and USB disk, status on Serial once per second.
 // The screen and touch threshold setting come in Task 7.
 #include <Arduino.h>
+#include "CardHandover.h"
 #include "RecorderCore.h"
 #include "MeasWriter.h"
 #include "UsbOwnership.h"
@@ -24,30 +25,16 @@ UsbOwnership own;
 VibImuTask imuTask;
 QueueHandle_t events = nullptr;
 
-// TODO(Task 7): replaced by the final main loop. Host takes the card: stop
-// measuring (RecorderCore closes an open measurement), then park the writer once
-// the core is in Usb mode. Host lets go: wait until no USB transfer is running
-// (usbsd::release), then remount and measure again.
+// TODO(Task 7): moves into the final main loop. Decisions: CardHandover.h.
 void handOverCard() {
-  static bool usbWanted = false, parkRequested = false;
-  const bool hostOwns = own.hostOwns();
-  if (hostOwns && !usbWanted) {
-    usbWanted = true;
-    usbsd::grant();
-    core.requestUsb(true);
-  }
-  if (usbWanted && !parkRequested && core.mode() == RecorderCore::Mode::Usb) {
-    parkRequested = true;
-    writer.park();
-  }
-  // A host that takes the card back meanwhile is handled on a later loop:
-  // the release finishes first, then the rising edge above grants again.
-  if (!hostOwns && usbWanted && usbsd::release()) {
-    usbWanted = false;
-    if (parkRequested) writer.unpark();
-    parkRequested = false;
-    core.requestUsb(false);
-  }
+  static CardHandover handover;
+  const CardHandover::Actions a = handover.step(
+      own.hostOwns(), core.mode() == RecorderCore::Mode::Usb, [] { return usbsd::release(); });
+  if (a.grant) usbsd::grant();
+  if (a.usbOn) core.requestUsb(true);
+  if (a.park) writer.park();
+  if (a.unpark) writer.unpark();
+  if (a.usbOff) core.requestUsb(false);
 }
 
 const char *stateName(MeasStatus::State s) {
