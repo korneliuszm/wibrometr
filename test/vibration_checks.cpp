@@ -1,8 +1,14 @@
 #include <cstdio>
 #include <cstring>
+#include <cmath>
+#include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "MeasFormat.h"
+#include "SampleRing.h"
+#include "TriggerDetector.h"
 
 static int failures = 0;
 #define CHECK(cond)                                                    \
@@ -65,8 +71,92 @@ static void formatChecks() {
   CHECK(footer == "# end: samples=1234 dropped=5\n");
 }
 
+static void ringChecks() {
+  SampleRing<4> r;
+  CHECK(r.size() == 0);
+  for (uint32_t i = 1; i <= 6; ++i) r.push(i * 1000, Accel{float(i), 0, 0});
+  CHECK(r.size() == 4);
+  CHECK(r.at(0).tUs == 3000 && r.at(0).a.x == 3.0f);
+  CHECK(r.at(3).tUs == 6000 && r.at(3).a.x == 6.0f);
+  r.clear();
+  CHECK(r.size() == 0);
+}
+
+using TimedEvent = std::pair<uint32_t, TriggerDetector::Event>;
+
+static std::vector<TimedEvent> feed(TriggerDetector &d, uint32_t tStartUs, float seconds,
+                                    const std::function<Accel(float)> &gen, float thresholdMs2) {
+  std::vector<TimedEvent> out;
+  const uint32_t n = uint32_t(seconds * 500.0f + 0.5f);
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t t = tStartUs + i * 2000;
+    const auto e = d.update(t, gen(float(t) * 1e-6f), thresholdMs2);
+    if (e != TriggerDetector::Event::None) out.push_back({t, e});
+  }
+  return out;
+}
+
+static Accel gravity(float) { return Accel{0, 0, 9.81f}; }
+static Accel burst(float t) {  // 10 Hz, 5 m/s2 on X from t=3 s for 5 s
+  if (t < 3.0f || t >= 8.0f) return gravity(t);
+  return Accel{5.0f * std::sin(2.0f * 3.14159265f * 10.0f * (t - 3.0f)), 0, 9.81f};
+}
+static Accel burstFromZero(float t) { return Accel{5.0f * std::sin(2.0f * 3.14159265f * 10.0f * t), 0, 9.81f}; }
+
+static void triggerChecks() {
+  using E = TriggerDetector::Event;
+  {
+    TriggerDetector d;
+    CHECK(feed(d, 0, 5.0f, gravity, 2.0f).empty());
+  }
+  {
+    TriggerDetector d;
+    const auto tilt = [](float t) {
+      const float ang = 1.5707963f * t / 30.0f;
+      return Accel{9.81f * std::sin(ang), 0, 9.81f * std::cos(ang)};
+    };
+    CHECK(feed(d, 0, 30.0f, tilt, 2.0f).empty());
+  }
+  {
+    TriggerDetector d;
+    const auto ev = feed(d, 0, 14.0f, burst, 2.0f);
+    CHECK(ev.size() == 2);
+    if (ev.size() == 2) {
+      CHECK(ev[0].second == E::Start && ev[0].first >= 3000000 && ev[0].first <= 3100000);
+      // last above-threshold sample is ~7.992 s, so Stop lands at ~10.994 s
+      CHECK(ev[1].second == E::Stop && ev[1].first >= 10990000 && ev[1].first <= 11100000);
+    }
+  }
+  {
+    TriggerDetector d;
+    const auto ev = feed(d, 0, 3.0f, burstFromZero, 2.0f);
+    CHECK(!ev.empty());
+    if (!ev.empty()) CHECK(ev[0].second == E::Start && ev[0].first >= 1000000 && ev[0].first <= 1100000);
+  }
+  {
+    TriggerDetector d;
+    feed(d, 0, 2.0f, burstFromZero, 2.0f);
+    CHECK(d.recording());
+    d.reset();
+    CHECK(!d.recording());
+    CHECK(feed(d, 2000000, 0.99f, burstFromZero, 2.0f).empty());
+    CHECK(d.deviation() >= 0.0f);
+  }
+  {
+    TriggerDetector d;
+    feed(d, 0, 2.0f, burstFromZero, 2.0f);
+    CHECK(d.recording());
+    d.cancelRecording();
+    CHECK(!d.recording());
+    const auto ev = feed(d, 2000000, 0.1f, burstFromZero, 2.0f);
+    CHECK(!ev.empty() && ev[0].second == E::Start);
+  }
+}
+
 int main() {
   formatChecks();
+  ringChecks();
+  triggerChecks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;
