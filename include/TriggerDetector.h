@@ -23,6 +23,7 @@ public:
 
   void reset() {
     haveFirst_ = false;
+    warmedUp_ = false;
     recording_ = false;
     belowSince_ = false;
     dyn_ = {};
@@ -39,6 +40,8 @@ public:
       lp_.z += alpha_ * (a.z - lp_.z);
     }
     dyn_ = {a.x - lp_.x, a.y - lp_.y, a.z - lp_.z};
+    // Latched so the uint32 clock wrapping (~71.6 min) cannot re-block Start.
+    if (!warmedUp_ && static_cast<uint32_t>(tUs - firstUs_) >= cfg_.warmupUs) warmedUp_ = true;
     const bool above = deviation() >= thresholdMs2;
     if (recording_) {
       if (above) {
@@ -53,7 +56,7 @@ public:
       }
       return Event::None;
     }
-    if (above && static_cast<uint32_t>(tUs - firstUs_) >= cfg_.warmupUs) {
+    if (above && warmedUp_) {
       recording_ = true;
       belowSince_ = false;
       return Event::Start;
@@ -73,6 +76,6 @@ private:
   Config cfg_;
   float alpha_ = 0;
   Accel lp_{}, dyn_{};
-  bool haveFirst_ = false, recording_ = false, belowSince_ = false;
+  bool haveFirst_ = false, warmedUp_ = false, recording_ = false, belowSince_ = false;
   uint32_t firstUs_ = 0, belowStartUs_ = 0;
 };

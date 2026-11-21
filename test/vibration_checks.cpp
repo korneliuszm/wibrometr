@@ -139,8 +139,11 @@ static void triggerChecks() {
     CHECK(d.recording());
     d.reset();
     CHECK(!d.recording());
-    CHECK(feed(d, 2000000, 0.99f, burstFromZero, 2.0f).empty());
-    CHECK(d.deviation() >= 0.0f);
+    // first sample after reset() seeds the high-pass filter: no dynamic part yet
+    d.update(2000000, burstFromZero(2.0f), 2.0f);
+    const Accel dyn = d.dynamic();
+    CHECK(std::fabs(dyn.x) < 1e-6f && std::fabs(dyn.y) < 1e-6f && std::fabs(dyn.z) < 1e-6f);
+    CHECK(feed(d, 2002000, 0.98f, burstFromZero, 2.0f).empty());
   }
   {
     TriggerDetector d;
@@ -150,6 +153,37 @@ static void triggerChecks() {
     CHECK(!d.recording());
     const auto ev = feed(d, 2000000, 0.1f, burstFromZero, 2.0f);
     CHECK(!ev.empty() && ev[0].second == E::Start);
+  }
+  {
+    // Warm-up must survive the uint32 microsecond clock wrapping (~71.6 min).
+    TriggerDetector d;
+    const uint32_t t0 = 0xFFFFF000u;
+    const auto wave = [](uint32_t i) {
+      return Accel{5.0f * std::sin(2.0f * 3.14159265f * 10.0f * float(i) * 0.002f), 0, 9.81f};
+    };
+    std::vector<TimedEvent> ev;
+    for (uint32_t i = 0; i < 1000; ++i) {  // 2 s burst spanning the wrap
+      const uint32_t t = t0 + i * 2000;
+      const auto e = d.update(t, wave(i), 2.0f);
+      if (e != E::None) ev.push_back({t, e});
+    }
+    CHECK(ev.size() == 1);
+    if (!ev.empty()) {
+      const uint32_t since = ev[0].first - t0;
+      CHECK(ev[0].second == E::Start && since >= 1000000 && since <= 1100000);
+    }
+    d.cancelRecording();
+    // Quiet samples once a second until a full 2^32 us have elapsed since the first sample.
+    uint32_t t = t0 + 2000000;
+    for (uint32_t k = 0; k < 4292; ++k, t += 1000000) CHECK(d.update(t, gravity(0), 2.0f) == E::None);
+    t = t0 + 100000;  // == t0 + 2^32 + 0.1 s: wrapped elapsed time looks like 0.1 s
+    ev.clear();
+    for (uint32_t i = 0; i < 100; ++i) {
+      const uint32_t ti = t + i * 2000;
+      const auto e = d.update(ti, wave(i), 2.0f);
+      if (e != E::None) ev.push_back({ti, e});
+    }
+    CHECK(!ev.empty() && ev[0].second == E::Start && uint32_t(ev[0].first - t) <= 20000);
   }
 }
 
