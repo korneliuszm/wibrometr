@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "MeasFormat.h"
+#include "RecorderCore.h"
 #include "SampleRing.h"
 #include "TriggerDetector.h"
 
@@ -187,10 +188,185 @@ static void triggerChecks() {
   }
 }
 
+struct FakeSink : MeasSink {
+  struct Call {
+    char kind;  // 'o' open, 'w' write, 'c' close
+    int32_t relUs;
+    int thresholdDeci;
+    bool ok;
+    uint32_t at;  // test clock when the call happened
+  };
+  std::vector<Call> calls;
+  bool acceptOpen = true;
+  uint32_t now = 0;
+  bool open(int thresholdDeci) override {
+    calls.push_back({'o', 0, thresholdDeci, acceptOpen, now});
+    return acceptOpen;
+  }
+  void write(int32_t relUs, const Accel &) override { calls.push_back({'w', relUs, 0, true, now}); }
+  void close() override { calls.push_back({'c', 0, 0, true, now}); }
+  std::size_t count(char kind) const {
+    std::size_t n = 0;
+    for (const auto &c : calls) n += c.kind == kind;
+    return n;
+  }
+  std::vector<Call> only(char kind) const {
+    std::vector<Call> out;
+    for (const auto &c : calls)
+      if (c.kind == kind) out.push_back(c);
+    return out;
+  }
+};
+
+static void feedCore(RecorderCore &core, FakeSink &sink, uint32_t tStartUs, float seconds,
+                     const std::function<Accel(float)> &gen) {
+  const uint32_t n = uint32_t(seconds * 500.0f + 0.5f);
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t t = tStartUs + i * 2000;
+    sink.now = t;
+    core.onSample(t, gen(float(t) * 1e-6f), sink);
+  }
+}
+
+static Accel impulse(float t) {  // 10 Hz, 5 m/s2 on X from t=3 s for 2 s
+  if (t < 3.0f || t >= 5.0f) return gravity(t);
+  return Accel{5.0f * std::sin(2.0f * 3.14159265f * 10.0f * (t - 3.0f)), 0, 9.81f};
+}
+
+static void coreChecks() {
+  using M = RecorderCore::Mode;
+  {  // silence
+    RecorderCore core;
+    FakeSink sink;
+    feedCore(core, sink, 0, 5.0f, gravity);
+    CHECK(sink.calls.empty());
+    CHECK(core.mode() == M::Armed);
+  }
+  {  // one impulse -> one measurement with 1 s pre-roll
+    RecorderCore core;
+    FakeSink sink;
+    CHECK(core.thresholdDeci() == 20);
+    feedCore(core, sink, 0, 9.0f, impulse);
+    const auto opens = sink.only('o');
+    CHECK(opens.size() == 1 && opens[0].thresholdDeci == 20);
+    const auto writes = sink.only('w');
+    CHECK(!writes.empty());
+    if (!writes.empty()) CHECK(writes[0].relUs >= -1000000 && writes[0].relUs <= -998000);
+    std::size_t zeros = 0;
+    bool step2000 = true;
+    for (std::size_t i = 0; i < writes.size(); ++i) {
+      zeros += writes[i].relUs == 0;
+      if (i && writes[i].relUs - writes[i - 1].relUs != 2000) step2000 = false;
+    }
+    CHECK(zeros == 1);
+    CHECK(step2000);
+    const auto closes = sink.only('c');
+    CHECK(closes.size() == 1);
+    // Stop fires 3 s after the last above-threshold sample, which is a few ms before the
+    // impulse ends at 5.0 s (same as in Task 2), so the lower bound is 7.98 s, not 8.0 s.
+    if (closes.size() == 1) CHECK(closes[0].at >= 7980000 && closes[0].at <= 8100000);
+    CHECK(!sink.calls.empty() && sink.calls.back().kind == 'c');  // nothing written after close
+    CHECK(core.mode() == M::Armed);
+  }
+  {  // refused open -> holdoff between attempts
+    RecorderCore core;
+    FakeSink sink;
+    sink.acceptOpen = false;
+    feedCore(core, sink, 0, 3.0f, burstFromZero);
+    const auto refused = sink.only('o');
+    CHECK(!refused.empty() && refused.size() <= 3);
+    for (std::size_t i = 1; i < refused.size(); ++i) CHECK(refused[i].at - refused[i - 1].at >= 1000000);
+    CHECK(sink.count('w') == 0 && sink.count('c') == 0);
+    CHECK(core.mode() == M::Armed);
+    sink.acceptOpen = true;
+    const std::size_t before = sink.calls.size();
+    feedCore(core, sink, 3000000, 1.5f, burstFromZero);
+    std::size_t nextOpen = before;
+    while (nextOpen < sink.calls.size() && sink.calls[nextOpen].kind != 'o') ++nextOpen;
+    CHECK(nextOpen < sink.calls.size());
+    if (nextOpen < sink.calls.size() && !refused.empty()) {
+      const auto &o = sink.calls[nextOpen];
+      CHECK(o.ok && o.at - refused.back().at >= 1000000 && o.at - refused.back().at <= 1100000);
+    }
+    CHECK(core.mode() == M::Recording && sink.count('w') > 0);
+  }
+  {  // USB request during a measurement
+    RecorderCore core;
+    FakeSink sink;
+    feedCore(core, sink, 0, 1.5f, burstFromZero);
+    CHECK(core.mode() == M::Recording);
+    core.requestUsb(true);
+    core.service(sink);
+    CHECK(sink.count('c') == 1);
+    CHECK(core.mode() == M::Usb);
+    const std::size_t inUsb = sink.calls.size();
+    feedCore(core, sink, 1500000, 2.0f, burstFromZero);
+    core.requestUsb(true);  // repeated request while already in USB mode
+    core.service(sink);
+    core.onGap(sink);  // gap in USB mode keeps USB and touches no sink
+    CHECK(core.mode() == M::Usb);
+    CHECK(sink.calls.size() == inUsb);
+    core.requestUsb(false);
+    core.service(sink);
+    CHECK(core.mode() == M::Armed);
+    feedCore(core, sink, 3500000, 0.99f, burstFromZero);  // warm-up again
+    CHECK(sink.calls.size() == inUsb);
+    feedCore(core, sink, 4490000, 0.2f, burstFromZero);
+    CHECK(sink.count('o') == 2 && core.mode() == M::Recording);
+  }
+  {  // gap: close, and the next measurement holds no pre-gap samples
+    TriggerDetector::Config cfg;
+    cfg.warmupUs = 100000;  // shorter than the pre-roll so stale ring entries would be in its window
+    RecorderCore core(cfg);
+    FakeSink sink;
+    feedCore(core, sink, 0, 1.0f, burstFromZero);
+    CHECK(core.mode() == M::Recording);
+    core.onGap(sink);
+    CHECK(sink.count('c') == 1);
+    CHECK(core.mode() == M::Armed);
+    const std::size_t afterGap = sink.calls.size();
+    const uint32_t resumeUs = 1200000;
+    feedCore(core, sink, resumeUs, 1.0f, burstFromZero);
+    std::size_t o = afterGap;
+    while (o < sink.calls.size() && sink.calls[o].kind != 'o') ++o;
+    CHECK(o < sink.calls.size());
+    if (o < sink.calls.size()) {
+      const uint32_t trig = sink.calls[o].at;
+      bool firstSeen = false, ok = true;
+      for (std::size_t i = o + 1; i < sink.calls.size(); ++i) {
+        const auto &c = sink.calls[i];
+        if (c.kind != 'w') continue;
+        if (c.relUs < -1000000) ok = false;
+        if (!firstSeen) {
+          firstSeen = true;
+          CHECK(int64_t(trig) + c.relUs >= int64_t(resumeUs));
+        }
+      }
+      CHECK(firstSeen && ok);
+    }
+  }
+  {  // raising the threshold mid-measurement ends it 3 s later
+    RecorderCore core;
+    FakeSink sink;
+    feedCore(core, sink, 0, 2.0f, burstFromZero);
+    CHECK(core.mode() == M::Recording);
+    core.setThresholdDeci(400);
+    CHECK(core.thresholdDeci() == 400);
+    feedCore(core, sink, 2000000, 4.0f, burstFromZero);
+    const auto closes = sink.only('c');
+    CHECK(closes.size() == 1);
+    // The quiet run may already have begun at a sub-threshold sample near the last sine
+    // zero-crossing before 2.0 s (it does at 1.994 s), so Stop lands at ~4.994 s, not 5.0 s.
+    if (closes.size() == 1) CHECK(closes[0].at >= 4980000 && closes[0].at <= 5010000);
+    CHECK(core.mode() == M::Armed);
+  }
+}
+
 int main() {
   formatChecks();
   ringChecks();
   triggerChecks();
+  coreChecks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;
