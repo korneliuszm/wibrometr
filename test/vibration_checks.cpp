@@ -10,6 +10,8 @@
 #include "RecorderCore.h"
 #include "SampleRing.h"
 #include "TriggerDetector.h"
+#include "ThresholdUi.h"
+#include "UsbOwnership.h"
 
 static int failures = 0;
 #define CHECK(cond)                                                    \
@@ -362,11 +364,67 @@ static void coreChecks() {
   }
 }
 
+void uiChecks() {
+  using namespace thrui;
+  CHECK(stepDeci(20, +1) == 21);
+  CHECK(stepDeci(2, -1) == 2);
+  CHECK(stepDeci(400, +1) == 400);
+  CHECK(stepDeci(50, +1) == 55);
+  CHECK(stepDeci(55, -1) == 50);
+  CHECK(stepDeci(50, -1) == 49);
+  CHECK(stepDeci(200, +1) == 210);
+  CHECK(stepDeci(210, -1) == 200);
+  CHECK(stepDeci(200, -1) == 195);
+  CHECK(chartRangeMs2(20) == 5.0f);
+  CHECK(chartRangeMs2(25) == 5.0f);
+  CHECK(chartRangeMs2(26) == 10.0f);
+  CHECK(chartRangeMs2(400) == 80.0f);
+  CHECK(hit(10, 210) == Button::Minus);
+  CHECK(hit(300, 210) == Button::Plus);
+  CHECK(hit(160, 210) == Button::None);
+  CHECK(hit(10, 100) == Button::None);
+  {
+    HoldRepeater h;
+    CHECK(h.update(Button::Minus, 0) == -1);
+    CHECK(h.update(Button::Minus, 100) == 0);
+    CHECK(h.update(Button::Minus, 499) == 0);
+    CHECK(h.update(Button::Minus, 500) == -1);
+    CHECK(h.update(Button::Minus, 550) == 0);
+    CHECK(h.update(Button::Minus, 600) == -1);
+    CHECK(h.update(Button::None, 610) == 0);
+    CHECK(h.update(Button::Minus, 620) == -1);
+    CHECK(h.update(Button::Plus, 700) == +1);
+    CHECK(h.update(Button::Plus, 1200) == +1);
+  }
+  {
+    UsbOwnership u;
+    CHECK(!u.hostOwns());
+    u.onAccess();  // access without enumeration must not claim the card
+    CHECK(!u.hostOwns());
+    u.setEnumerated(true);
+    CHECK(u.hostOwns());
+    u.onEject();
+    CHECK(!u.hostOwns());
+    u.onAccess();
+    CHECK(u.hostOwns());
+    u.onEject();
+    CHECK(!u.hostOwns());
+    u.setEnumerated(false);
+    CHECK(!u.hostOwns());
+    u.setEnumerated(true);
+    CHECK(u.hostOwns());
+    u.setEnumerated(false);
+    u.onAccess();
+    CHECK(!u.hostOwns());
+  }
+}
+
 int main() {
   formatChecks();
   ringChecks();
   triggerChecks();
   coreChecks();
+  uiChecks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;
