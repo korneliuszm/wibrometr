@@ -1,11 +1,13 @@
 // Suspension vibration recorder for the Waveshare ESP32-S3-Touch-LCD-2 (env
 // waveshare_vibration): QMI8658 at 500 Hz, a measurement file on the TF card each
 // time the vibration crosses the threshold.
-// Skeleton: sensor task and SD writer only, status on Serial once per second.
-// The screen, touch threshold setting and USB disk come in later tasks.
+// Skeleton: sensor task, SD writer and USB disk, status on Serial once per second.
+// The screen and touch threshold setting come in Task 7.
 #include <Arduino.h>
 #include "RecorderCore.h"
 #include "MeasWriter.h"
+#include "UsbOwnership.h"
+#include "UsbSd.h"
 #include "Qmi8658Decode.h"
 #include "VibConfig.h"
 #include "VibImuTask.h"
@@ -18,8 +20,31 @@ hal::Display display;  // Also starts the SPI bus shared with the SD card.
 RecorderCore core(TriggerDetector::Config{vib::kSampleRateHz, 1.0f, vib::kWarmupUs, vib::kQuietUs},
                   vib::kPreRollUs);
 MeasWriter writer;
+UsbOwnership own;
 VibImuTask imuTask;
 QueueHandle_t events = nullptr;
+
+// TODO(Task 7): replaced by the final main loop. Host takes the card: stop
+// measuring (RecorderCore closes an open measurement), then park the writer once
+// the core is in Usb mode. Host lets go: remount and measure again.
+void handOverCard() {
+  static bool usbWanted = false, parkRequested = false;
+  const bool hostOwns = own.hostOwns();
+  if (hostOwns && !usbWanted) {
+    usbWanted = true;
+    core.requestUsb(true);
+  }
+  if (usbWanted && !parkRequested && core.mode() == RecorderCore::Mode::Usb) {
+    parkRequested = true;
+    writer.park();
+  }
+  if (!hostOwns && usbWanted) {
+    usbWanted = false;
+    if (parkRequested) writer.unpark();
+    parkRequested = false;
+    core.requestUsb(false);
+  }
+}
 
 const char *stateName(MeasStatus::State s) {
   switch (s) {
@@ -41,6 +66,7 @@ void setup() {
   events = xQueueCreate(256, sizeof(VibEvent));
   writer.begin(qmi8658::odrHz(qmi8658::odrCode(vib::kSampleRateHz)), qmi8658::rangeG(vib::kRange));
   imuTask.begin(events, &core, &writer);
+  usbsd::begin(own, writer);  // Up to ~2 s waiting for the card; always starts USB.
   Serial.printf("Rejestrator drgan: %.0f Hz, +-%.0f g, prog %.1f m/s2\n", vib::kSampleRateHz,
                 qmi8658::rangeG(vib::kRange), core.thresholdDeci() / 10.0f);
 }
@@ -56,12 +82,14 @@ void loop() {
     }
   }
   const uint32_t now = millis();
+  usbsd::service(now);
+  handOverCard();
   if (now - lastPrint >= 1000) {
     lastPrint = now;
     const MeasStatus s = writer.status();
-    Serial.printf("imu %lu/s dyn %.2f %.2f %.2f | mode %d | SD %s '%s' M%04u %lu smp %lu B %lu ms, "
+    Serial.printf("imu %lu/s dyn %.2f %.2f %.2f | mode %d usb %d | SD %s '%s' M%04u %lu smp %lu B %lu ms, "
                   "%lu pomiarow, %lu MB, drop %lu/%lu\n",
-                  (unsigned long)samples, last.x, last.y, last.z, int(core.mode()), stateName(s.state),
+                  (unsigned long)samples, last.x, last.y, last.z, int(core.mode()), int(own.hostOwns()), stateName(s.state),
                   s.message, s.number, (unsigned long)s.samples, (unsigned long)s.fileBytes,
                   (unsigned long)s.recordingMs, (unsigned long)s.measurements, (unsigned long)s.cardMb,
                   (unsigned long)s.dropped, (unsigned long)imuTask.dropped());
