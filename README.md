@@ -5,6 +5,8 @@ Projekt PlatformIO znajduje się w tym katalogu. Płytka: Adafruit **5483**
 ESP32-S3 TFT Feather, nie wersja Reverse TFT. Akcelerometr: MPU6050 (moduł
 GY-521) przez I2C.
 
+Rejestrator drgań zawieszek na Waveshare ESP32-S3-Touch-LCD-2 (zapis na kartę po przekroczeniu progu): [docs/vibration-README.md](docs/vibration-README.md).
+
 > **Stan obecny:** ekrany 1/8 — linia (stół, przejazd, odcisk Wi-Fi),
 > 2/8 — przyspieszenie XYZ, 3/8 — żyroskop, 4/8 — przemieszczenie XYZ,
 > 5/8 — wykres ruchu w czasie, 6/8 — tor ruchu, 7/8 — Wi-Fi i adres strony
