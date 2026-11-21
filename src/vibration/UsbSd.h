@@ -15,4 +15,12 @@ bool begin(UsbOwnership &own, MeasWriter &writer);
 // Main loop. At most every 100 ms: own.setEnumerated(host present).
 void service(uint32_t nowMs);
 
+// Main loop, when the host lets go of the card. Revokes USB access and returns
+// true once no transfer is running; from then on every transfer is refused
+// (busy) and the card may be remounted (MeasWriter::unpark). Non-blocking: call
+// again on later loops while it returns false.
+bool release();
+// Main loop, when the host takes the card: lifts the revoke from release().
+void grant();
+
 } // namespace usbsd

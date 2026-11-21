@@ -12,6 +12,7 @@
 #include "TriggerDetector.h"
 #include "ThresholdUi.h"
 #include "UsbOwnership.h"
+#include "CardGate.h"
 
 static int failures = 0;
 #define CHECK(cond)                                                    \
@@ -419,12 +420,28 @@ void uiChecks() {
   }
 }
 
+static void gateChecks() {
+  CardGate g;
+  CHECK(g.enter());      // Granted by default.
+  CHECK(!g.release());   // Transfer in flight: not yet.
+  CHECK(!g.release());
+  g.leave();
+  CHECK(g.release());    // Done: card may be taken back...
+  CHECK(!g.enter());     // ...and later transfers are refused,
+  CHECK(g.release());    // without leaving a transfer marked in flight.
+  g.grant();
+  CHECK(g.enter());
+  g.leave();
+  CHECK(g.release());
+}
+
 int main() {
   formatChecks();
   ringChecks();
   triggerChecks();
   coreChecks();
   uiChecks();
+  gateChecks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

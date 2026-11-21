@@ -26,19 +26,23 @@ QueueHandle_t events = nullptr;
 
 // TODO(Task 7): replaced by the final main loop. Host takes the card: stop
 // measuring (RecorderCore closes an open measurement), then park the writer once
-// the core is in Usb mode. Host lets go: remount and measure again.
+// the core is in Usb mode. Host lets go: wait until no USB transfer is running
+// (usbsd::release), then remount and measure again.
 void handOverCard() {
   static bool usbWanted = false, parkRequested = false;
   const bool hostOwns = own.hostOwns();
   if (hostOwns && !usbWanted) {
     usbWanted = true;
+    usbsd::grant();
     core.requestUsb(true);
   }
   if (usbWanted && !parkRequested && core.mode() == RecorderCore::Mode::Usb) {
     parkRequested = true;
     writer.park();
   }
-  if (!hostOwns && usbWanted) {
+  // A host that takes the card back meanwhile is handled on a later loop:
+  // the release finishes first, then the rising edge above grants again.
+  if (!hostOwns && usbWanted && usbsd::release()) {
     usbWanted = false;
     if (parkRequested) writer.unpark();
     parkRequested = false;

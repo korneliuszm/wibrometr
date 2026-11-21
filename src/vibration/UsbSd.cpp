@@ -20,6 +20,7 @@
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #include "tusb.h"
 #pragma GCC diagnostic pop
+#include "CardGate.h"
 
 namespace usbsd {
 namespace {
@@ -34,18 +35,27 @@ uint32_t lastServiceMs_ = 0;
 bool serviced_ = false;
 bool active_ = false;  // MSC drive started; main loop only.
 
-// Returns true when the card may be used for this transfer. Any sector access
-// is reported first: after an eject it hands the card back to the host, which
+CardGate gate;  // USB task: enter/leave; main loop: release/grant.
+
+// Returns true when the card may be used for this transfer; the caller then
+// must call gate.leave() when done (every return path). Any sector access is
+// reported first: after an eject it hands the card back to the host, which
 // makes the main loop park the writer (calling onAccess only once parked would
 // leave a host that re-accesses after an eject retrying forever, because the
-// writer is never parked again). While the writer still owns the card the
-// caller returns TUD_MSC_RET_BUSY (0) and TinyUSB re-invokes it with the same
-// parameters. That retry is immediate, and this task has the highest priority,
-// so yield 1 tick first: without it the retry loop would starve the main loop
-// or the writer task, which are the ones that have to finish the park.
+// writer is never parked again). The gate is entered before parked() is read,
+// so once release() has returned true the main loop may unpark: no transfer is
+// running and every later one is refused. While the card is not ours (writer
+// not parked, or gate revoked) the caller returns TUD_MSC_RET_BUSY (0) and
+// TinyUSB re-invokes it with the same parameters. That retry is immediate, and
+// this task has the highest priority, so yield 1 tick first: without it the
+// retry loop would starve the main loop or the writer task, which are the ones
+// that have to finish the park or the release.
 bool cardReady() {
   own_->onAccess();
-  if (writer_->parked()) return true;
+  if (gate.enter()) {
+    if (writer_->parked()) return true;
+    gate.leave();
+  }
   vTaskDelay(1);
   return false;
 }
@@ -64,10 +74,12 @@ int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t size) {
   if (!validRange(lba, offset, size, count)) return -1;
   if (!cardReady()) return 0;
   uint8_t *p = static_cast<uint8_t *>(buffer);
-  for (uint32_t i = 0; i < count; ++i, p += sectorSize_) {
-    if (!SD.readRAW(p, lba + i)) return -1;
+  uint32_t i = 0;
+  for (; i < count; ++i, p += sectorSize_) {
+    if (!SD.readRAW(p, lba + i)) break;
   }
-  return int32_t(size);
+  gate.leave();
+  return i == count ? int32_t(size) : -1;
 }
 
 int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size) {
@@ -75,10 +87,12 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size) {
   if (!validRange(lba, offset, size, count)) return -1;
   if (!cardReady()) return 0;
   uint8_t *p = buffer;
-  for (uint32_t i = 0; i < count; ++i, p += sectorSize_) {
-    if (!SD.writeRAW(p, lba + i)) return -1;
+  uint32_t i = 0;
+  for (; i < count; ++i, p += sectorSize_) {
+    if (!SD.writeRAW(p, lba + i)) break;
   }
-  return int32_t(size);
+  gate.leave();
+  return i == count ? int32_t(size) : -1;
 }
 
 bool onStartStop(uint8_t power, bool start, bool eject) {
@@ -129,5 +143,9 @@ void service(uint32_t nowMs) {
   lastServiceMs_ = nowMs;
   own_->setEnumerated(hostPresent());
 }
+
+bool release() { return !active_ || gate.release(); }
+
+void grant() { gate.grant(); }
 
 } // namespace usbsd
