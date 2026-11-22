@@ -15,8 +15,12 @@ struct Lock {
 };
 } // namespace
 
+// Room for a whole QMI8658 FIFO (128 samples x 6 bytes) in one read.
+constexpr size_t kWireBuffer = 1024;
+
 void I2cBus::begin() {
   if (!mutex) mutex = xSemaphoreCreateMutex();
+  Wire.setBufferSize(kWireBuffer);
   Wire.begin(board::kI2cSda, board::kI2cScl, board::kI2cHz);
   Wire.setTimeOut(20);
 }
@@ -24,6 +28,7 @@ void I2cBus::begin() {
 void I2cBus::recover() {
   Lock lock;
   Wire.end();
+  Wire.setBufferSize(kWireBuffer);
   Wire.begin(board::kI2cSda, board::kI2cScl, board::kI2cHz);
   Wire.setTimeOut(20);
 }
@@ -41,7 +46,7 @@ bool I2cBus::read(uint8_t address, uint8_t reg, uint8_t *data, size_t length) {
   Wire.beginTransmission(address);
   Wire.write(reg);
   if (Wire.endTransmission(false) != 0) return false; // Repeated start, then read.
-  if (Wire.requestFrom(address, uint8_t(length)) != length) return false;
+  if (Wire.requestFrom(address, length) != length) return false;
   for (size_t i = 0; i < length; ++i) data[i] = uint8_t(Wire.read());
   return true;
 }

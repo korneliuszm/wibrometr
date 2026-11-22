@@ -1,7 +1,7 @@
 # Rejestrator drgań zawieszek — Waveshare ESP32-S3-Touch-LCD-2
 
 Osobny, prosty firmware (środowisko PlatformIO `waveshare_vibration`) do
-pomiaru drgań przejazdów zawieszek. Czujnik QMI8658 mierzy stale (500 Hz), a
+pomiaru drgań przejazdów zawieszek. Czujnik QMI8658 mierzy stale (~492 Hz), a
 **zapis na kartę TF rusza dopiero po przekroczeniu progu wibracji**, który
 ustawia się dotykiem na ekranie (i jest pamiętany po restarcie). Każdy pomiar
 to osobny plik CSV. Po podłączeniu kabla USB do komputera pomiary się
@@ -19,36 +19,57 @@ akumulator i kamera nie są w nim zawarte.
 
 ## Obsługa
 
-Jeden ekran 320×240:
+Jeden ekran 320×240 (fonty FreeSans; podgląd na PC: `tools/render_vib.sh`):
 
 ```text
-y 0    nagłówek: stan rejestratora (rozmiar 2)
-y 30   wykres XYZ: dynamiczne przyspieszenie, 5,4 s, linie progu (żółte)
-y 180  "pomiarow: N   karta M MB"    osie X Y Z    5.4 s
-y 196  [ - ]      PROG 2.0 m/s2      [ + ]
+y 0    pasek stanu: [● CZUWAM] / [● REC 12.3 s] / [USB: KARTA W PC] ...   karta N   81% [bateria]
+y 36   panel wykresu: XYZ dynamiczne przyspieszenie, 5,4 s, pas ciszy między liniami progu
+       dolny wiersz panelu: legenda X Y Z, pasek poziomu (próg w środku), poziom w m/s2
+y 192  [ - ]      PROG WYZWALANIA  2.0 m/s2      [ + ]
 ```
 
 Wykres pokazuje przyspieszenie z odjętą wolną średnią (grawitacja i przechył
-nie są widoczne), osie czujnika (X, Y, Z w kolorach z legendy). Skala pionowa
-dobiera się do progu (±5, 10, 20, 40 lub 80 m/s², tak żeby próg mieścił się
-w połowie skali); żółte poziome linie to próg i jego odbicie. Liczba
-`pomiarow` to pliki `M*.CSV` w `/MEAS`, a `karta M MB` to rozmiar karty
-(wolnego miejsca ekran nie liczy: wymagałoby to wolnego skanu FAT). Bez karty
-widać `pomiarow: -   brak karty`.
+nie są widoczne), osie czujnika (X czerwony, Y zielony, Z niebieski). Skala
+pionowa dobiera się do progu (±5, 10, 20, 40 lub 80 m/s²); przerywane żółte
+linie to próg i jego odbicie, jaśniejszy pas między nimi to „cisza”. Próbki
+trafiają do kolumn według czasu próbki (nie chwili odebrania), więc linia jest
+ciągła także wtedy, gdy odświeżanie ekranu opóźni odbiór. Podczas nagrywania
+ramka panelu jest czerwona.
 
-### Nagłówek
+Pasek poziomu pokazuje bieżącą długość wektora (to, co porównuje wyzwalacz)
+względem progu: żółta kreska w środku to próg, pasek zielony poniżej, czerwony
+od progu. Pomaga dobrać próg do szumu w spoczynku.
+
+Po prawej stronie paska stanu: ikona karty z liczbą plików `M*.CSV` w `/MEAS`
+(ikona żółta, gdy od startu karta była naprawiana ponownym montowaniem) i
+akumulator (procent z napięcia ogniwa; niebieska błyskawica = ładowanie, na
+Rev 1.0 brak tej informacji; `USB` = brak ogniwa).
+
+### Pasek stanu
 
 | Napis | Znaczenie |
 |---|---|
-| `CZUWAM` (zielony) | czujnik działa, karta gotowa, czeka na przekroczenie progu |
-| `● NAGRYWAM 3.2s M0007` (czerwona kropka) | trwa zapis pomiaru; czas od wyzwolenia i numer pliku |
-| `USB: KARTA U KOMPUTERA` (niebieski) | komputer ma kartę (albo oddawanie jest w toku); nic się nie nagrywa, na wykresie `ZAPIS WSTRZYMANY` |
-| `BRAK KARTY - WLOZ I RESET` (żółty) | brak karty przy starcie; zapis rusza sam po włożeniu karty (ponowna próba co 3 s), ale dysk USB pojawi się dopiero po RESET |
-| `BLAD: <przyczyna>` (czerwony) | błąd karty, np. `blad zapisu na karte`, `nie mozna utworzyc /MEAS`, `numeracja pelna` |
+| `● CZUWAM` (zielony) | czujnik działa, karta gotowa, czeka na przekroczenie progu |
+| `● REC 3.2 / 30 s` (czerwony, kropka miga) | trwa zapis pomiaru; czas od wyzwolenia i limit, pod spodem pasek postępu |
+| `USB: KARTA W PC` (niebieski) | komputer ma kartę (albo oddawanie jest w toku); nic się nie nagrywa, na wykresie `ZAPIS WSTRZYMANY (USB)` |
+| `BRAK KARTY` (żółty) | brak karty przy starcie; zapis rusza sam po włożeniu karty (ponowna próba co 1 s), ale dysk USB pojawi się dopiero po RESET |
+| `BLAD KARTY` (czerwony) | błąd karty; przyczyna na wykresie, np. `blad zapisu na karte`, `nie mozna utworzyc /MEAS`, `numeracja pelna` |
 | `BRAK CZUJNIKA` (żółty) | karta w porządku, ale czujnik nie daje próbek (komunikat jest też na wykresie) |
 
-Kolejność: USB, potem NAGRYWAM (tylko gdy zapis działa), potem problemy z kartą, potem brak czujnika,
-na końcu CZUWAM.
+Kolejność: USB, potem REC (tylko gdy zapis działa), potem problemy z kartą,
+potem brak czujnika, na końcu CZUWAM.
+
+### Błędy karty w trakcie pomiaru
+
+Krótkie zakłócenie karty (wstrząs gniazda TF przy mocnym uderzeniu, karta
+zajęta zbyt długo) nie kończy już pomiaru błędem: gdy zapis się nie powiedzie,
+rejestrator montuje kartę ponownie (do 3 prób) i dopisuje dalej do tego samego
+pliku. W pliku pojawia się wtedy wiersz
+`# card glitch: remounted, samples since the last flush may be missing`
+(dane od ostatniego zrzutu, najwyżej ok. 2 s, mogą zniknąć; luka jest widoczna
+w kolumnie `t_ms`). Podobnie gdy nowy plik nie daje się utworzyć: jedno
+ponowne montowanie i druga próba. Dopiero gdy to nie pomoże, pojawia się
+`BLAD KARTY`, a po 1 s karta jest montowana od nowa.
 
 ### Próg
 
@@ -71,6 +92,10 @@ wyzwala, a drgania poziome tak. Próg stosuje się do tej długości.
   **1 s przed wyzwoleniem** (pre-roll) — te próbki mają ujemny czas.
 - Pomiar kończy się, gdy sygnał jest **poniżej progu przez 3 s** (cisza).
   Plik dostaje stopkę i się zamyka; rejestrator wraca do `CZUWAM`.
+- **Maksymalny czas pomiaru: 30 s** od wyzwolenia (plik ma więc najwyżej
+  ok. 31 s razem z pre-rollem). Gdy drgania trwają dłużej, plik jest zamykany
+  po 30 s, a kolejny pomiar rusza dopiero po zwykłej ciszy (3 s poniżej progu),
+  więc ciągła wibracja nie tworzy serii plików jeden po drugim.
 - Gdy plik nie może zostać otwarty, kolejny Start jest ignorowany przez 1 s.
 
 ### USB
@@ -116,6 +141,20 @@ t_ms,ax_m_s2,ay_m_s2,az_m_s2
 # end: samples=2750 dropped=0
 ```
 
+`sample_rate_hz` w nagłówku to **częstotliwość zmierzona** (po ok. 10 s od
+startu), a nie nominalne 500: z samym akcelerometrem czujnik taktuje się
+wewnętrznym oscylatorem, na tej płytce ok. **491,5 Hz**. Do analizy widma
+używaj wartości z nagłówka albo kolumny `t_ms`, która ma krok równy
+rzeczywistemu okresowi.
+
+Czujnik numeruje swoje próbki (rejestr TIMESTAMP), więc każda utracona próbka
+jest policzona dokładnie: gdy odczyt się spóźnił, przed stopką jest wiersz
+`# missed_samples: N`, a w kolumnie `t_ms` w tym miejscu krok jest
+wielokrotnością okresu. Przy podłączonym komputerze ginęło ok. 10% próbek
+(pomiary są wtedy i tak wstrzymane); ile ginie na akumulatorze, pokaże stopka
+pierwszych plików. Port szeregowy podaje licznik od startu (`missed`),
+zmierzoną częstotliwość (`rate`) i liczbę napraw karty (`fix`).
+
 (Wartości w przykładzie są ilustracyjne.) Wiersze z `#` to nagłówek i stopka, a zwykły wiersz `t_ms,ax_m_s2,…` to nazwy kolumn;
 `dropped` to próbki utracone przy zapisie (kolejka pełna, karta za wolna).
 Otwieranie w Pythonie:
@@ -133,18 +172,40 @@ Zmieniane w kodzie (nie na ekranie):
 
 | Ustawienie | Domyślnie | Gdzie |
 |---|---|---|
-| częstotliwość próbek | 500 Hz (nie więcej: czujnik jest odpytywany co 1 ms) | `vib::kSampleRateHz`, `src/vibration/VibConfig.h` |
+| częstotliwość próbek | 500 Hz nominalnie, zmierzone ~491,5 Hz (więcej się nie da: patrz niżej) | `vib::kSampleRateHz`, `src/vibration/VibConfig.h` |
 | zakres | ±8 g (`kRange = 2`) | `vib::kRange`, `VibConfig.h` |
-| filtr sprzętowy czujnika | 13,37% ODR = 67 Hz | `vib::kLowPassMode`, `VibConfig.h` |
+| filtr sprzętowy czujnika | wyłączony: pasmo 137,5 Hz (wbudowany filtr antyaliasingowy 27,5% ODR); z LPF 13,37% byłoby 66,9 Hz | `vib::kLowPass`, `vib::kLowPassMode`, `VibConfig.h` |
 | pre-roll | 1 s | `vib::kPreRollUs`, `VibConfig.h` (domyślny argument `RecorderCore`: `include/RecorderCore.h`) |
+| maksymalny czas pomiaru | 30 s | `vib::kMaxRecordUs`, `VibConfig.h` (0 w `RecorderCore` = bez limitu) |
 | cisza kończąca pomiar | 3 s | `vib::kQuietUs`, `VibConfig.h` (domyślnie też w `TriggerDetector::Config`, `include/TriggerDetector.h`) |
 | rozgrzewka wyzwalacza | 1 s | `vib::kWarmupUs`, `VibConfig.h` |
 | stała czasowa wolnej średniej (filtr) | 1 s | `src/vibration/main.cpp` (`TriggerDetector::Config`), domyślnie `highPassTauS` w `include/TriggerDetector.h` |
 | przerwa po odmowie otwarcia pliku (holdoff) | 1 s | `holdoffUs` w konstruktorze `RecorderCore`, `include/RecorderCore.h` |
 | próg domyślny / zakres | 2,0 / 0,2–40,0 m/s² | `include/ThresholdUi.h` |
 
-Pierścień pre-rollu ma 512 próbek (ok. 1 s przy 500 Hz), więc dłuższy pre-roll
-wymaga też zmiany `SampleRing<512>` w `include/RecorderCore.h`.
+Pierścień pre-rollu ma 2048 próbek (ok. 4 s przy 500 Hz), `SampleRing<2048>`
+w `include/RecorderCore.h`.
+
+### Dlaczego nie więcej niż 500 Hz
+
+Sprawdzone na tej płytce i w dokumentacji QMI8658A (Rev D):
+
+- sam akcelerometr ma najwyżej **1000 Hz** (kody 2/4/8 kHz to „N/A”; wyższe
+  częstotliwości istnieją tylko z żyroskopem, 1793,6 / 3587,2 / 7174,4 Hz);
+- **FIFO czujnika gubi próbki** podczas odczytu (rozdz. 8.7: w trybie odczytu
+  nowe próbki są odrzucane, a odczyt musi się zmieścić w jednym okresie); przez
+  I2C 400 kHz to ~135 µs na próbkę, zmierzone straty 35–40% przy 1–2 kHz. Kod
+  FIFO jest w repo wyłączony (`vib::kUseFifo`);
+- sygnał „dane gotowe” jest tylko na pinie INT2, który nie jest podłączony,
+  więc zostaje odpytywanie co 1 ms (tick systemu).
+
+Zadanie czujnika ma priorytet 23 na rdzeniu 0 (tuż pod zadaniem USB), a dotyk
+jest czytany tylko wtedy, gdy kontroler sygnalizuje dotknięcie na pinie INT
+(GPIO46). Uśpiony kontroler dotyku trzymał magistralę I2C do ~6 ms przy każdym
+odczycie.
+
+Do pasma rzędu kilku kHz (wczesna diagnostyka łożysk) potrzebny jest osobny
+czujnik drgań na SPI (np. IIS3DWB).
 
 ## Budowanie i wgranie
 
@@ -203,8 +264,8 @@ Wszystko poniżej jest **niesprawdzone na sprzęcie**:
 
 ## Ograniczenia
 
-- Czas względny w pliku to int32 w mikrosekundach, więc jeden pomiar dłuższy
-  niż ok. 35,8 min zawinąłby kolumnę czasu.
+- Czas względny w pliku to int32 w mikrosekundach (zawinąłby się po ok. 35,8 min;
+  przy limicie 30 s nie ma to znaczenia).
 - Numeracja kończy się na `M9999`: kolejny pomiar kończy się błędem
   `numeracja pelna`, nic nie jest nadpisywane.
 - Szybkie odłączenie USB w trakcie pomiaru zamyka plik ze stopką
@@ -212,5 +273,5 @@ Wszystko poniżej jest **niesprawdzone na sprzęcie**:
 - Żółte linie progu na wykresie dotyczą pojedynczych osi, a wyzwalacz liczy
   długość wektora, więc wyzwolenie może nastąpić, gdy żadna oś nie przekracza
   linii.
-- Karta włożona po starcie: zapis wznawia się sam (próba co 3 s), napis `BRAK KARTY - WLOZ I RESET` znika. RESET jest potrzebny tylko dla dysku USB (rejestrowany przy starcie).
+- Karta włożona po starcie: zapis wznawia się sam (próba co 1 s), napis `BRAK KARTY` znika. RESET jest potrzebny tylko dla dysku USB (rejestrowany przy starcie).
 - Płytka nie ma zegara czasu rzeczywistego: w plikach nie ma daty.

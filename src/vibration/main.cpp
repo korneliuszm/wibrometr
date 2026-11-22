@@ -10,6 +10,7 @@
 // and the card hand-over (CardHandover.h).
 #include <Arduino.h>
 #include <Preferences.h>
+#include <atomic>
 #include "CardHandover.h"
 #include "RecorderCore.h"
 #include "MeasWriter.h"
@@ -21,6 +22,7 @@
 #include "VibConfig.h"
 #include "VibImuTask.h"
 #include "VibUi.h"
+#include "hal/Battery.h"
 #include "hal/BoardPins.h"
 #include "hal/Cst816.h"
 #include "hal/Display.h"
@@ -34,8 +36,9 @@ constexpr uint32_t kStaleMs = 1000;  // No sample for this long: sensor shown as
 hal::Display display;  // Also starts the SPI bus shared with the SD card.
 GFXcanvas16 *canvas = nullptr;  // 150 KB: allocated at start so a failure can be reported.
 hal::Cst816 touch;
+hal::BatteryMonitor batteryMonitor;
 RecorderCore core(TriggerDetector::Config{vib::kSampleRateHz, 1.0f, vib::kWarmupUs, vib::kQuietUs},
-                  vib::kPreRollUs);
+                  vib::kPreRollUs, 1000000, vib::kMaxRecordUs);
 MeasWriter writer;
 UsbOwnership own;
 VibImuTask imuTask;
@@ -52,13 +55,27 @@ struct TouchState { bool down; int16_t x, y; };
 TouchState touchState{};  // Written by the touch task, read by the main loop.
 portMUX_TYPE touchMux = portMUX_INITIALIZER_UNLOCKED;
 
-// ---- Touch task: polls the controller at 100 Hz, publishes the raw state ----
+// ---- Touch task: reads the controller at 100 Hz while it signals a touch ----
+// The CST816 pulses its INT line while touched. It is read only then (and for a
+// short while after): once idle it falls asleep, and a read of the sleeping chip
+// held the shared I2C bus for up to ~6 ms (measured), long enough to delay the
+// IMU's 1 ms polls past a sample.
+constexpr uint32_t kTouchActiveMs = 150;
+std::atomic<uint32_t> touchIntMs{0};
+void IRAM_ATTR onTouchInt() { touchIntMs.store(xTaskGetTickCountFromISR() * portTICK_PERIOD_MS); }
+
 void touchTask(void *) {
   TickType_t wake = xTaskGetTickCount();
+  bool wasDown = false;
   for (;;) {
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(kTouchPollMs));
+    const uint32_t nowMs = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    const bool active = digitalRead(board::kTouchInt) == LOW || nowMs - touchIntMs.load() < kTouchActiveMs;
+    if (!active && !wasDown) continue;  // Nothing touched: leave the bus to the IMU.
     TouchSample sample;
     if (!touch.read(sample)) sample = TouchSample{};  // An I2C error counts as "no touch".
+    if (!active) sample = TouchSample{};  // INT quiet: the finger is gone.
+    wasDown = sample.down;
     portENTER_CRITICAL(&touchMux);
     touchState = {sample.down, sample.x, sample.y};
     portEXIT_CRITICAL(&touchMux);
@@ -174,10 +191,13 @@ void setup() {
     for (;;) delay(1000);
   }
   canvas->setTextWrap(false);
+  batteryMonitor.begin();
   if (!touch.begin()) Serial.println("Touch: CST816D not found on I2C 0x15");
+  pinMode(board::kTouchInt, INPUT_PULLUP);
+  attachInterrupt(board::kTouchInt, onTouchInt, FALLING);
   savedDeci = loadThreshold();
   core.setThresholdDeci(savedDeci);
-  events = xQueueCreate(256, sizeof(VibEvent));
+  events = xQueueCreate(1024, sizeof(VibEvent));  // ~2 s of samples for the chart.
   writer.begin(qmi8658::odrHz(qmi8658::odrCode(vib::kSampleRateHz)), qmi8658::rangeG(vib::kRange));
   imuTask.begin(events, &core, &writer);
   usbsd::begin(own, writer);  // Up to ~2 s waiting for the card; always starts USB.
@@ -190,28 +210,43 @@ void setup() {
 void loop() {
   static uint32_t lastPrint = 0, lastFrame = 0, samples = 0;
   static Accel last{};
+  static float level = 0;
   VibEvent e;
+  float frameMax = 0;
   while (xQueueReceive(events, &e, 0) == pdTRUE) {
     if (e.kind == VibEvent::Kind::Sample) {
       ++samples;
       last = e.dynamic;
+      frameMax = fmaxf(frameMax, sqrtf(e.dynamic.x * e.dynamic.x + e.dynamic.y * e.dynamic.y +
+                                       e.dynamic.z * e.dynamic.z));
+      // Bin by the sample's own time, not by when this loop got it: a screen
+      // flush delays the queue by tens of ms, and arrival-time bins came out
+      // empty (the chart looked like dots).
+      advanceBins(e.ms);
     }
     applyEvent(e);
   }
   const uint32_t now = millis();
-  advanceBins(now);
+  if (!sensorLive(now)) advanceBins(now);  // No samples: keep the chart scrolling.
+  // Level meter: follows rises at once, falls back over ~0.3 s.
+  level = fmaxf(frameMax, level * 0.85f);
+  batteryMonitor.update(now);
   const thrui::Button pressed = serviceThreshold(now);
   usbsd::service(now);
+  if (const float hz = imuTask.measuredHz()) writer.setMeasuredRate(hz);
   handOverCard();
   if (now - lastPrint >= 1000) {
     lastPrint = now;
     const MeasStatus s = writer.status();
+    Serial.printf("vbat %.2f V %.0f%% | rate %.1f Hz, overflows %lu | ", batteryMonitor.reading().millivolts / 1000.0f,
+                  batteryMonitor.reading().percent, imuTask.measuredHz(), (unsigned long)imuTask.overflows());
     Serial.printf("imu %lu/s dyn %.2f %.2f %.2f | prog %d | mode %d usb %d | SD %s '%s' M%04u %lu smp %lu B "
-                  "%lu ms, %lu pomiarow, %lu MB, drop %lu/%lu\n",
+                  "%lu ms, %lu pomiarow, %lu MB, drop %lu/%lu, missed %lu, fix %lu\n",
                   (unsigned long)samples, last.x, last.y, last.z, core.thresholdDeci(), int(core.mode()),
                   int(own.hostOwns()), stateName(s.state), s.message, s.number, (unsigned long)s.samples,
                   (unsigned long)s.fileBytes, (unsigned long)s.recordingMs, (unsigned long)s.measurements,
-                  (unsigned long)s.cardMb, (unsigned long)s.dropped, (unsigned long)imuTask.dropped());
+                  (unsigned long)s.cardMb, (unsigned long)s.dropped, (unsigned long)imuTask.dropped(),
+                  (unsigned long)imuTask.missed(), (unsigned long)s.recoveries);
     samples = 0;
   }
   if (now - lastFrame >= vib::kFrameMs) {
@@ -224,7 +259,11 @@ void loop() {
     m.history = &history;
     m.hostOwns = own.hostOwns();
     m.nowMs = now;
+    m.battery = batteryMonitor.reading();
+    m.charging = batteryMonitor.charging();
     m.pressed = pressed;
+    m.level = level;
+    m.missed = imuTask.missed();
     drawVibScreen(*canvas, m);
     display.flush(*canvas);  // In 4 SPI bands, so the card can work in between.
   }

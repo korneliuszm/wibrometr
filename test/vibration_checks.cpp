@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "CountedClock.h"
+#include "FifoClock.h"
 #include "MeasFormat.h"
 #include "RecorderCore.h"
 #include "SampleRing.h"
@@ -369,6 +371,32 @@ static void coreChecks() {
     if (closes.size() == 1) CHECK(closes[0].at >= 4980000 && closes[0].at <= 5010000);
     CHECK(core.mode() == M::Armed);
   }
+  {  // maximum duration: a never-ending vibration gives one 30 s file, then waits for quiet
+    RecorderCore core(TriggerDetector::Config{}, 1000000, 1000000, 30000000);
+    FakeSink sink;
+    const auto steady = [](float t) {  // vibration 0-40 s, quiet 40-45 s, vibration again
+      return (t < 40.0f || t >= 45.0f) ? burstFromZero(t) : gravity(t);
+    };
+    feedCore(core, sink, 0, 40.0f, steady);
+    const auto opens = sink.only('o'), closes = sink.only('c');
+    CHECK(opens.size() == 1 && closes.size() == 1);
+    if (opens.size() == 1 && closes.size() == 1) {
+      const uint32_t length = closes[0].at - opens[0].at;
+      CHECK(length >= 30000000 && length <= 30004000);
+    }
+    CHECK(core.mode() == M::Armed);  // still vibrating, but no new file
+    for (const auto &w : sink.only('w')) CHECK(w.relUs <= 30000000);
+    feedCore(core, sink, 40000000, 5.0f, steady);
+    CHECK(sink.count('o') == 1);
+    feedCore(core, sink, 45000000, 1.0f, steady);
+    CHECK(sink.count('o') == 2 && core.mode() == M::Recording);  // re-armed after quiet
+  }
+  {  // without a maximum (default) the same vibration keeps one file open
+    RecorderCore core;
+    FakeSink sink;
+    feedCore(core, sink, 0, 40.0f, burstFromZero);
+    CHECK(sink.count('o') == 1 && sink.count('c') == 0 && core.mode() == M::Recording);
+  }
 }
 
 void uiChecks() {
@@ -545,6 +573,121 @@ static void handoverChecks() {
   }
 }
 
+// Simulated sensor FIFO: samples made at trueHz, read every readMs (with jitter),
+// at most 128 kept (stream mode drops the oldest). Returns every timestamp given.
+struct FifoSim {
+  std::vector<uint32_t> stamps;
+  uint32_t missedTotal = 0;
+  std::size_t lostTrue = 0;  // Samples the FIFO really dropped.
+};
+static FifoSim runFifo(FifoClock &clock, float trueHz, float seconds, uint32_t readUs,
+                       uint32_t stallFromUs = 0, uint32_t stallUs = 0) {
+  FifoSim sim;
+  const double period = 1e6 / trueHz;
+  uint64_t made = 0, taken = 0;
+  uint32_t seed = 12345;
+  for (uint32_t t = readUs; t < uint32_t(seconds * 1e6); t += readUs) {
+    if (stallUs && t >= stallFromUs && t < stallFromUs + stallUs) continue;
+    seed = seed * 1103515245u + 12345u;
+    const uint32_t jitter = (seed >> 16) % 400;  // 0..0.4 ms late
+    const uint32_t now = t + jitter;
+    made = uint64_t(double(now) / period);
+    uint64_t n = made - taken;
+    if (n > 128) {
+      sim.lostTrue += n - 128;
+      n = 128;
+    }
+    taken = made;
+    const FifoClock::Batch b = clock.batch(now, uint32_t(n));
+    sim.missedTotal += b.missed;
+    for (uint32_t i = 0; i < n; ++i) sim.stamps.push_back(b.at(i));
+  }
+  return sim;
+}
+
+static void fifoClockChecks() {
+  {  // exact 2000 Hz, reads every 5 ms with jitter: uniform 500 us steps, nothing lost
+    FifoClock clock(2000);
+    const FifoSim s = runFifo(clock, 2000, 6.0f, 5000);
+    CHECK(s.missedTotal == 0 && s.lostTrue == 0);
+    bool uniform = true;
+    for (std::size_t i = 1; i < s.stamps.size(); ++i) {
+      const int32_t d = int32_t(s.stamps[i] - s.stamps[i - 1]);
+      if (d < 490 || d > 510) uniform = false;
+    }
+    CHECK(uniform);
+    CHECK(std::fabs(clock.rateHz() - 2000) < 5 && clock.rateMeasured());
+  }
+  {  // chip 3 % slow: the measured rate follows, steps settle near 515 us
+    FifoClock clock(2000);
+    const FifoSim s = runFifo(clock, 1940, 8.0f, 5000);
+    CHECK(s.missedTotal == 0);
+    CHECK(std::fabs(clock.rateHz() - 1940) < 5);
+    const std::size_t n = s.stamps.size();
+    CHECK(n > 100);
+    if (n > 100) {
+      const double avg = double(s.stamps[n - 1] - s.stamps[n - 101]) / 100;
+      CHECK(avg > 510 && avg < 520);
+    }
+  }
+  {  // 200 ms without reads: the FIFO overflows, the loss is reported, time jumps
+    FifoClock clock(2000);
+    const FifoSim s = runFifo(clock, 2000, 4.0f, 5000, 2000000, 200000);
+    CHECK(s.lostTrue > 0);
+    CHECK(s.missedTotal + 3 >= s.lostTrue && s.missedTotal <= s.lostTrue + 3);
+    bool jump = false;
+    for (std::size_t i = 1; i < s.stamps.size(); ++i)
+      if (int32_t(s.stamps[i] - s.stamps[i - 1]) > 30000) jump = true;
+    CHECK(jump);
+  }
+  {  // empty batch changes nothing
+    FifoClock clock(2000);
+    clock.batch(1000000, 10);
+    const FifoClock::Batch e = clock.batch(1002000, 0);
+    const FifoClock::Batch b = clock.batch(1005000, 10);
+    CHECK(e.missed == 0 && b.missed == 0 && e.firstUs == b.firstUs);
+  }
+}
+
+// Polled sensor with its own sample counter: chip at trueHz, polls every 1 ms with
+// jitter, sometimes a stall (samples lost, but counted exactly by the chip).
+static void countedClockChecks() {
+  CountedClock clock(500);
+  const double period = 1e6 / 512.0;  // Internal oscillator 2.4 % fast.
+  uint64_t lastIndex = 0;
+  bool first = true;
+  uint32_t seed = 99, prevT = 0;
+  std::vector<int32_t> steps;
+  std::vector<uint32_t> skippedAt;
+  for (uint32_t poll = 0; poll < 30000; ++poll) {  // 30 s
+    seed = seed * 1103515245u + 12345u;
+    if (poll % 2000 >= 1000 && poll % 2000 < 1005) continue;  // a 5 ms stall every 2 s
+    const uint32_t now = poll * 1000 + (seed >> 16) % 300;
+    const uint64_t index = uint64_t(double(now) / period);
+    if (!first && index == lastIndex) continue;
+    const uint32_t skipped = first ? 0 : uint32_t(index - lastIndex - 1);
+    const uint32_t t = clock.stamp(now, skipped);
+    if (!first) {
+      steps.push_back(int32_t(t - prevT));
+      skippedAt.push_back(skipped);
+    }
+    first = false;
+    lastIndex = index;
+    prevT = t;
+  }
+  CHECK(clock.rateMeasured() && std::fabs(clock.rateHz() - 512.0f) < 0.5f);
+  // After the rate is known (last 10 s): steps are one or (skipped+1) real periods.
+  bool ok = true;
+  std::size_t lossy = 0;
+  for (std::size_t i = steps.size() * 2 / 3; i < steps.size(); ++i) {
+    const double want = period * (skippedAt[i] + 1);
+    if (std::fabs(steps[i] - want) > 40) ok = false;
+    lossy += skippedAt[i] > 0;
+  }
+  CHECK(ok);
+  CHECK(lossy > 0);  // the stalls really lost samples, and they show as longer steps
+}
+
 int main() {
   formatChecks();
   ringChecks();
@@ -553,6 +696,8 @@ int main() {
   uiChecks();
   gateChecks();
   handoverChecks();
+  fifoClockChecks();
+  countedClockChecks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

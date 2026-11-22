@@ -1,5 +1,8 @@
 #include "MeasWriter.h"
 #include <SD.h>
+#include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>
+#include <cstdio>
 #include <cstring>
 #include "VibConfig.h"
 #include "hal/BoardPins.h"
@@ -7,16 +10,17 @@
 
 namespace {
 enum : uint8_t { kOpen = 1, kSample = 2, kClose = 3 };
-constexpr size_t kBufferTarget = 3584;    // Write to the card in chunks of about this size.
+constexpr size_t kBufferTarget = 8192;    // Write to the card in chunks of about this size.
 constexpr uint32_t kWriteEveryMs = 250;   // ...or at least this often.
 constexpr uint32_t kFlushEveryMs = 2000;  // File system flush: bounds data lost on power loss.
-constexpr uint32_t kMountRetryMs = 3000;
+constexpr uint32_t kMountRetryMs = 1000;
+constexpr int kGlitchRetries = 3;          // Remount attempts before a write error is final.
 constexpr int kRecordsPerPass = 256;
 // One queue keeps open/samples/close in order. Samples may not take the last
 // kControlReserve places, so open() and close() still fit when samples overflow.
-// 1024 samples = 2 s at 500 Hz: the 1 s pre-roll replay (~501 samples in one
-// burst) plus ~1 s of card stall.
-constexpr UBaseType_t kSampleCapacity = 1024;
+// 8192 samples at 2 kHz: the 1 s pre-roll replay (~2000 samples in one burst)
+// plus ~3 s of card stall. 24 B each (~200 KB), so the queue lives in PSRAM.
+constexpr UBaseType_t kSampleCapacity = 8192;
 constexpr UBaseType_t kControlReserve = 16;
 constexpr UBaseType_t kQueueLength = kSampleCapacity + kControlReserve;
 } // namespace
@@ -25,7 +29,8 @@ void MeasWriter::begin(float sampleRateHz, float rangeG) {
   sampleRateHz_ = sampleRateHz;
   rangeG_ = rangeG;
   setState(State::NoCard, "brak karty");
-  queue_ = xQueueCreate(kQueueLength, sizeof(Item));
+  queue_ = xQueueCreateWithCaps(kQueueLength, sizeof(Item), MALLOC_CAP_SPIRAM);
+  if (!queue_) queue_ = xQueueCreate(kSampleCapacity / 8 + kControlReserve, sizeof(Item));  // No PSRAM.
   xTaskCreatePinnedToCore(taskEntry, "measwr", 8192, this, 1, nullptr, 0);
 }
 
@@ -33,15 +38,16 @@ void MeasWriter::begin(float sampleRateHz, float rangeG) {
 
 bool MeasWriter::open(int thresholdDeci) {
   if (!queue_ || parkWanted_.load() || !accepting_.load()) return false;
-  const Item it{kOpen, thresholdDeci, 0, 0, 0};
+  const Item it{kOpen, thresholdDeci, 0, 0, 0, 0};
   if (xQueueSend(queue_, &it, 0) != pdTRUE) return false;
   fileDropped_ = 0;
+  fileMissed_ = 0;
   return true;
 }
 
 void MeasWriter::write(int32_t relUs, const Accel &a) {
   if (!queue_) return;
-  const Item it{kSample, relUs, a.x, a.y, a.z};
+  const Item it{kSample, relUs, 0, a.x, a.y, a.z};
   if (uxQueueSpacesAvailable(queue_) <= kControlReserve || xQueueSend(queue_, &it, 0) != pdTRUE) {
     ++dropped_;
     ++fileDropped_;
@@ -50,7 +56,7 @@ void MeasWriter::write(int32_t relUs, const Accel &a) {
 
 void MeasWriter::close() {
   if (!queue_) return;
-  const Item it{kClose, int32_t(fileDropped_.load()), 0, 0, 0};
+  const Item it{kClose, int32_t(fileDropped_.load()), fileMissed_.load(), 0, 0, 0};
   // Practically never fails (reserved places); if it does, the file is closed by
   // the next open() or park().
   if (xQueueSend(queue_, &it, 0) != pdTRUE) ++dropped_;
@@ -89,6 +95,7 @@ void MeasWriter::publishCounters() {
   status_.samples = samples_;
   status_.fileBytes = fileBytes_;
   status_.measurements = measurements_;
+  status_.recoveries = recoveries_;
   portEXIT_CRITICAL(&mux_);
 }
 
@@ -167,11 +174,19 @@ void MeasWriter::startFile(int thresholdDeci) {
     return;
   }
   file_ = SD.open(path, FILE_WRITE);
-  if (!file_) return fail("nie mozna utworzyc pliku");
+  if (!file_) {
+    // A card that just finished a long write (or took a knock) can refuse one open:
+    // remount once before giving up, so the trigger is not lost.
+    Serial.printf("SD: open %s failed, remounting\n", path);
+    if (remountCard()) file_ = SD.open(path, FILE_WRITE);
+    if (!file_) return fail("nie mozna utworzyc pliku");
+    ++recoveries_;
+  }
   measfmt::Header h;
   h.number = number;
   h.thresholdDeci = thresholdDeci;
-  h.sampleRateHz = sampleRateHz_;
+  const float measured = measuredHz_.load();
+  h.sampleRateHz = measured > 0 ? measured : sampleRateHz_;  // Measured from the FIFO once known.
   h.rangeG = rangeG_;
   h.preRollS = float(vib::kPreRollUs) / 1e6f;
   h.quietS = float(vib::kQuietUs) / 1e6f;
@@ -184,18 +199,57 @@ void MeasWriter::startFile(int thresholdDeci) {
   portENTER_CRITICAL(&mux_);
   startedMs_ = now;
   portEXIT_CRITICAL(&mux_);
+  // Header on the card at once: a reset or power cut in the first seconds then
+  // leaves a file that says what it is, not an empty one. The queue absorbs
+  // the samples meanwhile.
+  if (!flushBuffer()) return;  // fail() reported it.
+  file_.flush();
   publishCounters();
   setState(State::Recording, "nagrywanie");
   Serial.printf("SD: recording %s (threshold %d.%d m/s2)\n", path, thresholdDeci / 10, thresholdDeci % 10);
 }
 
+// SD.end + SD.begin on the shared bus, without touching numbering or state.
+bool MeasWriter::remountCard() {
+  SD.end();
+  vTaskDelay(pdMS_TO_TICKS(30));
+  return SD.begin(board::kSdCs, hal::spiBus(), board::kSdSpiHz) && SD.cardType() != CARD_NONE;
+}
+
+// A write failed mid-measurement (shock on the TF socket, card busy too long):
+// remount and reopen the same file for append, so one glitch does not end the
+// measurement. Data FatFs had cached since the last flush may be gone; a comment
+// line marks the place (the t_ms column shows the gap).
+bool MeasWriter::reopenAfterGlitch() {
+  if (file_) file_.close();
+  char path[32];
+  measfmt::measPath(number_, path, sizeof path);
+  for (int attempt = 0; attempt < kGlitchRetries; ++attempt) {
+    if (attempt) vTaskDelay(pdMS_TO_TICKS(100 * attempt));
+    if (!remountCard()) continue;
+    file_ = SD.open(path, FILE_APPEND);
+    if (!file_) continue;
+    ++recoveries_;
+    file_.print("# card glitch: remounted, samples since the last flush may be missing\n");
+    lastFlushMs_ = millis();
+    Serial.printf("SD: recovered %s (attempt %d)\n", path, attempt + 1);
+    return true;
+  }
+  return false;
+}
+
 bool MeasWriter::flushBuffer() {
   if (!file_) return false;
   if (used_ == 0) return true;
-  const size_t written = file_.write(reinterpret_cast<const uint8_t *>(buffer_), used_);
-  if (written != used_) {
-    fail("blad zapisu na karte");
-    return false;
+  size_t done = 0;
+  for (int tries = 0;; ++tries) {
+    done += file_.write(reinterpret_cast<const uint8_t *>(buffer_) + done, used_ - done);
+    if (done >= used_) break;
+    Serial.printf("SD: short write %u/%u, recovering\n", unsigned(done), unsigned(used_));
+    if (tries >= kGlitchRetries || !reopenAfterGlitch()) {
+      fail("blad zapisu na karte");
+      return false;
+    }
   }
   fileBytes_ += uint32_t(used_);
   used_ = 0;
@@ -203,9 +257,14 @@ bool MeasWriter::flushBuffer() {
   return true;
 }
 
-void MeasWriter::finishFile(uint32_t dropped) {
+void MeasWriter::finishFile(uint32_t dropped, uint32_t missed) {
   if (!file_) return;
   if (used_ + 128 > sizeof buffer_ && !flushBuffer()) return;
+  if (missed) {  // The sensor was read too late: these samples never existed here (gaps in t_ms).
+    used_ += size_t(std::snprintf(buffer_ + used_, sizeof buffer_ - used_, "# missed_samples: %lu\n",
+                                  (unsigned long)missed));
+    if (used_ + 128 > sizeof buffer_ && !flushBuffer()) return;
+  }
   used_ += measfmt::formatFooter(buffer_ + used_, sizeof buffer_ - used_, samples_, dropped);
   if (!flushBuffer()) return;  // fail() closed the file.
   file_.flush();
@@ -234,7 +293,7 @@ void MeasWriter::process(const Item &it) {
     ++samples_;
     break;
   case kClose:
-    finishFile(uint32_t(it.value));
+    finishFile(uint32_t(it.value), it.extra);
     break;
   default:
     break;

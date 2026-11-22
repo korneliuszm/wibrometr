@@ -1,36 +1,43 @@
 #include "VibImuTask.h"
 #include <cstdio>
-#include "SampleClock.h"
+#include "FifoClock.h"
+#include "CountedClock.h"
 #include "VibConfig.h"
 #include "hal/BoardPins.h"
 #include "hal/I2cBus.h"
 #include "hal/Qmi8658.h"
 
+
 void VibImuTask::begin(QueueHandle_t events, RecorderCore *core, MeasSink *sink) {
   events_ = events;
   core_ = core;
   sink_ = sink;
-  // Same core and priority as the line firmware's sensor task; above the SD writer
-  // (priority 1 on core 0), so a slow card never delays sampling.
-  xTaskCreatePinnedToCore(entry, "vibimu", 6144, this, 3, nullptr, 0);
+  // Core 0, priority 23: just below the TinyUSB task (24). At priority 3 the USB
+  // task (disk access through SPI while a computer is connected) and the others
+  // delayed polls enough to lose ~10 % of the samples; at 23 none were lost
+  // (measured with the chip's sample counter). The task sleeps between polls, so
+  // lower-priority work (SD writer, touch) still runs. Core 1 is worse: the
+  // screen flush there cost ~45 % of the samples.
+  xTaskCreatePinnedToCore(entry, "vibimu", 6144, this, 23, nullptr, 0);
 }
 
-void VibImuTask::emit(VibEvent::Kind kind, const Accel &dynamic) {
+void VibImuTask::emit(VibEvent::Kind kind, const Accel &dynamic, uint32_t ms) {
   if (!events_) return;
   VibEvent e;
   e.kind = kind;
-  e.ms = millis();
+  e.ms = ms ? ms : millis();
   e.dynamic = dynamic;
   if (xQueueSend(events_, &e, 0) != pdTRUE) ++dropped_;
 }
 
 void VibImuTask::run() {
   hal::Qmi8658 imu;
-  SampleClock clock;
+  FifoClock clock(vib::kSampleRateHz);
+  CountedClock pollClock(vib::kSampleRateHz);
+  static Accel batch[hal::Qmi8658::kFifoSamples];
   bool ready = false;
   int errors = 0;
   uint32_t retryAt = 0, rateStart = 0, rateCount = 0, highRateSeconds = 0;
-  const uint32_t periodUs = uint32_t(1e6f / vib::kSampleRateHz + 0.5f);
   RecorderCore &core = *core_;
   MeasSink &sink = *sink_;
   TickType_t wake = xTaskGetTickCount();
@@ -46,15 +53,19 @@ void VibImuTask::run() {
         hal::Qmi8658::Config config;
         config.range = vib::kRange;
         config.odrHz = vib::kSampleRateHz;
+        config.lowPass = vib::kLowPass;
         config.lowPassMode = vib::kLowPassMode;
-        config.gyro = false;  // Not recorded; halves the I2C read per sample.
+        config.gyro = false;  // Not recorded; the FIFO then holds accelerometer samples only.
+        config.fifo = vib::kUseFifo;
         if (imu.begin(config)) {
           sampleRateHz_ = imu.sampleRateHz();
           rangeG_ = imu.rangeG();
-          Serial.printf("IMU: QMI8658 ready, %.1f Hz, +-%.0f g\n", sampleRateHz_.load(), rangeG_.load());
+          Serial.printf("IMU: QMI8658 ready, %s, %.1f Hz nominal, +-%.0f g, low-pass %s\n", vib::kUseFifo ? "FIFO" : "polled", sampleRateHz_.load(),
+                        rangeG_.load(), vib::kLowPass ? "on" : "off");
           ready = true;
           errors = 0;
           clock.reset();
+          pollClock.reset();
           core.onGap(sink);  // Fresh stream: pre-roll and filter start over (warm-up).
           rateStart = millis();
           rateCount = highRateSeconds = 0;
@@ -73,35 +84,67 @@ void VibImuTask::run() {
       wake = xTaskGetTickCount();
       continue;
     }
-    vTaskDelayUntil(&wake, 1);  // 1 kHz polling.
-    Accel a, w;
-    switch (imu.poll(a, w)) {
-    case hal::Qmi8658::Poll::Sample: {
-      errors = 0;
-      const SampleClock::Stamp stamp = clock.stamp(micros(), periodUs);
-      core.onSample(stamp.us, a, sink);  // Sensor axes, no mount correction (spec).
-      emit(VibEvent::Kind::Sample, core.dynamic());
-      ++rateCount;
-      break;
-    }
-    case hal::Qmi8658::Poll::Error:
-      if (++errors >= 20) {
+    if (!vib::kUseFifo) {
+      // Counter + data polled every 1 ms (two polls per 500 Hz sample). The chip's
+      // sample counter tells exactly how many samples a late poll lost.
+      vTaskDelayUntil(&wake, 1);
+      Accel a;
+      uint32_t skipped = 0;
+      const hal::Qmi8658::Poll p = imu.pollCounted(a, skipped);
+      if (p == hal::Qmi8658::Poll::Sample) {
+        errors = 0;
+        const uint32_t t = pollClock.stamp(micros(), skipped);
+        if (skipped) {
+          missed_ += skipped;
+          if (core.mode() == RecorderCore::Mode::Recording) sink.missed(skipped);
+        }
+        if (pollClock.rateMeasured()) measuredHz_ = pollClock.rateHz();
+        core.onSample(t, a, sink);  // Sensor axes, no mount correction (spec).
+        emit(VibEvent::Kind::Sample, core.dynamic(), t / 1000);
+        ++rateCount;
+      } else if (p == hal::Qmi8658::Poll::Error && ++errors >= 20) {
         ready = false;
         retryAt = millis() + 500;
         core.onGap(sink);  // Closes a running measurement.
         Serial.println("IMU: I2C read errors, reconnecting");
         emit(VibEvent::Kind::Waiting);
       }
-      break;
-    default:
-      break;
+    } else {  // FIFO path (vib::kUseFifo): loses samples, kept for reference.
+      vTaskDelayUntil(&wake, pdMS_TO_TICKS(vib::kFifoReadMs));
+      uint32_t readUs = 0;
+      bool overflow = false;
+      const int n = imu.readFifo(batch, hal::Qmi8658::kFifoSamples, readUs, overflow);
+      if (n < 0) {
+        if (++errors >= 20) {
+          ready = false;
+          retryAt = millis() + 500;
+          core.onGap(sink);  // Closes a running measurement.
+          Serial.println("IMU: I2C read errors, reconnecting");
+          emit(VibEvent::Kind::Waiting);
+        }
+      } else if (n > 0) {
+        errors = 0;
+        const FifoClock::Batch b = clock.batch(readUs, uint32_t(n));
+        if (overflow) ++overflows_;  // Chip flag; the count of lost samples comes from the clock.
+        if (b.missed) {
+          missed_ += b.missed;
+          if (core.mode() == RecorderCore::Mode::Recording) sink.missed(b.missed);
+        }
+        if (clock.rateMeasured()) measuredHz_ = clock.rateHz();
+        for (int i = 0; i < n; ++i) {
+          const uint32_t t = b.at(uint32_t(i));
+          core.onSample(t, batch[i], sink);  // Sensor axes, no mount correction (spec).
+          emit(VibEvent::Kind::Sample, core.dynamic(), t / 1000);
+        }
+        rateCount += uint32_t(n);
+      }
     }
     const uint32_t now = millis();
     if (now - rateStart >= 1000) {
-      // More samples than the ODR means the data-ready flag is not clearing on read.
+      // Far more samples than the ODR: the FIFO count is not what it seems.
       if (rateCount > uint32_t(vib::kSampleRateHz * 1.3f) && ++highRateSeconds == 3)
-        Serial.printf("IMU: %lu samples/s for %.0f Hz ODR: duplicates? (status flag not cleared by reading)\n",
-                      (unsigned long)rateCount, vib::kSampleRateHz);
+        Serial.printf("IMU: %lu samples/s for %.0f Hz ODR: FIFO count wrong?\n", (unsigned long)rateCount,
+                      vib::kSampleRateHz);
       rateStart = now;
       rateCount = 0;
     }

@@ -13,6 +13,8 @@ struct MeasSink {
   virtual bool open(int thresholdDeci) = 0;
   virtual void write(int32_t relUs, const Accel &a) = 0;
   virtual void close() = 0;
+  // Sensor samples lost while recording (read too late); recorded in the file.
+  virtual void missed(uint32_t /*count*/) {}
   virtual ~MeasSink() = default;
 };
 
@@ -23,9 +25,12 @@ class RecorderCore {
 public:
   enum class Mode : uint8_t { Armed, Recording, Usb };
 
+  // maxUs: a measurement is closed this long after its trigger even if the
+  // vibration goes on (0 = no limit); a new one starts only after the usual quiet
+  // time below the threshold, so a steady vibration does not chain files.
   explicit RecorderCore(TriggerDetector::Config cfg = {}, uint32_t preRollUs = 1000000,
-                        uint32_t holdoffUs = 1000000)
-      : det_(cfg), preRollUs_(preRollUs), holdoffUs_(holdoffUs) {}
+                        uint32_t holdoffUs = 1000000, uint32_t maxUs = 0)
+      : det_(cfg), preRollUs_(preRollUs), holdoffUs_(holdoffUs), maxUs_(maxUs) {}
 
   void setThresholdDeci(int deci) { thresholdDeci_.store(deci, std::memory_order_relaxed); }
   int thresholdDeci() const { return thresholdDeci_.load(std::memory_order_relaxed); }
@@ -55,10 +60,18 @@ public:
     const auto ev = det_.update(tUs, a, deci / 10.0f);
     if (mode() == Mode::Recording) {
       sink.write(static_cast<int32_t>(tUs - triggerUs_), a);
-      if (ev == TriggerDetector::Event::Stop) {
+      const bool tooLong = maxUs_ && static_cast<uint32_t>(tUs - triggerUs_) >= maxUs_;
+      if (ev == TriggerDetector::Event::Stop || tooLong) {
         sink.close();
         setMode(Mode::Armed);
+        // Cut by the limit: the detector stays in its recording state, and its
+        // Stop (the usual quiet time) re-arms the recorder.
+        if (ev != TriggerDetector::Event::Stop) waitQuiet_ = true;
       }
+      return;
+    }
+    if (waitQuiet_) {
+      if (ev == TriggerDetector::Event::Stop) waitQuiet_ = false;
       return;
     }
     if (ev != TriggerDetector::Event::Start) return;
@@ -96,14 +109,15 @@ private:
     ring_.clear();
     det_.reset();
     holdoff_ = false;
+    waitQuiet_ = false;
   }
   void setMode(Mode m) { mode_.store(m, std::memory_order_release); }
 
   TriggerDetector det_;
-  SampleRing<512> ring_;
-  uint32_t preRollUs_, holdoffUs_;
+  SampleRing<2048> ring_;  // 1 s pre-roll at up to 2 kHz.
+  uint32_t preRollUs_, holdoffUs_, maxUs_;
   uint32_t triggerUs_ = 0, holdoffFromUs_ = 0;
-  bool holdoff_ = false;
+  bool holdoff_ = false, waitQuiet_ = false;
   std::atomic<int> thresholdDeci_{20};
   std::atomic<bool> usbWanted_{false};
   std::atomic<Mode> mode_{Mode::Armed};
