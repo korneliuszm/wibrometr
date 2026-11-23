@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <cstring>
 
-// Single screen of the vibration recorder, 320x240, laid out for this panel
+// Two screens of the vibration recorder (swipe sideways), 320x240, laid out for this panel
 // (proportional FreeSans fonts, not the scaled 6x8 font of the Feather screens):
 //
 //   y0    status bar: state pill (CZUWAM / REC 12.3 / 30 s + progress / USB / ...), card, battery
@@ -17,6 +17,10 @@
 //         right 1/3: statistics panel of the last recorded measurement (mean, RMS,
 //         peak, peak-to-peak per axis), its strongest frequency and spectrum
 //   y192  [ - ]   PROG WYZWALANIA  2.0 m/s2   [ + ]   (thrui::kMinus / kPlus)
+//
+// Page 2 (peaks of the session): the status bar, then one panel with a bar per
+// recorded measurement (its largest XYZ vector length, dots: largest per axis);
+// both axes scale to what has been recorded since power-up.
 //
 // All text is Polish without diacritics (the GFX fonts have none).
 
@@ -443,9 +447,96 @@ void drawThreshold(GFXcanvas16 &c, const VibModel &m) {
   std::snprintf(value, sizeof value, "%.1f", m.thresholdDeci / 10.0f);
   const char *unit = "m/s2";
   const int vw = fontWidth(c, kBig, value), uw = fontWidth(c, kSmall, unit);
-  const int x = mid - (vw + 6 + uw) / 2, baseline = thrui::kMinus.y + 38;
+  const int x = mid - (vw + 6 + uw) / 2, baseline = thrui::kMinus.y + 36;
   const int after = fontText(c, kBig, x, baseline, kAmber, value);
   fontText(c, kSmall, after + 6, baseline, kMuted, unit);
+}
+
+// ---- Peaks of the session (page 2) ----------------------------------------------------
+
+void drawPageDots(GFXcanvas16 &c, int page) {
+  for (int i = 0; i < vib::kPages; ++i)
+    c.fillCircle(W / 2 + (2 * i - (vib::kPages - 1)) * 7, 236, 2, i == page ? kText : kDim);
+}
+
+void drawPeaks(GFXcanvas16 &c, const VibModel &m) {
+  constexpr int panelY = 36, panelH = 196;
+  constexpr int px = 44, py = 62, pw = 262, ph = 132;
+  c.fillRoundRect(kPanelX, panelY, 312, panelH, 8, kPanel);
+  c.drawRoundRect(kPanelX, panelY, 312, panelH, 8, kPanelEdge);
+
+  static const VibPeaks none;
+  const VibPeaks &log = m.peaks ? *m.peaks : none;
+  const int n = int(log.size());
+  const float range = peakchart::yRange(log.maxPeak());
+  const auto yOf = [&](float v) { return py + ph - 1 - int(lroundf(fminf(v, range) / range * (ph - 1))); };
+
+  small(c, kPanelX + 10, panelY + 8, kMuted, "MAKSIMA NAGRAN W SESJI [m/s2]");
+  char s[24];
+  std::snprintf(s, sizeof s, "razem: %d", int(log.firstIndex() - 1) + n);
+  small(c, kPanelX + 312 - 10 - smallWidth(s), panelY + 8, kText, s);
+
+  // Y axis: grid every quarter, labels at 0, half and full scale.
+  for (int q = 0; q <= 4; ++q) {
+    const int y = py + (ph - 1) - q * (ph - 1) / 4;
+    if (q == 0) c.drawFastHLine(px, y, pw, kZero);
+    else dottedHLine(c, px, y, pw, kGrid, 3);
+    if (q % 2 == 0) {
+      char v[12];
+      fmt4(v, sizeof v, range * q / 4);
+      small(c, px - 5 - smallWidth(v), y - 4, kMuted, v);
+    }
+  }
+
+  if (n == 0) {
+    const char *l1 = "BRAK NAGRAN";
+    fontText(c, kBold, W / 2 - fontWidth(c, kBold, l1) / 2, py + ph / 2 - 2, kMuted, l1);
+    const char *l2 = "maksima pojawia sie po pierwszym pomiarze";
+    small(c, W / 2 - smallWidth(l2) / 2, py + ph / 2 + 8, kDim, l2);
+    return;
+  }
+
+  // Bars: the plot width is shared by all recordings, so it fills up as they come.
+  const float slot = float(pw) / n;
+  const int bw = std::max(1, std::min(28, int(slot * 0.7f)));
+  const bool dots = slot >= 14;
+  const unsigned step = peakchart::labelStep(std::size_t(n), 8);
+  for (int i = 0; i < n; ++i) {
+    const PeakEntry &e = log.at(std::size_t(i));
+    const int cx = px + int((i + 0.5f) * slot);
+    const int top = yOf(e.peak);
+    c.fillRect(cx - bw / 2, top, bw, py + ph - 1 - top, i == n - 1 ? kAmber : kBlue);
+    if (dots)
+      for (int a = 0; a < 3; ++a) {
+        const int y = yOf(e.axis[a]);
+        c.fillRect(cx - 2 + (a - 1) * 5, y - 2, 5, 5, kBg);  // Outline: a dot on a bar of its own colour.
+        c.fillRect(cx - 1 + (a - 1) * 5, y - 1, 3, 3, kAxis[a]);
+      }
+    const unsigned index = log.firstIndex() + unsigned(i);
+    if (index % step == 0) {
+      std::snprintf(s, sizeof s, "%u", index);
+      small(c, cx - smallWidth(s) / 2, py + ph + 4, i == n - 1 ? kAmber : kMuted, s);
+    }
+  }
+
+  // Legend and the latest measurement.
+  const int ly = panelY + panelH - 18;
+  c.fillRect(kPanelX + 10, ly + 1, 8, 8, kBlue);
+  small(c, kPanelX + 22, ly + 1, kMuted, "wektor");
+  int x = kPanelX + 22 + smallWidth("wektor") + 12;
+  for (int a = 0; a < 3; ++a) {
+    c.fillRect(x, ly + 3, 4, 4, kAxis[a]);
+    const char axis[2] = {kAxisName[a], 0};
+    small(c, x + 7, ly + 1, kMuted, axis);
+    x += 24;
+  }
+  const PeakEntry &last = log.at(std::size_t(n - 1));
+  std::snprintf(s, sizeof s, "M%04u", last.number % 10000);
+  const int right = kPanelX + 312 - 10;
+  char v[12];
+  std::snprintf(v, sizeof v, "%.2f", last.peak);
+  small(c, right - smallWidth(v), ly + 1, kAmber, v);
+  small(c, right - smallWidth(v) - 6 - smallWidth(s), ly + 1, kMuted, s);
 }
 
 } // namespace
@@ -454,8 +545,13 @@ void drawVibScreen(GFXcanvas16 &c, const VibModel &m) {
   c.fillScreen(kBg);
   c.setTextWrap(false);
   drawStatusBar(c, m);
-  drawChart(c, m);
-  drawStats(c, m);
-  drawThreshold(c, m);
+  if (m.page == 1) {
+    drawPeaks(c, m);
+  } else {
+    drawChart(c, m);
+    drawStats(c, m);
+    drawThreshold(c, m);
+  }
+  drawPageDots(c, m.page);
   c.setFont(nullptr);
 }

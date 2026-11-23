@@ -107,5 +107,33 @@ int main() {
   m.thresholdDeci = 25;
   drawVibScreen(c, m);
   dump(c, "4-error.raw");
+
+  // Page 2: peaks of a session, from a few to many measurements.
+  static VibPeaks few, many;
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<float> level(0.8f, 6.0f);
+  for (unsigned i = 1; i <= 9; ++i) {
+    const float p = level(rng);
+    few.add({i, p, {0.9f * p, 0.5f * p, 0.3f * p}});
+  }
+  for (unsigned i = 1; i <= 47; ++i) {
+    const float p = level(rng) * (i == 30 ? 3.0f : 1.0f);
+    many.add({i, p, {0.9f * p, 0.5f * p, 0.3f * p}});
+  }
+  m = VibModel();
+  m.sensorLive = true;
+  m.sd.state = MeasStatus::State::Idle;
+  m.sd.cardMb = 14910;
+  m.sd.measurements = 9;
+  m.battery = battery::evaluate(4020, false, true);
+  m.page = 1;
+  drawVibScreen(c, m);
+  dump(c, "5-peaks-empty.raw");
+  m.peaks = &few;
+  drawVibScreen(c, m);
+  dump(c, "6-peaks-few.raw");
+  m.peaks = &many;
+  drawVibScreen(c, m);
+  dump(c, "7-peaks-many.raw");
   return 0;
 }

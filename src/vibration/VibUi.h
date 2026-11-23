@@ -3,15 +3,20 @@
 #include <cstdint>
 #include "MeasStats.h"
 #include "MeasStatus.h"
+#include "PeakLog.h"
 #include "RecorderCore.h"
 #include "SignalHistory.h"
 #include "ThresholdUi.h"
 #include "VibConfig.h"
 #include "BatteryModel.h"
 
-// Everything the vibration recorder's single screen shows; plain data, filled by
+// Everything the vibration recorder's screens show; plain data, filled by
 // the main loop once per frame.
+using VibPeaks = PeakLog<vib::kMaxPeaks>;
+
 struct VibModel {
+  int page = 0;                                         // 0: live chart and statistics, 1: peaks of the session.
+  const VibPeaks *peaks = nullptr;                      // Peak of every measurement since power-up.
   RecorderCore::Mode mode = RecorderCore::Mode::Armed;
   MeasStatus sd;
   int thresholdDeci = thrui::kDefaultDeci;
@@ -28,6 +33,6 @@ struct VibModel {
   uint32_t missed = 0;                                  // Sensor samples never read (since boot).
 };
 
-// Draws the whole screen (320x240) into the canvas. No hardware access, so it can
+// Draws the whole screen (the page in m.page) (320x240) into the canvas. No hardware access, so it can
 // be rendered on a PC.
 void drawVibScreen(GFXcanvas16 &c, const VibModel &m);

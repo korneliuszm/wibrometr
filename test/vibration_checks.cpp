@@ -10,6 +10,7 @@
 #include "FifoClock.h"
 #include "MeasFormat.h"
 #include "MeasStats.h"
+#include "PeakLog.h"
 #include "RecorderCore.h"
 #include "SampleRing.h"
 #include "TriggerDetector.h"
@@ -757,6 +758,30 @@ static void statsChecks() {
   CHECK(!cap.tryAcquire(2, view));
 }
 
+static void peakLogChecks() {
+  PeakLog<4> log;
+  CHECK(log.size() == 0 && log.maxPeak() == 0 && log.firstIndex() == 1);
+  for (unsigned i = 1; i <= 3; ++i) log.add({i, float(i) * 1.5f, {float(i), 0, 0}});
+  CHECK(log.size() == 3 && log.at(0).number == 1 && log.at(2).number == 3);
+  CHECK(std::fabs(log.maxPeak() - 4.5f) < 1e-5f);
+  for (unsigned i = 4; i <= 6; ++i) log.add({i, i == 5 ? 20.0f : 1.0f, {}});
+  CHECK(log.size() == 4 && log.at(0).number == 3 && log.at(3).number == 6);  // 1 and 2 dropped.
+  CHECK(log.firstIndex() == 3 && log.maxPeak() == 20.0f);
+
+  using peakchart::niceCeil;
+  CHECK(niceCeil(0) == 1.0f && niceCeil(-3) == 1.0f);
+  CHECK(std::fabs(niceCeil(0.3f) - 0.5f) < 1e-6f || std::fabs(niceCeil(0.3f) - 0.5f) < 1e-4f);
+  CHECK(std::fabs(niceCeil(1.0f) - 1.0f) < 1e-5f && std::fabs(niceCeil(1.01f) - 2.0f) < 1e-5f);
+  CHECK(std::fabs(niceCeil(2.3f) - 2.5f) < 1e-5f && std::fabs(niceCeil(4.2f) - 5.0f) < 1e-5f);
+  CHECK(std::fabs(niceCeil(7.0f) - 10.0f) < 1e-4f && std::fabs(niceCeil(31.0f) - 50.0f) < 1e-3f);
+  CHECK(std::fabs(peakchart::yRange(0.02f) - 0.5f) < 1e-5f);  // The floor.
+  CHECK(peakchart::yRange(9.8f) >= 9.8f && peakchart::yRange(9.8f) <= 20.0f);
+  CHECK(peakchart::labelStep(1, 6) == 1 && peakchart::labelStep(6, 6) == 1);
+  CHECK(peakchart::labelStep(7, 6) == 2 && peakchart::labelStep(12, 6) == 2);
+  CHECK(peakchart::labelStep(13, 6) == 5 && peakchart::labelStep(30, 6) == 5);
+  CHECK(peakchart::labelStep(31, 6) == 10 && peakchart::labelStep(512, 6) == 100);
+}
+
 int main() {
   formatChecks();
   ringChecks();
@@ -768,6 +793,7 @@ int main() {
   fifoClockChecks();
   countedClockChecks();
   statsChecks();
+  peakLogChecks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

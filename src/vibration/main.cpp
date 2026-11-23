@@ -15,8 +15,10 @@
 #include "RecorderCore.h"
 #include "MeasStats.h"
 #include "MeasWriter.h"
+#include "PeakLog.h"
 #include "SignalHistory.h"
 #include "ThresholdUi.h"
+#include "TouchGestures.h"
 #include "UsbOwnership.h"
 #include "UsbSd.h"
 #include "Qmi8658Decode.h"
@@ -52,6 +54,9 @@ SignalHistory<vib::kBins> history;
 MeasStats lastStats;  // Of the last finished measurement; the UI shows it.
 uint32_t statsSeq = 0;
 unsigned lastNumber = 0;
+VibPeaks peaks;       // One entry per measurement since power-up (second screen).
+PageNavigator pages(vib::kPages);
+GestureDetector swipes;
 uint32_t binStart = 0, lastSampleMs = 0;
 bool haveSample = false;
 thrui::HoldRepeater repeater;
@@ -120,7 +125,9 @@ void saveThreshold(int deci) {
 // stalls both cores for a moment and could cost samples.
 thrui::Button serviceThreshold(uint32_t now) {
   const TouchState t = currentTouch();
-  const thrui::Button pressed = t.down ? thrui::hit(t.x, t.y) : thrui::Button::None;
+  // The buttons exist on the first page only.
+  const thrui::Button pressed =
+      t.down && pages.index() == 0 ? thrui::hit(t.x, t.y) : thrui::Button::None;
   if (const int dir = repeater.update(pressed, now))
     core.setThresholdDeci(thrui::stepDeci(core.thresholdDeci(), dir));
   const int deci = core.thresholdDeci();
@@ -129,6 +136,20 @@ thrui::Button serviceThreshold(uint32_t now) {
     savedDeci = deci;
   }
   return pressed;
+}
+
+// A horizontal swipe changes the page (wrapping). The detector wants a steady 50-100 Hz,
+// the main loop runs faster, so it is fed every 10 ms.
+void servicePages(uint32_t now) {
+  static uint32_t last = 0;
+  if (now - last < 10) return;
+  last = now;
+  const TouchState t = currentTouch();
+  switch (swipes.update(TouchSample{t.down, t.x, t.y}, now).type) {
+  case GestureType::SwipeLeft: pages.next(); break;
+  case GestureType::SwipeRight: pages.prev(); break;
+  default: break;
+  }
 }
 
 // ---- Chart history -------------------------------------------------------------
@@ -240,6 +261,7 @@ void loop() {
   // Level meter: follows rises at once, falls back over ~0.3 s.
   level = fmaxf(frameMax, level * 0.85f);
   batteryMonitor.update(now);
+  servicePages(now);
   const thrui::Button pressed = serviceThreshold(now);
   usbsd::service(now);
   if (const float hz = imuTask.measuredHz()) writer.setMeasuredRate(hz);
@@ -249,6 +271,9 @@ void loop() {
     lastStats = measstats::compute(view.data, view.count, view.rateHz);
     statsSeq = view.seq;
     lastNumber = writer.status().number;
+    if (lastStats.valid)
+      peaks.add({lastNumber, lastStats.magPeak,
+                 {lastStats.axis[0].peak, lastStats.axis[1].peak, lastStats.axis[2].peak}});
     capture.release();
   }
   if (now - lastPrint >= 1000) {
@@ -273,6 +298,8 @@ void loop() {
     m.thresholdDeci = core.thresholdDeci();
     m.sensorLive = sensorLive(now);
     m.history = &history;
+    m.page = pages.index();
+    m.peaks = &peaks;
     m.last = &lastStats;
     m.lastNumber = lastNumber;
     m.hostOwns = own.hostOwns();
