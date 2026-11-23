@@ -19,7 +19,11 @@ akumulator i kamera nie są w nim zawarte.
 
 ## Obsługa
 
-Jeden ekran 320×240 (fonty FreeSans; podgląd na PC: `tools/render_vib.sh`):
+Trzy ekrany 320×240, przełączane przesunięciem palca w bok (fonty FreeSans;
+podgląd na PC: `tools/render_vib.sh`). Ekran 1 (poniżej): wykres i statystyki;
+ekran 2: maksima nagrań w sesji; ekran 3: widmo FFT ostatniego pomiaru (lewe
+2/3, numerowane znaczniki na najsilniejszych prążkach) i tabela do 5 prążków
+(częstotliwość i amplituda, interpolowane między binami) w prawej 1/3.
 
 ```text
 y 0    pasek stanu: [● CZUWAM] / [● REC 12.3 s] / [USB: KARTA W PC] ...   karta N   81% [bateria]

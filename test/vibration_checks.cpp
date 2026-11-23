@@ -715,6 +715,35 @@ static void statsChecks() {
     if (st.spectrum[c] > st.spectrum[top]) top = c;
   CHECK(top == 25);
 
+  // The lines table: 50 Hz (2.0) then 20 Hz (1.0), interpolated between bins.
+  CHECK(st.peakCount >= 2);
+  CHECK(std::fabs(st.peaks[0].hz - 50.0f) < 0.3f && std::fabs(st.peaks[0].amp - 2.0f) < 0.1f);
+  CHECK(std::fabs(st.peaks[1].hz - 20.0f) < 0.3f && std::fabs(st.peaks[1].amp - 1.0f) < 0.1f);
+  for (int i = 1; i < st.peakCount; ++i) CHECK(st.peaks[i - 1].amp >= st.peaks[i].amp);
+  CHECK(std::fabs(st.binHz - 500.0f / 1024) < 1e-4f && st.fft[100] >= 0);
+  {  // Many tones: only the five strongest, in order.
+    std::vector<Accel> w;
+    for (int i = 0; i < 3000; ++i) {
+      const float t = i / 500.0f;
+      float x = 0;
+      for (int tone = 1; tone <= 8; ++tone) x += tone * 0.3f * std::sin(2 * 3.14159265f * 15 * tone * t);
+      w.push_back({x, 0, 0});
+    }
+    const MeasStats many = measstats::compute(w.data(), w.size(), 500.0f);
+    CHECK(many.peakCount == 5);
+    CHECK(std::fabs(many.peaks[0].hz - 120.0f) < 0.5f && std::fabs(many.peaks[4].hz - 60.0f) < 0.5f);
+  }
+  {  // A strong 1.2 Hz bounce (strongest bin on a falling slope, no local maximum) and a
+     // weak 30 Hz line: the dominant line stays at the strongest bin, not at 30 Hz.
+    std::vector<Accel> w;
+    for (int i = 0; i < 3000; ++i) {
+      const float t = i / 500.0f;
+      w.push_back({3.0f * std::sin(2 * 3.14159265f * 1.2f * t) + 0.3f * std::sin(2 * 3.14159265f * 30 * t), 0, 0});
+    }
+    const MeasStats low = measstats::compute(w.data(), w.size(), 500.0f);
+    CHECK(low.domHz < 3.0f && low.domAmp > 0.3f);
+  }
+
   // Too short for the FFT: statistics only. Empty input: not valid.
   const MeasStats shortStats = measstats::compute(v.data(), 500, 500.0f);
   CHECK(shortStats.valid && !shortStats.hasSpectrum);

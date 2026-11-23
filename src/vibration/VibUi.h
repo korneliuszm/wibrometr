@@ -15,7 +15,7 @@
 using VibPeaks = PeakLog<vib::kMaxPeaks>;
 
 struct VibModel {
-  int page = 0;                                         // 0: live chart and statistics, 1: peaks of the session.
+  int page = 0;                                         // 0: live chart and statistics, 1: peaks of the session, 2: FFT.
   const VibPeaks *peaks = nullptr;                      // Peak of every measurement since power-up.
   RecorderCore::Mode mode = RecorderCore::Mode::Armed;
   MeasStatus sd;

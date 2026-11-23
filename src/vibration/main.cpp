@@ -268,7 +268,7 @@ void loop() {
   handOverCard();
   MeasCapture::View view;
   if (capture.tryAcquire(statsSeq, view)) {  // A measurement has just been closed.
-    lastStats = measstats::compute(view.data, view.count, view.rateHz);
+    measstats::computeInto(lastStats, view.data, view.count, view.rateHz);  // In place: ~2.7 KB.
     statsSeq = view.seq;
     lastNumber = writer.status().number;
     if (lastStats.valid)

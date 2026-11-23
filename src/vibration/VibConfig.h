@@ -34,6 +34,6 @@ constexpr int kBins = 136;                // Chart columns...
 constexpr uint32_t kBinMs = 40;           // ...of 40 ms each: a 5.44 s window.
 
 constexpr int kMaxPeaks = 512;            // Peaks of one session kept for the second screen.
-constexpr int kPages = 2;                 // Screens, switched by a horizontal swipe.
+constexpr int kPages = 3;                 // Screens, switched by a horizontal swipe.
 
 } // namespace vib

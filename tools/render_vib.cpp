@@ -135,5 +135,16 @@ int main() {
   m.peaks = &many;
   drawVibScreen(c, m);
   dump(c, "7-peaks-many.raw");
+
+  // Page 3: the spectrum of the last measurement.
+  m.page = 2;
+  m.peaks = nullptr;
+  m.last = nullptr;
+  drawVibScreen(c, m);
+  dump(c, "8-fft-empty.raw");
+  m.last = &stats;
+  m.lastNumber = 12;
+  drawVibScreen(c, m);
+  dump(c, "9-fft.raw");
   return 0;
 }

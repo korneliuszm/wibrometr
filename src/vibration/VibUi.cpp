@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <cstring>
 
-// Two screens of the vibration recorder (swipe sideways), 320x240, laid out for this panel
+// Three screens of the vibration recorder (swipe sideways), 320x240, laid out for this panel
 // (proportional FreeSans fonts, not the scaled 6x8 font of the Feather screens):
 //
 //   y0    status bar: state pill (CZUWAM / REC 12.3 / 30 s + progress / USB / ...), card, battery
@@ -21,6 +21,10 @@
 // Page 2 (peaks of the session): the status bar, then one panel with a bar per
 // recorded measurement (its largest XYZ vector length, dots: largest per axis);
 // both axes scale to what has been recorded since power-up.
+//
+// Page 3 (FFT): the status bar, the spectrum of the last measurement in the left 2/3
+// (frequency axis to Nyquist, amplitude auto-scaled, numbered markers on the
+// strongest lines) and a table of those lines in the right 1/3.
 //
 // All text is Polish without diacritics (the GFX fonts have none).
 
@@ -539,13 +543,114 @@ void drawPeaks(GFXcanvas16 &c, const VibModel &m) {
   small(c, right - smallWidth(v) - 6 - smallWidth(s), ly + 1, kMuted, s);
 }
 
+// ---- FFT (page 3) ---------------------------------------------------------------------
+
+void drawFftPage(GFXcanvas16 &c, const VibModel &m) {
+  constexpr int panelY = 36, panelH = 196;
+  constexpr int plotW = 200, tableX = 208, tableW = 108;
+  const uint16_t kFft = rgb(190, 150, 255);
+  const MeasStats *st = m.last && m.last->valid ? m.last : nullptr;
+  const bool ok = st && st->hasSpectrum;
+  c.fillRoundRect(kPanelX, panelY, plotW, panelH, 8, kPanel);
+  c.drawRoundRect(kPanelX, panelY, plotW, panelH, 8, kPanelEdge);
+  c.fillRoundRect(tableX, panelY, tableW, panelH, 8, kPanel);
+  c.drawRoundRect(tableX, panelY, tableW, panelH, 8, kPanelEdge);
+  small(c, kPanelX + 10, panelY + 8, kMuted, "WIDMO FFT [m/s2]");
+  small(c, tableX + 8, panelY + 8, kMuted, "SKLADOWE");
+
+  if (!ok) {
+    const char *l1 = !st ? "BRAK POMIARU" : "ZA KROTKI POMIAR";
+    const char *l2 = !st ? "widmo pojawi sie po pomiarze" : "FFT potrzebuje 1024 probek";
+    fontText(c, kBold, kPanelX + (plotW - fontWidth(c, kBold, l1)) / 2, panelY + 96, kMuted, l1);
+    small(c, kPanelX + (plotW - smallWidth(l2)) / 2, panelY + 106, kDim, l2);
+    return;
+  }
+
+  char s[24];
+  std::snprintf(s, sizeof s, "M%04u", m.lastNumber % 10000);
+  small(c, kPanelX + plotW - 10 - smallWidth(s), panelY + 8, kText, s);
+
+  // Plot: frequency 0..Nyquist, amplitude 0..top.
+  constexpr int px = 40, py = 60, pw = 152, ph = 136;
+  constexpr int bins = int(MeasStats::kFftSize / 2) + 1;
+  float maxAmp = 0;
+  for (int k = 0; k < bins; ++k) maxAmp = fmaxf(maxAmp, k >= 2 ? st->fft[k] : 0);  // No DC leakage.
+  const float top = peakchart::yRange(maxAmp, 0.05f);
+  const auto yOf = [&](float v) { return py + ph - 1 - int(lroundf(fminf(v, top) / top * (ph - 1))); };
+  for (int q = 0; q <= 4; ++q) {
+    const int y = py + (ph - 1) - q * (ph - 1) / 4;
+    if (q == 0) c.drawFastHLine(px, y, pw, kZero);
+    else dottedHLine(c, px, y, pw, kGrid, 3);
+    if (q % 2 == 0) {
+      char v[12];
+      fmt4(v, sizeof v, top * q / 4);
+      small(c, px - 4 - smallWidth(v), y - 4, kMuted, v);
+    }
+  }
+  const float nyq = st->nyquistHz;
+  const float tick = peakchart::niceCeil(nyq / 6);
+  for (float f = 0; f <= nyq; f += tick) {
+    const int x = px + int(lroundf(f / nyq * (pw - 1)));
+    if (f > 0) for (int y = py; y < py + ph; y += 3) c.drawPixel(x, y, kGrid);
+    std::snprintf(s, sizeof s, "%.0f", f);
+    small(c, std::min(x - smallWidth(s) / 2, px + pw - smallWidth(s)), py + ph + 4, kMuted, s);
+  }
+  small(c, kPanelX + plotW - 10 - 12, py + ph + 14, kDim, "Hz");
+
+  for (int x = 0; x < pw; ++x) {  // Highest bin of each pixel column.
+    // Bins [k0, k1), no overlap with the next column; the last one takes Nyquist too.
+    const int k0 = x * (bins - 1) / pw;
+    const int k1 = x == pw - 1 ? bins : std::max(k0 + 1, (x + 1) * (bins - 1) / pw);
+    float v = 0;
+    for (int k = std::max(k0, 1); k < k1 && k < bins; ++k) v = fmaxf(v, st->fft[k]);
+    const int y = yOf(v);
+    if (py + ph - 1 - y > 0) c.drawFastVLine(px + x, y, py + ph - 1 - y, kFft);
+  }
+  for (int i = 0; i < st->peakCount; ++i) {  // Numbered markers on the lines of the table.
+    const SpectrumPeak &p = st->peaks[i];
+    const int x = px + int(lroundf(p.hz / nyq * (pw - 1))), y = yOf(p.amp);
+    c.fillTriangle(x - 2, y - 5, x + 2, y - 5, x, y - 1, kAmber);
+    char n[2] = {char('1' + i), 0};
+    small(c, x - 2, std::max(y - 15, py - 1), kAmber, n);
+  }
+
+  // Table: number, frequency, amplitude.
+  const int x0 = tableX + 8;
+  small(c, x0, panelY + 24, kDim, "#");
+  small(c, x0 + 18, panelY + 24, kDim, "Hz");
+  small(c, tableX + tableW - 8 - smallWidth("m/s2"), panelY + 24, kDim, "m/s2");
+  c.drawFastHLine(x0, panelY + 34, tableW - 16, kPanelEdge);
+  for (int i = 0; i < int(MeasStats::kPeaks); ++i) {
+    const int base = panelY + 54 + i * 24;
+    if (i >= st->peakCount) {
+      fontText(c, kSmall, x0, base, kDim, "-");
+      continue;
+    }
+    const SpectrumPeak &p = st->peaks[i];
+    char n[2] = {char('1' + i), 0};
+    fontText(c, kBold, x0, base, kAmber, n);
+    std::snprintf(s, sizeof s, p.hz < 99.95f ? "%.1f" : "%.0f", p.hz);
+    fontText(c, kSmall, x0 + 18, base, kText, s);
+    char a[12];
+    fmt4(a, sizeof a, p.amp);
+    fontText(c, kSmall, tableX + tableW - 8 - fontWidth(c, kSmall, a), base, kMuted, a);
+  }
+  c.drawFastHLine(x0, panelY + panelH - 30, tableW - 16, kPanelEdge);
+  std::snprintf(s, sizeof s, "df %.2f Hz", st->binHz);
+  small(c, x0, panelY + panelH - 24, kDim, s);
+  std::snprintf(s, sizeof s, "fp %.0f Hz", st->rateHz);
+  small(c, x0, panelY + panelH - 13, kDim, s);
+}
+
 } // namespace
 
 void drawVibScreen(GFXcanvas16 &c, const VibModel &m) {
   c.fillScreen(kBg);
   c.setTextWrap(false);
   drawStatusBar(c, m);
-  if (m.page == 1) {
+  if (m.page == 2) {
+    drawFftPage(c, m);
+  } else if (m.page == 1) {
     drawPeaks(c, m);
   } else {
     drawChart(c, m);
