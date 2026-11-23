@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <vector>
 #include "VibUi.h"
 
 namespace {
@@ -51,6 +52,25 @@ int main() {
 
   m.history = &quiet;
   m.level = 0.08f;
+  drawVibScreen(c, m);
+  dump(c, "0-no-measurement.raw");
+
+  // The last measurement: 1 s pre-roll noise, then a decaying 48 Hz / 120 Hz burst.
+  static MeasStats stats;
+  {
+    std::mt19937 rng(3);
+    std::normal_distribution<float> noise(0, 0.05f);
+    std::vector<Accel> v;
+    for (int i = 0; i < 6000; ++i) {
+      const float t = i / 512.0f, env = t < 1 ? 0 : 3.2f * std::exp(-(t - 1) * 0.35f);
+      v.push_back({0.4f + env * std::sin(2 * 3.14159f * 48 * t) + noise(rng),
+                   -0.2f + 0.5f * env * std::sin(2 * 3.14159f * 120 * t) + noise(rng),
+                   9.81f + 0.3f * env * std::sin(2 * 3.14159f * 12 * t) + noise(rng)});
+    }
+    stats = measstats::compute(v.data(), v.size(), 512.0f);
+  }
+  m.last = &stats;
+  m.lastNumber = 12;
   drawVibScreen(c, m);
   dump(c, "1-armed.raw");
 

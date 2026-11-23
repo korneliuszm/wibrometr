@@ -13,6 +13,7 @@
 #include <atomic>
 #include "CardHandover.h"
 #include "RecorderCore.h"
+#include "MeasStats.h"
 #include "MeasWriter.h"
 #include "SignalHistory.h"
 #include "ThresholdUi.h"
@@ -40,12 +41,17 @@ hal::BatteryMonitor batteryMonitor;
 RecorderCore core(TriggerDetector::Config{vib::kSampleRateHz, 1.0f, vib::kWarmupUs, vib::kQuietUs},
                   vib::kPreRollUs, 1000000, vib::kMaxRecordUs);
 MeasWriter writer;
+MeasCapture capture;               // Samples of the measurement being written, for the statistics.
+CapturingSink sink(writer, capture);
 UsbOwnership own;
 VibImuTask imuTask;
 QueueHandle_t events = nullptr;
 
 // ---- UI state (main loop only) ---------------------------------------------
 SignalHistory<vib::kBins> history;
+MeasStats lastStats;  // Of the last finished measurement; the UI shows it.
+uint32_t statsSeq = 0;
+unsigned lastNumber = 0;
 uint32_t binStart = 0, lastSampleMs = 0;
 bool haveSample = false;
 thrui::HoldRepeater repeater;
@@ -191,6 +197,9 @@ void setup() {
     for (;;) delay(1000);
   }
   canvas->setTextWrap(false);
+  // 16384 samples (196 KB) for the statistics of the last measurement: PSRAM; without it
+  // the screen just shows no statistics.
+  capture.attach(static_cast<Accel *>(heap_caps_malloc(MeasCapture::kCapacity * sizeof(Accel), MALLOC_CAP_SPIRAM)));
   batteryMonitor.begin();
   if (!touch.begin()) Serial.println("Touch: CST816D not found on I2C 0x15");
   pinMode(board::kTouchInt, INPUT_PULLUP);
@@ -199,7 +208,7 @@ void setup() {
   core.setThresholdDeci(savedDeci);
   events = xQueueCreate(1024, sizeof(VibEvent));  // ~2 s of samples for the chart.
   writer.begin(qmi8658::odrHz(qmi8658::odrCode(vib::kSampleRateHz)), qmi8658::rangeG(vib::kRange));
-  imuTask.begin(events, &core, &writer);
+  imuTask.begin(events, &core, &sink);
   usbsd::begin(own, writer);  // Up to ~2 s waiting for the card; always starts USB.
   xTaskCreatePinnedToCore(touchTask, "touch", 4096, nullptr, 2, nullptr, 0);
   binStart = millis();
@@ -235,6 +244,13 @@ void loop() {
   usbsd::service(now);
   if (const float hz = imuTask.measuredHz()) writer.setMeasuredRate(hz);
   handOverCard();
+  MeasCapture::View view;
+  if (capture.tryAcquire(statsSeq, view)) {  // A measurement has just been closed.
+    lastStats = measstats::compute(view.data, view.count, view.rateHz);
+    statsSeq = view.seq;
+    lastNumber = writer.status().number;
+    capture.release();
+  }
   if (now - lastPrint >= 1000) {
     lastPrint = now;
     const MeasStatus s = writer.status();
@@ -257,6 +273,8 @@ void loop() {
     m.thresholdDeci = core.thresholdDeci();
     m.sensorLive = sensorLive(now);
     m.history = &history;
+    m.last = &lastStats;
+    m.lastNumber = lastNumber;
     m.hostOwns = own.hostOwns();
     m.nowMs = now;
     m.battery = batteryMonitor.reading();

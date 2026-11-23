@@ -1,6 +1,7 @@
 #pragma once
 #include <Adafruit_GFX.h>
 #include <cstdint>
+#include "MeasStats.h"
 #include "MeasStatus.h"
 #include "RecorderCore.h"
 #include "SignalHistory.h"
@@ -22,6 +23,8 @@ struct VibModel {
   bool charging = false;
   thrui::Button pressed = thrui::Button::None;          // Threshold button under the finger.
   float level = 0;                                      // Current |dynamic acceleration|, m/s2 (peak-held).
+  const MeasStats *last = nullptr;                      // Statistics of the last measurement (null: none yet).
+  unsigned lastNumber = 0;                              // Its file number (M<number>.CSV).
   uint32_t missed = 0;                                  // Sensor samples never read (since boot).
 };
 

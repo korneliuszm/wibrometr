@@ -9,6 +9,7 @@
 #include "CountedClock.h"
 #include "FifoClock.h"
 #include "MeasFormat.h"
+#include "MeasStats.h"
 #include "RecorderCore.h"
 #include "SampleRing.h"
 #include "TriggerDetector.h"
@@ -688,6 +689,74 @@ static void countedClockChecks() {
   CHECK(lossy > 0);  // the stalls really lost samples, and they show as longer steps
 }
 
+static void statsChecks() {
+  // 3000 samples at 500 Hz: X = 9.8 + 2 sin(2 pi 50 t), Y = 1 sin(2 pi 20 t), Z = 0.
+  std::vector<Accel> v;
+  for (int i = 0; i < 3000; ++i) {
+    const float t = i / 500.0f;
+    v.push_back({9.8f + 2 * std::sin(2 * 3.14159265f * 50 * t), std::sin(2 * 3.14159265f * 20 * t), 0});
+  }
+  const MeasStats st = measstats::compute(v.data(), v.size(), 500.0f);
+  CHECK(st.valid && st.samples == 3000);
+  CHECK(std::fabs(st.durationS - 5.998f) < 0.01f);
+  CHECK(std::fabs(st.axis[0].mean - 9.8f) < 0.02f);
+  CHECK(std::fabs(st.axis[0].rms - 2 / std::sqrt(2.0f)) < 0.02f);
+  CHECK(std::fabs(st.axis[0].peak - 2.0f) < 0.15f);
+  CHECK(std::fabs(st.axis[0].p2p - 4.0f) < 0.3f);
+  CHECK(std::fabs(st.axis[1].rms - 1 / std::sqrt(2.0f)) < 0.02f);
+  CHECK(st.axis[2].rms == 0 && st.axis[2].p2p == 0);
+  CHECK(st.hasSpectrum && std::fabs(st.domHz - 50.0f) < 1.0f);
+  CHECK(std::fabs(st.domAmp - 2.0f) < 0.2f);
+  CHECK(std::fabs(st.nyquistHz - 250.0f) < 0.01f);
+  // The strongest column is the 50 Hz one (50 / 250 * 128 = column 25.6).
+  std::size_t top = 0;
+  for (std::size_t c = 0; c < MeasStats::kSpectrumCols; ++c)
+    if (st.spectrum[c] > st.spectrum[top]) top = c;
+  CHECK(top == 25);
+
+  // Too short for the FFT: statistics only. Empty input: not valid.
+  const MeasStats shortStats = measstats::compute(v.data(), 500, 500.0f);
+  CHECK(shortStats.valid && !shortStats.hasSpectrum);
+  CHECK(!measstats::compute(v.data(), 1, 500.0f).valid && !measstats::compute(nullptr, 0, 0).valid);
+
+  // Capture: tee through the sink, then read it back.
+  struct Null : MeasSink {
+    bool accept = true;
+    int writes = 0;
+    bool open(int) override { return accept; }
+    void write(int32_t, const Accel &) override { ++writes; }
+    void close() override {}
+  } inner;
+  static Accel storage[MeasCapture::kCapacity];
+  MeasCapture cap;
+  CapturingSink sink(inner, cap);
+  MeasCapture::View view;
+  CHECK(!cap.tryAcquire(0, view));
+  cap.attach(storage);
+  CHECK(sink.open(20));
+  for (int i = 0; i < 1000; ++i) sink.write(i * 2000, {float(i), 0, 0});  // 500 Hz
+  sink.close();
+  CHECK(inner.writes == 1000);
+  CHECK(cap.tryAcquire(0, view) && view.count == 1000 && view.seq == 1);
+  CHECK(std::fabs(view.rateHz - 500.0f) < 0.1f && view.data[999].x == 999);
+  // Held by the reader: the next measurement is written but not captured.
+  CHECK(sink.open(20));
+  sink.write(0, {1, 2, 3});
+  sink.close();
+  CHECK(inner.writes == 1001);
+  CHECK(view.count == 1000 && view.data[5].x == 5);
+  CHECK(!cap.tryAcquire(view.seq, view));  // Nothing new.
+  cap.release();
+  CHECK(sink.open(20));
+  for (int i = 0; i < 20000; ++i) sink.write(i * 2000, {1, 0, 0});  // More than the capacity.
+  sink.close();
+  CHECK(cap.tryAcquire(1, view) && view.count == MeasCapture::kCapacity && view.seq == 2);
+  cap.release();
+  inner.accept = false;
+  CHECK(!sink.open(20));  // The card refused: nothing captured, no new sequence number.
+  CHECK(!cap.tryAcquire(2, view));
+}
+
 int main() {
   formatChecks();
   ringChecks();
@@ -698,6 +767,7 @@ int main() {
   handoverChecks();
   fifoClockChecks();
   countedClockChecks();
+  statsChecks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

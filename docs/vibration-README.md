@@ -23,8 +23,9 @@ Jeden ekran 320×240 (fonty FreeSans; podgląd na PC: `tools/render_vib.sh`):
 
 ```text
 y 0    pasek stanu: [● CZUWAM] / [● REC 12.3 s] / [USB: KARTA W PC] ...   karta N   81% [bateria]
-y 36   panel wykresu: XYZ dynamiczne przyspieszenie, 5,4 s, pas ciszy między liniami progu
-       dolny wiersz panelu: legenda X Y Z, pasek poziomu (próg w środku), poziom w m/s2
+y 36   lewe 2/3: panel wykresu: XYZ dynamiczne przyspieszenie, 5,4 s, pas ciszy między liniami progu
+         dolny wiersz panelu: legenda X Y Z, pasek poziomu (próg w środku), poziom w m/s2
+       prawa 1/3: statystyki ostatniego pomiaru (numer, czas, tabela X Y Z) i jego widmo FFT
 y 192  [ - ]      PROG WYZWALANIA  2.0 m/s2      [ + ]
 ```
 
@@ -45,13 +46,41 @@ Po prawej stronie paska stanu: ikona karty z liczbą plików `M*.CSV` w `/MEAS`
 akumulator (procent z napięcia ogniwa; niebieska błyskawica = ładowanie, na
 Rev 1.0 brak tej informacji; `USB` = brak ogniwa).
 
+### Statystyki ostatniego pomiaru (prawy panel)
+
+Po zamknięciu każdego pomiaru (także przy limicie 30 s) rejestrator liczy
+statystyki z **tych samych próbek, które trafiły do pliku** (łącznie z 1 s
+sprzed wyzwolenia) i pokazuje je po prawej, aż do następnego pomiaru. Po
+starcie, zanim cokolwiek się nagra, panel pokazuje `BRAK POMIARU`.
+
+| Wiersz | Znaczenie (m/s², osobno X, Y, Z) |
+|---|---|
+| `sr` | średnia, razem z grawitacją — pokazuje, jak czujnik jest ułożony |
+| `RMS` | wartość skuteczna drgań (odchylenie od średniej) |
+| `pik` | największe odchylenie od średniej w obie strony |
+| `p-p` | rozstęp, max − min |
+
+Nagłówek panelu: numer pliku (`M0012`) i czas trwania pomiaru. Pod tabelą
+`FFT 48 Hz` to najsilniejsza składowa (powyżej ok. 1 Hz) długości wektora
+XYZ; poniżej widmo amplitudowe od 0 do połowy częstotliwości próbkowania
+(ok. 256 Hz, skala dobiera się do najwyższego prążka), z żółtym znacznikiem
+tej składowej. Widmo to okno 1024 próbek (ok. 2 s, okno Hanna) wokół
+najmocniejszego momentu pomiaru, nie cały pomiar; czujnik ma pasmo ok. 137 Hz,
+więc prążki powyżej tej wartości są już tłumione. Dla pomiaru krótszego niż
+1024 próbki jest tylko tabela (`FFT: za krotki`).
+
+Próbki idą do bufora 196 KB w PSRAM (`MeasCapture` w `include/MeasStats.h`);
+bez PSRAM albo gdy poprzedni pomiar jest jeszcze liczony, pomiar zapisuje się
+na kartę normalnie, tylko bez statystyk. Obliczenia (kilka milisekund) robi
+pętla ekranu, nie zadanie czujnika.
+
 ### Pasek stanu
 
 | Napis | Znaczenie |
 |---|---|
 | `● CZUWAM` (zielony) | czujnik działa, karta gotowa, czeka na przekroczenie progu |
 | `● REC 3.2 / 30 s` (czerwony, kropka miga) | trwa zapis pomiaru; czas od wyzwolenia i limit, pod spodem pasek postępu |
-| `USB: KARTA W PC` (niebieski) | komputer ma kartę (albo oddawanie jest w toku); nic się nie nagrywa, na wykresie `ZAPIS WSTRZYMANY (USB)` |
+| `USB: KARTA W PC` (niebieski) | komputer ma kartę (albo oddawanie jest w toku); nic się nie nagrywa, na wykresie `USB: ZAPIS WSTRZYMANY` |
 | `BRAK KARTY` (żółty) | brak karty przy starcie; zapis rusza sam po włożeniu karty (ponowna próba co 1 s), ale dysk USB pojawi się dopiero po RESET |
 | `BLAD KARTY` (czerwony) | błąd karty; przyczyna na wykresie, np. `blad zapisu na karte`, `nie mozna utworzyc /MEAS`, `numeracja pelna` |
 | `BRAK CZUJNIKA` (żółty) | karta w porządku, ale czujnik nie daje próbek (komunikat jest też na wykresie) |
