@@ -43,14 +43,44 @@ struct MeasStats {
   float binHz = 0;
   int peakCount = 0;                // Local maxima above ~1 Hz, strongest first.
   SpectrumPeak peaks[kPeaks];
+  // The same per axis (sensor X, Y, Z): amplitude spectra in full resolution and their
+  // strongest lines. Lines are judged against the strongest line of any axis, so an
+  // axis with only noise has none.
+  static constexpr std::size_t kAxisPeaks = 3;
+  float axisFft[3][kFftSize / 2 + 1]{};
+  int axisPeakCount[3]{};
+  SpectrumPeak axisPeaks[3][kAxisPeaks];
 };
 
 namespace measstats {
 
+// Local maxima of spec[0..bins) from minBin up, at least 5 % of `reference` (Hann
+// sidelobes are ~3 %) and 0.01 m/s2, the frequency and amplitude refined by a parabola
+// through the three bins. Keeps the strongest `capacity` lines, strongest first.
+inline int findPeaks(const float *spec, std::size_t bins, std::size_t minBin, float binHz, float reference,
+                     SpectrumPeak *out, int capacity) {
+  int count = 0;
+  for (std::size_t k = (minBin > 1 ? minBin : 1); k + 1 < bins; ++k) {
+    const float a = spec[k - 1], b = spec[k], c = spec[k + 1];
+    if (!(b > a && b >= c) || b < 0.05f * reference || b < 0.01f) continue;
+    const float denom = a - 2 * b + c;
+    const float delta = denom < 0 ? 0.5f * (a - c) / denom : 0;
+    const SpectrumPeak p{(k + delta) * binHz, b - 0.25f * (a - c) * delta};
+    int at = count;  // Insert, strongest first, keeping the top `capacity`.
+    while (at > 0 && out[at - 1].amp < p.amp) --at;
+    if (at >= capacity) continue;
+    const int last = count < capacity ? count : capacity - 1;
+    for (int i = last; i > at; --i) out[i] = out[i - 1];
+    out[at] = p;
+    if (count < capacity) ++count;
+  }
+  return count;
+}
+
 inline float comp(const Accel &a, int i) { return i == 0 ? a.x : i == 1 ? a.y : a.z; }
 
 // s: n samples, rateHz: mean sample rate (0 = unknown, no spectrum). Fills `r` in
-// place: MeasStats is ~2.7 KB, too much for a temporary on the Arduino loop stack.
+// place: MeasStats is ~9 KB, too much for a temporary on the Arduino loop stack.
 inline void computeInto(MeasStats &r, const Accel *s, std::size_t n, float rateHz) {
   static_assert(std::is_trivially_copyable<MeasStats>::value, "cleared with memset");
   std::memset(static_cast<void *>(&r), 0, sizeof r);  // All defaults are zero.
@@ -108,6 +138,7 @@ inline void computeInto(MeasStats &r, const Accel *s, std::size_t n, float rateH
   float best = 0;
   std::size_t bestBin = 0;
   const std::size_t minBin = std::size_t(1.0f * N / rateHz) + 1;  // Skip DC leakage below ~1 Hz.
+  for (int a = 0; a < 3; ++a) std::memcpy(r.axisFft[a], amp[a], sizeof r.axisFft[a]);
   for (std::size_t k = 0; k <= N / 2; ++k) {
     const float v = std::sqrt(amp[0][k] * amp[0][k] + amp[1][k] * amp[1][k] + amp[2][k] * amp[2][k]);
     if (k >= minBin && v > best) { best = v; bestBin = k; }
@@ -120,22 +151,11 @@ inline void computeInto(MeasStats &r, const Accel *s, std::size_t n, float rateH
   r.domHz = bestBin * r.binHz;
   r.domAmp = best;
 
-  // Lines: local maxima at least 5 % of the strongest (Hann sidelobes are ~3 %), the
-  // frequency and amplitude refined by a parabola through the three bins.
-  for (std::size_t k = (minBin > 1 ? minBin : 1); k < N / 2; ++k) {
-    const float a = r.fft[k - 1], b = r.fft[k], c = r.fft[k + 1];
-    if (!(b > a && b >= c) || b < 0.05f * best || b < 0.01f) continue;
-    const float denom = a - 2 * b + c;
-    const float delta = denom < 0 ? 0.5f * (a - c) / denom : 0;
-    const SpectrumPeak p{(k + delta) * r.binHz, b - 0.25f * (a - c) * delta};
-    int at = r.peakCount;  // Insert, strongest first, keeping the top kPeaks.
-    while (at > 0 && r.peaks[at - 1].amp < p.amp) --at;
-    if (at >= int(MeasStats::kPeaks)) continue;
-    const int last = r.peakCount < int(MeasStats::kPeaks) ? r.peakCount : int(MeasStats::kPeaks) - 1;
-    for (int i = last; i > at; --i) r.peaks[i] = r.peaks[i - 1];
-    r.peaks[at] = p;
-    if (r.peakCount < int(MeasStats::kPeaks)) ++r.peakCount;
-  }
+  // Lines of the vector spectrum and of each axis.
+  r.peakCount = findPeaks(r.fft, N / 2 + 1, minBin, r.binHz, best, r.peaks, int(MeasStats::kPeaks));
+  for (int a = 0; a < 3; ++a)
+    r.axisPeakCount[a] =
+        findPeaks(r.axisFft[a], N / 2 + 1, minBin, r.binHz, best, r.axisPeaks[a], int(MeasStats::kAxisPeaks));
   // Refine the strongest line only when it is a local maximum: a line below ~1.5 Hz
   // (body bounce) leaves its strongest bin on a falling slope, and peaks[0] would
   // then be a weaker line elsewhere.
@@ -225,8 +245,8 @@ private:
 class CapturingSink : public MeasSink {
 public:
   CapturingSink(MeasSink &inner, MeasCapture &capture) : inner_(inner), capture_(capture) {}
-  bool open(int thresholdDeci) override {
-    if (!inner_.open(thresholdDeci)) return false;
+  bool open(int triggerMm) override {
+    if (!inner_.open(triggerMm)) return false;
     capture_.begin();
     return true;
   }

@@ -23,7 +23,7 @@ public:
 
   // MeasSink, sensor task. open() is false when the card is not ready (no card,
   // error, numbering exhausted) or the writer is parked or parking.
-  bool open(int thresholdDeci) override;
+  bool open(int triggerMm) override;
   void write(int32_t relUs, const Accel &a) override;
   void close() override;
   void missed(uint32_t count) override { fileMissed_ += count; }
@@ -31,8 +31,16 @@ public:
   // Any task; asynchronous.
   // Sample rate measured by the sensor task; written to the header of new files.
   void setMeasuredRate(float hz) { measuredHz_ = hz; }
+  // Pre-trigger and recording times written to the header of new files.
+  void setTimes(float preRollS, float recordS) { preRollS_ = preRollS; recordS_ = recordS; }
   void park();
   void unpark();
+  // Deletes every /MEAS/Mnnnn.CSV (and nothing else) from the writer task; only while idle
+  // (no measurement open, card ready), otherwise the request is dropped. Numbering starts
+  // again at M0001. The state is Cleaning meanwhile (open() is refused).
+  void requestCleanup() { cleanupWanted_ = true; }
+  uint32_t cleanupSeq() const { return cleanupSeq_.load(); }      // Counts finished cleanups.
+  uint32_t cleanedFiles() const { return cleanedFiles_.load(); }  // Deleted by the last one.
   // True once parked: the writer no longer touches the card (false again as soon
   // as unpark() is called).
   bool parked() const { return parkWanted_.load() && isParked_.load(); }
@@ -41,7 +49,7 @@ public:
 private:
   struct Item {
     uint8_t kind;
-    int32_t value;  // Sample: time relative to the trigger (us); open: threshold; close: drops.
+    int32_t value;  // Sample: time relative to the trigger (us); open: trigger distance (mm); close: drops.
     uint32_t extra; // Close: sensor samples missed during the measurement.
     float x, y, z;
   };
@@ -51,13 +59,14 @@ private:
   void run();
   void process(const Item &it);
   bool mount();
-  void startFile(int thresholdDeci);
+  void startFile(int triggerMm);
   void finishFile(uint32_t dropped, uint32_t missed = 0);
   bool flushBuffer();
   bool remountCard();
   bool reopenAfterGlitch();
   void doPark();
   void doUnpark();
+  void doCleanup();
   void fail(const char *message);
   void setState(State s, const char *message);
   void publishCounters();
@@ -65,10 +74,11 @@ private:
   QueueHandle_t queue_ = nullptr;
   float sampleRateHz_ = 0, rangeG_ = 0;
   std::atomic<bool> accepting_{false};   // Card ready for a new measurement.
-  std::atomic<bool> parkWanted_{false}, isParked_{false};
+  std::atomic<bool> parkWanted_{false}, isParked_{false}, cleanupWanted_{false};
+  std::atomic<uint32_t> cleanupSeq_{0}, cleanedFiles_{0};
   std::atomic<uint32_t> dropped_{0};     // All lost records.
   std::atomic<uint32_t> fileDropped_{0}; // Lost since the last open() (footer).
-  std::atomic<float> measuredHz_{0};
+  std::atomic<float> measuredHz_{0}, preRollS_{1.0f}, recordS_{5.0f};
   std::atomic<uint32_t> fileMissed_{0};  // Sensor samples missed since the last open().
   mutable portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
   MeasStatus status_;

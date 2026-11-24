@@ -2,9 +2,11 @@
 
 Osobny, prosty firmware (środowisko PlatformIO `waveshare_vibration`) do
 pomiaru drgań przejazdów zawieszek. Czujnik QMI8658 mierzy stale (~492 Hz), a
-**zapis na kartę TF rusza dopiero po przekroczeniu progu wibracji**, który
-ustawia się dotykiem na ekranie (i jest pamiętany po restarcie). Każdy pomiar
-to osobny plik CSV. Po podłączeniu kabla USB do komputera pomiary się
+**zapis na kartę TF rusza dopiero, gdy dalmierz VL53L0X zobaczy przejeżdżający
+element bliżej niż ustawiona odległość**. Odległość, czas nagrania i pozostałe
+parametry dalmierza ustawia się dotykiem na czwartej stronie (są pamiętane po
+restarcie). Drgania nie wyzwalają nagrania. Każdy pomiar
+to osobny plik CSV. Po włączeniu na ekranie trybu dysku USB pomiary się
 zatrzymują, a karta pokazuje się jako dysk.
 
 Sprzęt jest ten sam co w [docs/waveshare-README.md](waveshare-README.md)
@@ -19,31 +21,38 @@ akumulator i kamera nie są w nim zawarte.
 
 ## Obsługa
 
-Trzy ekrany 320×240, przełączane przesunięciem palca w bok (fonty FreeSans;
+Pięć ekranów 320×240, przełączane przesunięciem palca w bok (fonty FreeSans;
 podgląd na PC: `tools/render_vib.sh`). Ekran 1 (poniżej): wykres i statystyki;
-ekran 2: maksima nagrań w sesji; ekran 3: widmo FFT ostatniego pomiaru (lewe
-2/3, numerowane znaczniki na najsilniejszych prążkach) i tabela do 5 prążków
-(częstotliwość i amplituda, interpolowane między binami) w prawej 1/3.
+ekran 2: maksima nagrań w sesji; ekran 4: ustawienia dalmierza; ekran 5: przełącznik trybu dysku USB; ekran 3: widma FFT ostatniego pomiaru
+**osobno dla osi X, Y i Z** (lewe 2/3: trzy widma jedno pod drugim na wspólnej
+skali amplitudy, numerowane znaczniki na najsilniejszych prążkach każdej osi)
+i tabela trzech najsilniejszych prążków każdej osi (częstotliwość i amplituda,
+interpolowane między binami) w prawej 1/3. Pozwala to przypisać prążek do
+osi, czyli np. rolkom górnym (jedna oś) i bocznym (inna oś). Prążek wchodzi
+do tabeli, gdy ma co najmniej 5 % najsilniejszego prążka dowolnej osi i 0,01
+m/s², więc oś z samym szumem ma pustą tabelę. To osie czujnika (jak na wykresie),
+nie osie zawieszki: która oś odpowiada któremu rolkom, wynika z montażu płytki.
 
 ```text
 y 0    pasek stanu: [● CZUWAM] / [● REC 12.3 s] / [USB: KARTA W PC] ...   karta N   81% [bateria]
-y 36   lewe 2/3: panel wykresu: XYZ dynamiczne przyspieszenie, 5,4 s, pas ciszy między liniami progu
-         dolny wiersz panelu: legenda X Y Z, pasek poziomu (próg w środku), poziom w m/s2
-       prawa 1/3: statystyki ostatniego pomiaru (numer, czas, tabela X Y Z) i jego widmo FFT
-y 192  [ - ]      PROG WYZWALANIA  2.0 m/s2      [ + ]
+y 36   lewe 2/3: panel wykresu: XYZ dynamiczne przyspieszenie, 5,4 s
+         dolny wiersz panelu: legenda X Y Z, poziom w m/s2
+       prawa 1/3: statystyki ostatniego pomiaru (numer, czas, tabela X Y Z), pod nimi FFT na żywo
+y 198  DALMIERZ  245 mm   [pasek z kreską progu]   PROG 300 mm   CZEKAM
 ```
 
 Wykres pokazuje przyspieszenie z odjętą wolną średnią (grawitacja i przechył
 nie są widoczne), osie czujnika (X czerwony, Y zielony, Z niebieski). Skala
-pionowa dobiera się do progu (±5, 10, 20, 40 lub 80 m/s²); przerywane żółte
-linie to próg i jego odbicie, jaśniejszy pas między nimi to „cisza”. Próbki
-trafiają do kolumn według czasu próbki (nie chwili odebrania), więc linia jest
-ciągła także wtedy, gdy odświeżanie ekranu opóźni odbiór. Podczas nagrywania
-ramka panelu jest czerwona.
+pionowa dobiera się do największej wartości w oknie (±5, 10, 20, 40 lub 80
+m/s²). Próbki trafiają do kolumn według czasu próbki (nie chwili odebrania),
+więc linia jest ciągła także wtedy, gdy odświeżanie ekranu opóźni odbiór.
+Podczas nagrywania ramka panelu jest czerwona.
 
-Pasek poziomu pokazuje bieżącą długość wektora (to, co porównuje wyzwalacz)
-względem progu: żółta kreska w środku to próg, pasek zielony poniżej, czerwony
-od progu. Pomaga dobrać próg do szumu w spoczynku.
+Pasek u dołu pokazuje odległość z dalmierza (mm), a kreska w środku paska to
+odległość wyzwalania (pasek: 0 do 2× odległość; czerwony, gdy obiekt jest
+bliżej). Stan: `CZEKAM`, `NAGRYWAM`, `USB`, `BRAK ECHA`
+(nic w zasięgu) albo `BRAK DALMIERZA` (czujnik nie odpowiedział przy starcie;
+wtedy nic nie wyzwala nagrania, trzeba sprawdzić przewody i zrestartować).
 
 Po prawej stronie paska stanu: ikona karty z liczbą plików `M*.CSV` w `/MEAS`
 (ikona żółta, gdy od startu karta była naprawiana ponownym montowaniem) i
@@ -64,14 +73,18 @@ starcie, zanim cokolwiek się nagra, panel pokazuje `BRAK POMIARU`.
 | `pik` | największe odchylenie od średniej w obie strony |
 | `p-p` | rozstęp, max − min |
 
-Nagłówek panelu: numer pliku (`M0012`) i czas trwania pomiaru. Pod tabelą
-`FFT 48 Hz` to najsilniejsza składowa (powyżej ok. 1 Hz) długości wektora
-XYZ; poniżej widmo amplitudowe od 0 do połowy częstotliwości próbkowania
-(ok. 256 Hz, skala dobiera się do najwyższego prążka), z żółtym znacznikiem
-tej składowej. Widmo to okno 1024 próbek (ok. 2 s, okno Hanna) wokół
-najmocniejszego momentu pomiaru, nie cały pomiar; czujnik ma pasmo ok. 137 Hz,
-więc prążki powyżej tej wartości są już tłumione. Dla pomiaru krótszego niż
-1024 próbki jest tylko tabela (`FFT: za krotki`).
+Nagłówek panelu: numer pliku (`M0012`) i czas trwania pomiaru, pod nim tabela.
+
+**FFT NA ŻYWO** (dolna część panelu): widmo amplitudowe bieżącego sygnału, czyli
+ostatnich 1024 próbek (ok. 2,1 s, okno Hanna), przeliczane ok. 3 razy na sekundę,
+niezależnie od nagrywania. Trzy osie nałożone w kolorach X/Y/Z, oś częstotliwości
+od 0 do połowy częstotliwości próbkowania (ok. 245 Hz), skala dobiera się do
+najwyższego prążka. Liczba w nagłówku i żółty znacznik to najsilniejsza składowa
+(powyżej ok. 1 Hz) długości wektora XYZ. Czujnik ma pasmo ok. 137 Hz, więc prążki
+powyżej są już tłumione. Po starcie, po przerwie w danych i w trybie dysku USB
+widmo zbiera najpierw 2 s próbek (`zbiera probki...`). Liczenie zajmuje ok. 13 ms
+(log: `fft … us`) i nie kosztuje czujnika żadnej próbki. Widmo ostatniego pomiaru,
+osobno dla każdej osi, jest na stronie 3.
 
 Próbki idą do bufora 196 KB w PSRAM (`MeasCapture` w `include/MeasStats.h`);
 bez PSRAM albo gdy poprzedni pomiar jest jeszcze liczony, pomiar zapisuje się
@@ -82,7 +95,7 @@ pętla ekranu, nie zadanie czujnika.
 
 | Napis | Znaczenie |
 |---|---|
-| `● CZUWAM` (zielony) | czujnik działa, karta gotowa, czeka na przekroczenie progu |
+| `● CZUWAM` (zielony) | czujnik działa, karta gotowa, czeka na obiekt w odległości wyzwalania |
 | `● REC 3.2 / 30 s` (czerwony, kropka miga) | trwa zapis pomiaru; czas od wyzwolenia i limit, pod spodem pasek postępu |
 | `USB: KARTA W PC` (niebieski) | komputer ma kartę (albo oddawanie jest w toku); nic się nie nagrywa, na wykresie `USB: ZAPIS WSTRZYMANY` |
 | `BRAK KARTY` (żółty) | brak karty przy starcie; zapis rusza sam po włożeniu karty (ponowna próba co 1 s), ale dysk USB pojawi się dopiero po RESET |
@@ -104,46 +117,75 @@ w kolumnie `t_ms`). Podobnie gdy nowy plik nie daje się utworzyć: jedno
 ponowne montowanie i druga próba. Dopiero gdy to nie pomoże, pojawia się
 `BLAD KARTY`, a po 1 s karta jest montowana od nowa.
 
-### Próg
+### Dalmierz (strona 4)
 
-Przyciski `-` i `+` zmieniają próg w m/s² (domyślnie 2,0; zakres 0,2–40,0).
-Krok następuje od razu po dotknięciu; po przytrzymaniu dłużej niż 500 ms
-powtarza się co 100 ms. Wielkość kroku zależy od wartości: **0,1** poniżej
-5,0, **0,5** od 5,0 do 20,0, **1,0** powyżej. Wartość jest zapisywana w NVS po
-puszczeniu przycisku (nie podczas nagrywania, żeby zapis do flasha nie
-kosztował próbek) i odtwarzana po restarcie.
+Cztery wiersze z przyciskami `-` / `+`; krok następuje od razu po dotknięciu,
+po przytrzymaniu dłużej niż 500 ms powtarza się co 100 ms. Pod wierszami jest
+odczyt odległości na żywo (także podczas nagrywania; w trybie dysku USB
+dalmierz jest wyłączony i pasek pokazuje `-`), więc odległość można dobrać
+„na oko”.
 
-Mierzona jest **długość wektora (a − wolna średnia, tau 1 s)**: to samo
-przyspieszenie co na wykresie, bez grawitacji, więc wolny przechył płytki nie
-wyzwala, a drgania poziome tak. Próg stosuje się do tej długości.
+| Parametr | Domyślnie | Zakres i krok |
+|---|---|---|
+| odległość wyzwalania | 300 mm | 30–1200 mm; krok 10 mm do 500 mm, 50 mm powyżej |
+| czas rejestracji po wyzwoleniu | 5 s | 1–30 s, krok 1 s |
+| pre-roll (część przed wyzwoleniem) | 1000 ms | 0–1000 ms, krok 100 ms |
+| tryb pomiaru dalmierza | NORMALNY | SZYBKI 20 ms / NORMALNY 33 ms / DOKLADNY 200 ms |
+
+Wartości są zapisywane w NVS po puszczeniu przycisku (nie podczas nagrywania,
+żeby zapis do flasha nie kosztował próbek) i odtwarzane po restarcie.
+
+Podłączenie VL53L0X (adres I2C 0x29, ta sama magistrala co dotyk i IMU):
+3V3, GND, SDA = GPIO48, SCL = GPIO47. Czujnik jest inicjowany raz, przy
+starcie; po dołączeniu go później trzeba zrestartować płytkę.
 
 ### Start i koniec pomiaru
 
-- Po włączeniu zasilania, po przerwie w danych z czujnika i po zwolnieniu USB
-  wyzwalacz jest wyłączony przez 1 s (rozgrzewka filtra).
-- Gdy długość wektora osiągnie próg, powstaje plik `/MEAS/Mnnnn.CSV`. Zawiera
-  **1 s przed wyzwoleniem** (pre-roll) — te próbki mają ujemny czas.
-- Pomiar kończy się, gdy sygnał jest **poniżej progu przez 3 s** (cisza).
-  Plik dostaje stopkę i się zamyka; rejestrator wraca do `CZUWAM`.
-- **Maksymalny czas pomiaru: 30 s** od wyzwolenia (plik ma więc najwyżej
-  ok. 31 s razem z pre-rollem). Gdy drgania trwają dłużej, plik jest zamykany
-  po 30 s, a kolejny pomiar rusza dopiero po zwykłej ciszy (3 s poniżej progu),
-  więc ciągła wibracja nie tworzy serii plików jeden po drugim.
+- Dalmierz mierzy cały czas (ok. 34 razy na s w trybie NORMALNYM), także podczas
+  nagrywania; poza trybem dysku USB. Zmierzone: nie kosztuje to akcelerometru
+  ani jednej próbki (500 Hz, `missed 0`, 0 błędów I2C).
+- Pojedynczy odczyt nie wyzwala (czujnik czasem podaje błędną wartość).
+  **Wyzwolenie: co najmniej 3 z ostatnich 5 odczytów poniżej odległości
+  wyzwalania i zgodnych ze sobą** (najmniejszy i największy różnią się o
+  najwyżej 40 mm albo 20 % większego). Rozproszone losowe odczyty się nie
+  zgodzą; prawdziwy obiekt tak. Odczyt „poza zasięgiem” nigdy nie wyzwala.
+  Obiekt musi więc być w polu widzenia przez 3 odczyty (ok. 100 ms w trybie
+  NORMALNYM, 60 ms w SZYBKIM; dla szybkich przejazdów wybierz SZYBKI).
+- Wyzwolenie podczas trwającego pomiaru jest ignorowane.
+- Powstaje plik `/MEAS/Mnnnn.CSV`. Zawiera **pre-roll** przed wyzwoleniem
+  (domyślnie 1 s; te próbki mają ujemny czas) i **czas rejestracji** po nim
+  (domyślnie 5 s; maksimum 30 s). Potem plik dostaje stopkę i się zamyka;
+  rejestrator wraca do `CZUWAM`.
+- Kolejne wyzwolenie wymaga, żeby obiekt się oddalił (3 z 5 odczytów dalej niż
+  odległość + 20 mm albo bez echa). Element stojący przed czujnikiem nie
+  tworzy więc serii plików.
+- Opóźnienie wykrycia to ok. 30 ms (czas pomiaru dalmierza); pokrywa je pre-roll.
 - Gdy plik nie może zostać otwarty, kolejny Start jest ignorowany przez 1 s.
 
 ### USB
 
-1. Podłącz kabel USB do komputera. Gdy komputer wyliczy urządzenie (i magistrala
-   nie jest uśpiona), pomiary się zatrzymują; trwający pomiar jest najpierw
-   zamykany ze stopką, dopiero potem karta jest oddawana.
-2. Karta pojawia się jako dysk (producent `WIBROMTR`, produkt `VIBRACJE` w
+Po podłączeniu kabla do komputera rejestrator **dalej pracuje i trzyma kartę**;
+komputer widzi tylko port szeregowy (log co sekundę). Karta trafia do komputera
+dopiero w trybie dysku:
+
+1. Podłącz kabel USB do komputera.
+2. Przesuń palcem do ostatniej strony (5, „USB") i dotknij **WLACZ TRYB DYSKU
+   USB**. Przycisk działa tylko przy podłączonym kablu i nie podczas nagrywania.
+   Trwający pomiar nie jest przerywany; poczekaj na jego koniec.
+3. Karta pojawia się jako dysk (producent `WIBROMTR`, produkt `VIBRACJE` w
    danych urządzenia; nazwa woluminu to etykieta samej karty). Pliki są w
-   `/MEAS`.
-3. **Wysuń** dysk w systemie (albo odłącz kabel). Płytka montuje kartę od
-   nowa i wraca do czuwania; pomiary ruszają po ok. 1 s rozgrzewki.
+   `/MEAS`. Pomiary są wstrzymane (pasek `USB: KARTA W PC`).
+4. Skończ: dotknij **ZAKONCZ TRYB DYSKU** (najlepiej po wysunięciu dysku w
+   systemie), wysuń dysk albo odłącz kabel. Płytka montuje kartę od nowa i
+   wraca do czuwania. Po odłączeniu kabla następne podłączenie znów zaczyna od
+   trybu szeregowego.
+
+Przyciski reagują dopiero na stabilny dotyk (min. 60 ms, bez skoków
+współrzędnych); krótkie „widmowe” dotknięcia kontrolera dotyku są ignorowane
+(w logu: `gest ODRZUCONY`).
 
 Port szeregowy działa równolegle (ta sama wtyczka USB): co sekundę wypisuje
-stan (próbki/s, wartości dynamiczne, próg, tryb, stan karty, liczniki utraconych
+stan (próbki/s, wartości dynamiczne, dalmierz i odległość, tryb, stan karty, liczniki utraconych
 próbek). Brak karty przy starcie oznacza, że dysk USB nie jest zarejestrowany —
 działa wtedy tylko port szeregowy.
 
@@ -159,11 +201,11 @@ Przyspieszenia w m/s² w osiach czujnika, trzy miejsca po przecinku.
 # wibrometr measurement v1
 # device: ESP32-S3-Touch-LCD-2, QMI8658
 # measurement: 7
-# threshold_m_s2: 2.0
+# trigger_distance_mm: 300
 # sample_rate_hz: 500.0
 # range_g: 8
 # pre_trigger_s: 1.0
-# quiet_s: 3.0
+# record_s: 5.0
 # trigger_at: t_ms = 0
 # columns: t_ms,ax_m_s2,ay_m_s2,az_m_s2
 t_ms,ax_m_s2,ay_m_s2,az_m_s2
@@ -208,16 +250,13 @@ Zmieniane w kodzie (nie na ekranie):
 | częstotliwość próbek | 500 Hz nominalnie, zmierzone ~491,5 Hz (więcej się nie da: patrz niżej) | `vib::kSampleRateHz`, `src/vibration/VibConfig.h` |
 | zakres | ±8 g (`kRange = 2`) | `vib::kRange`, `VibConfig.h` |
 | filtr sprzętowy czujnika | wyłączony: pasmo 137,5 Hz (wbudowany filtr antyaliasingowy 27,5% ODR); z LPF 13,37% byłoby 66,9 Hz | `vib::kLowPass`, `vib::kLowPassMode`, `VibConfig.h` |
-| pre-roll | 1 s | `vib::kPreRollUs`, `VibConfig.h` (domyślny argument `RecorderCore`: `include/RecorderCore.h`) |
-| maksymalny czas pomiaru | 30 s | `vib::kMaxRecordUs`, `VibConfig.h` (0 w `RecorderCore` = bez limitu) |
-| cisza kończąca pomiar | 3 s | `vib::kQuietUs`, `VibConfig.h` (domyślnie też w `TriggerDetector::Config`, `include/TriggerDetector.h`) |
-| rozgrzewka wyzwalacza | 1 s | `vib::kWarmupUs`, `VibConfig.h` |
-| stała czasowa wolnej średniej (filtr) | 1 s | `src/vibration/main.cpp` (`TriggerDetector::Config`), domyślnie `highPassTauS` w `include/TriggerDetector.h` |
+| pre-roll, czas rejestracji, odległość wyzwalania, tryb dalmierza | patrz tabela „Dalmierz (strona 4)” | `include/RangeUi.h` (`rangeui::Settings`), NVS: `rdist`, `rrec`, `rpre`, `rmode` |
+| potwierdzenie wyzwolenia / histereza ponownego uzbrojenia | 3 z 5 odczytów w zgodzie (40 mm / 20 %) / 20 mm | `RangeTrigger::kWindow`, `kNeeded`, `kClusterMm`, `kHysteresisMm`, `include/RangeTrigger.h` |
+| stała czasowa wolnej średniej (filtr tylko do wykresu) | 1 s | `src/vibration/main.cpp` (`TriggerDetector::Config`), domyślnie `highPassTauS` w `include/TriggerDetector.h` |
 | przerwa po odmowie otwarcia pliku (holdoff) | 1 s | `holdoffUs` w konstruktorze `RecorderCore`, `include/RecorderCore.h` |
-| próg domyślny / zakres | 2,0 / 0,2–40,0 m/s² | `include/ThresholdUi.h` |
 
 Pierścień pre-rollu ma 2048 próbek (ok. 4 s przy 500 Hz), `SampleRing<2048>`
-w `include/RecorderCore.h`.
+w `include/RecorderCore.h`; pre-roll jest ograniczony do 1 s.
 
 ### Dlaczego nie więcej niż 500 Hz
 
@@ -266,10 +305,10 @@ g++ -std=c++17 -Wall -Wextra -Iinclude test/vibration_checks.cpp -o vc && ./vc
 
 `vibration_checks` obejmuje sekcje: format plików (nagłówek, wiersze próbek
 z ujemnym czasem, stopka, ścieżki i numeracja `M0001`–`M9999`), pierścień
-próbek, wyzwalacz (rozgrzewka, próg, cisza, przechył bez wyzwolenia),
-rdzeń rejestratora (pre-roll, otwarcie/zamknięcie, holdoff, przerwa w danych,
-tryb USB), logikę ekranu progu (kroki, przyciski, zakres wykresu,
-przytrzymanie), własność karty (`UsbOwnership`, `CardGate`) i oddawanie karty
+próbek, wyzwalacz dalmierza (`RangeTrigger`: potwierdzenie, histereza, brak
+echa) i dekodowanie wyniku VL53L0X, rdzeń rejestratora (wyzwolenie z zewnątrz,
+pre-roll, czas nagrania, odmowa otwarcia, holdoff, przerwa w danych, tryb USB),
+logikę strony ustawień (kroki, przyciski, zakres wykresu, przytrzymanie), własność karty (`UsbOwnership`, `CardGate`) i oddawanie karty
 (`CardHandover`).
 
 ## Pierwsze włączenie — niesprawdzone na sprzęcie
@@ -283,10 +322,17 @@ Wszystko poniżej jest **niesprawdzone na sprzęcie**:
    i w Linuksie.
 3. **Zapis 500 Hz bez utraconych próbek** (`dropped` w stopce i na porcie
    szeregowym) razem z odświeżaniem ekranu na wspólnym SPI.
-4. **Orientacja dotyku:** przyciski −/+ reagują tam, gdzie są narysowane.
-5. **Próg dobrany do prawdziwych przejazdów:** zmierz poziom szumu w spoczynku
-   (płytka leży nieruchomo; szum QMI8658 to rzędu 0,05–0,1 m/s²) i ustaw
-   próg wyraźnie wyżej.
+4. **Orientacja dotyku:** przyciski −/+ na stronie 4 reagują tam, gdzie są narysowane.
+5. **Dalmierz VL53L0X:** czy inicjuje się przy starcie (log `Dalmierz: VL53L0X
+   gotowy`), czy odczyty na stronie 4 zgadzają się z linijką, czy odległość
+   wyzwalania dobrana „na oko” działa na prawdziwym elemencie (połysk, ciemne
+   lub przezroczyste powierzchnie i światło słoneczne pogarszają odczyt), czy
+   przy pracy dalmierza `missed` czujnika drgań nie rośnie ponad zwykłe wartości
+   oraz czy status odczytu (kod 11 = poprawny) jest właściwy dla tego egzemplarza.
+   Diagnostyka: w logu co sekundę zakres odczytów, liczba odczytów, braków echa i
+   błędów I2C; przy każdym wyzwoleniu ostatnie 16 odczytów. Na porcie szeregowym:
+   `d` włącza/wyłącza wypisywanie każdego odczytu (status, sygnał, światło), `f`/`n`/`p`
+   ustawia tryb dalmierza (szybki/normalny/dokładny), `k` uruchamia kalibrację dotyku.
 6. **Uśpienie/autosuspend hosta z zamontowanym dyskiem:** host usypiający
    zamontowany wolumin oddaje kartę firmware'owi pod swoim buforowanym
    systemem plików (znane ryzyko; uszkodzenie systemu plików możliwe).
@@ -303,8 +349,12 @@ Wszystko poniżej jest **niesprawdzone na sprzęcie**:
   `numeracja pelna`, nic nie jest nadpisywane.
 - Szybkie odłączenie USB w trakcie pomiaru zamyka plik ze stopką
   `# end: samples=… dropped=…` (pomiar jest krótszy, ale poprawny).
-- Żółte linie progu na wykresie dotyczą pojedynczych osi, a wyzwalacz liczy
-  długość wektora, więc wyzwolenie może nastąpić, gdy żadna oś nie przekracza
-  linii.
+- Dalmierz jest inicjowany przy starcie, po sprzętowym resecie samego układu
+  (reset płytki go nie resetuje: czujnik mierzący w chwili restartu wracał
+  „ślepy”, ze światłem otoczenia ok. 9 Mcps i samymi losowymi odczytami). Gdy
+  mimo to światło otoczenia przez ok. 3 s jest wysokie (> 4 Mcps), inicjuje się
+  ponownie (najwyżej co 30 s). Bez dalmierza przy starcie nie ma wyzwalania do
+  restartu. Wyzwalanie drganiami nie istnieje (został tylko filtr do wykresu).
+- Zasięg VL53L0X w trybach domyślnych to ok. 1,2 m (dlatego maksimum 1200 mm).
 - Karta włożona po starcie: zapis wznawia się sam (próba co 1 s), napis `BRAK KARTY` znika. RESET jest potrzebny tylko dla dysku USB (rejestrowany przy starcie).
 - Płytka nie ma zegara czasu rzeczywistego: w plikach nie ma daty.

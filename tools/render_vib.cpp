@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <random>
 #include <vector>
+#include "LiveSpectrum.h"
 #include "VibUi.h"
 
 namespace {
@@ -43,7 +44,8 @@ int main() {
 
   VibModel m;
   m.sensorLive = true;
-  m.thresholdDeci = 10;
+  m.range.distanceMm = 300;
+  m.rangeMm = 520;
   m.sd.state = MeasStatus::State::Idle;
   m.sd.cardMb = 14910;
   m.sd.measurements = 12;
@@ -71,6 +73,20 @@ int main() {
   }
   m.last = &stats;
   m.lastNumber = 12;
+  // Live spectrum: rollers on top (48 Hz on Z), side rollers (31 Hz on X, 120 Hz weak on Y).
+  static LiveSpectrum live;
+  {
+    std::mt19937 rng(5);
+    std::normal_distribution<float> noise(0, 0.04f);
+    for (int i = 0; i < int(LiveSpectrum::kSize); ++i) {
+      const float t = i / 490.0f;
+      live.add({0.9f * std::sin(2 * 3.14159f * 31 * t) + noise(rng), 0.3f * std::sin(2 * 3.14159f * 120 * t) + noise(rng),
+                1.4f * std::sin(2 * 3.14159f * 48 * t) + noise(rng)},
+               uint32_t(i * 1e6f / 490.0f));
+    }
+    live.compute();
+  }
+  m.live = &live;
   drawVibScreen(c, m);
   dump(c, "1-armed.raw");
 
@@ -80,11 +96,10 @@ int main() {
   m.sd.recordingMs = 12300;
   m.sd.number = 13;
   m.level = 2.7f;
-  m.pressed = thrui::Button::Plus;
+  m.rangeState = VibModel::RangeState::Paused;
   drawVibScreen(c, m);
   dump(c, "2-recording.raw");
 
-  m.pressed = thrui::Button::None;
   m.mode = RecorderCore::Mode::Usb;
   m.hostOwns = true;
   m.sd.state = MeasStatus::State::Parked;
@@ -104,7 +119,7 @@ int main() {
   m.sd.recoveries = 2;
   m.history = &pass;
   m.level = 0.3f;
-  m.thresholdDeci = 25;
+  m.rangeState = VibModel::RangeState::Missing;
   drawVibScreen(c, m);
   dump(c, "4-error.raw");
 
@@ -146,5 +161,60 @@ int main() {
   m.lastNumber = 12;
   drawVibScreen(c, m);
   dump(c, "9-fft.raw");
+
+  // Page 4: range finder settings, with the object at 180 mm (closer than the 300 mm trigger).
+  m.page = 3;
+  m.rangeState = VibModel::RangeState::Ranging;
+  m.rangeMm = 520;
+  drawVibScreen(c, m);
+  dump(c, "10-range.raw");
+  m.rangeMm = 180;
+  m.rangePress = {rangeui::Param::Record, +1};
+  m.range.mode = 2;
+  drawVibScreen(c, m);
+  dump(c, "11-range-near.raw");
+
+  // Page 5: USB disk mode switch: no cable, cable (serial), disk mode.
+  m.page = 4;
+  m.rangePress = {};
+  drawVibScreen(c, m);
+  dump(c, "12-usb-no-cable.raw");
+  m.usbHost = true;
+  drawVibScreen(c, m);
+  dump(c, "13-usb-serial.raw");
+  m.usbDisk = true;
+  m.mode = RecorderCore::Mode::Usb;
+  m.hostOwns = true;
+  m.sd.state = MeasStatus::State::Parked;
+  m.usbButton = usbui::Button::Usb;
+  drawVibScreen(c, m);
+  dump(c, "14-usb-disk.raw");
+
+  // Clearing the card: asked to confirm, then the result.
+  m.usbDisk = false;
+  m.usbHost = true;
+  m.mode = RecorderCore::Mode::Armed;
+  m.hostOwns = false;
+  m.sd.state = MeasStatus::State::Idle;
+  m.usbButton = usbui::Button::None;
+  m.cleanConfirm = true;
+  drawVibScreen(c, m);
+  dump(c, "16-clean-confirm.raw");
+  m.cleanConfirm = false;
+  m.cleanResult = 284;
+  m.sd.measurements = 0;
+  drawVibScreen(c, m);
+  dump(c, "17-clean-done.raw");
+  m.cleanResult = -1;
+  m.sd.state = MeasStatus::State::Cleaning;
+  m.sd.measurements = 284;
+  drawVibScreen(c, m);
+  dump(c, "18-cleaning.raw");
+
+  // Touch calibration, third target.
+  m.usbDisk = false;
+  m.calibStep = 2;
+  drawVibScreen(c, m);
+  dump(c, "15-calibration.raw");
   return 0;
 }

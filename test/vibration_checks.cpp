@@ -10,11 +10,18 @@
 #include "FifoClock.h"
 #include "MeasFormat.h"
 #include "MeasStats.h"
+#include "LiveSpectrum.h"
 #include "PeakLog.h"
+#include "SwipeGuard.h"
+#include "TouchCalibration.h"
+#include "UsbPageUi.h"
 #include "RecorderCore.h"
 #include "SampleRing.h"
 #include "TriggerDetector.h"
-#include "ThresholdUi.h"
+#include <initializer_list>
+#include "RangeTrigger.h"
+#include "RangeUi.h"
+#include "Vl53l0xDecode.h"
 #include "UsbOwnership.h"
 #include "CardGate.h"
 #include "CardHandover.h"
@@ -59,7 +66,7 @@ static void formatChecks() {
   CHECK(measfmt::nextMeasNumber(9999) == 0);
 
   char buf[512];
-  const measfmt::Header h{7, 20, 500.f, 8.f, 1.f, 3.f};
+  const measfmt::Header h{7, 300, 500.f, 8.f, 1.f, 5.f};
   const std::string header(buf, measfmt::formatHeader(buf, sizeof buf, h));
   // Every line is a '#' comment except the final plain column-names line.
   const char *columnLine = "t_ms,ax_m_s2,ay_m_s2,az_m_s2\n";
@@ -71,11 +78,11 @@ static void formatChecks() {
     if ((i == 0 || comments[i - 1] == '\n') && comments[i] != '#') allComments = false;
   CHECK(allComments);
   CHECK(contains(header, "# measurement: 7\n"));
-  CHECK(contains(header, "# threshold_m_s2: 2.0\n"));
+  CHECK(contains(header, "# trigger_distance_mm: 300\n"));
   CHECK(contains(header, "# sample_rate_hz: 500.0\n"));
   CHECK(contains(header, "# range_g: 8\n"));
   CHECK(contains(header, "# pre_trigger_s: 1.0\n"));
-  CHECK(contains(header, "# quiet_s: 3.0\n"));
+  CHECK(contains(header, "# record_s: 5.0\n"));
   CHECK(contains(header, "# trigger_at: t_ms = 0\n"));
   const char *columns = "# columns: t_ms,ax_m_s2,ay_m_s2,az_m_s2\n";
   CHECK(comments.size() >= std::strlen(columns) &&
@@ -205,15 +212,15 @@ struct FakeSink : MeasSink {
   struct Call {
     char kind;  // 'o' open, 'w' write, 'c' close
     int32_t relUs;
-    int thresholdDeci;
+    int triggerMm;
     bool ok;
     uint32_t at;  // test clock when the call happened
   };
   std::vector<Call> calls;
   bool acceptOpen = true;
   uint32_t now = 0;
-  bool open(int thresholdDeci) override {
-    calls.push_back({'o', 0, thresholdDeci, acceptOpen, now});
+  bool open(int triggerMm) override {
+    calls.push_back({'o', 0, triggerMm, acceptOpen, now});
     return acceptOpen;
   }
   void write(int32_t relUs, const Accel &) override { calls.push_back({'w', relUs, 0, true, now}); }
@@ -241,30 +248,34 @@ static void feedCore(RecorderCore &core, FakeSink &sink, uint32_t tStartUs, floa
   }
 }
 
-static Accel impulse(float t) {  // 10 Hz, 5 m/s2 on X from t=3 s for 2 s
-  if (t < 3.0f || t >= 5.0f) return gravity(t);
-  return Accel{5.0f * std::sin(2.0f * 3.14159265f * 10.0f * (t - 3.0f)), 0, 9.81f};
-}
-
+// requestStart() is taken by the next sample; a feed in two parts lets a test start
+// in the middle of a stream.
 static void coreChecks() {
   using M = RecorderCore::Mode;
-  {  // silence
+  const auto firstWrite = [](const FakeSink &sink) {
+    const auto writes = sink.only('w');
+    return writes.empty() ? int32_t(0) : writes[0].relUs;
+  };
+  {  // silence, and vibration alone does not start anything
     RecorderCore core;
     FakeSink sink;
-    feedCore(core, sink, 0, 5.0f, gravity);
+    feedCore(core, sink, 0, 5.0f, burstFromZero);
     CHECK(sink.calls.empty());
     CHECK(core.mode() == M::Armed);
   }
-  {  // one impulse -> one measurement with 1 s pre-roll
+  {  // one start request -> one measurement: 1 s pre-roll, 5 s after the trigger
     RecorderCore core;
     FakeSink sink;
-    CHECK(core.thresholdDeci() == 20);
-    feedCore(core, sink, 0, 9.0f, impulse);
+    feedCore(core, sink, 0, 3.0f, gravity);
+    core.requestStart(300);
+    CHECK(core.startPending());
+    feedCore(core, sink, 3000000, 8.0f, gravity);
+    CHECK(!core.startPending());
     const auto opens = sink.only('o');
-    CHECK(opens.size() == 1 && opens[0].thresholdDeci == 20);
+    CHECK(opens.size() == 1 && opens[0].triggerMm == 300 && opens[0].at == 3000000);
     const auto writes = sink.only('w');
     CHECK(!writes.empty());
-    if (!writes.empty()) CHECK(writes[0].relUs >= -1000000 && writes[0].relUs <= -998000);
+    CHECK(firstWrite(sink) >= -1000000 && firstWrite(sink) <= -998000);
     std::size_t zeros = 0;
     bool step2000 = true;
     for (std::size_t i = 0; i < writes.size(); ++i) {
@@ -273,165 +284,335 @@ static void coreChecks() {
     }
     CHECK(zeros == 1);
     CHECK(step2000);
+    CHECK(writes.back().relUs >= 4990000 && writes.back().relUs <= 5002000);
     const auto closes = sink.only('c');
     CHECK(closes.size() == 1);
-    // Stop fires 3 s after the last above-threshold sample, which is a few ms before the
-    // impulse ends at 5.0 s (same as in Task 2), so the lower bound is 7.98 s, not 8.0 s.
-    if (closes.size() == 1) CHECK(closes[0].at >= 7980000 && closes[0].at <= 8100000);
-    CHECK(!sink.calls.empty() && sink.calls.back().kind == 'c');  // nothing written after close
+    if (closes.size() == 1) CHECK(closes[0].at >= 7990000 && closes[0].at <= 8004000);
+    CHECK(sink.calls.back().kind == 'c');  // nothing written after close
     CHECK(core.mode() == M::Armed);
   }
-  {  // refused open -> holdoff between attempts
+  {  // settings: shorter pre-roll, other recording time
+    RecorderCore core;
+    FakeSink sink;
+    core.setPreRollUs(300000);
+    core.setRecordUs(2000000);
+    feedCore(core, sink, 0, 3.0f, gravity);
+    core.requestStart(120);
+    feedCore(core, sink, 3000000, 4.0f, gravity);
+    CHECK(firstWrite(sink) >= -300000 && firstWrite(sink) <= -298000);
+    const auto closes = sink.only('c');
+    CHECK(closes.size() == 1 && closes[0].at >= 4990000 && closes[0].at <= 5004000);
+    core.setPreRollUs(5000000);  // clamped to the 1 s the ring holds
+    core.requestStart(120);
+    sink.calls.clear();
+    feedCore(core, sink, 7000000, 0.5f, gravity);
+    CHECK(firstWrite(sink) >= -1000000);
+  }
+  {  // a start request in the first moments: the pre-roll is whatever the ring holds
+    RecorderCore core;
+    FakeSink sink;
+    feedCore(core, sink, 0, 0.2f, gravity);
+    core.requestStart(300);
+    feedCore(core, sink, 200000, 0.1f, gravity);
+    CHECK(core.mode() == M::Recording && firstWrite(sink) >= -202000);
+  }
+  {  // a request while recording is dropped, not queued for after the measurement
+    RecorderCore core;
+    FakeSink sink;
+    feedCore(core, sink, 0, 1.5f, gravity);
+    core.requestStart(300);
+    feedCore(core, sink, 1500000, 1.0f, gravity);
+    CHECK(core.mode() == M::Recording);
+    core.requestStart(300);
+    feedCore(core, sink, 2500000, 6.0f, gravity);
+    CHECK(sink.count('o') == 1 && sink.count('c') == 1 && core.mode() == M::Armed && !core.startPending());
+  }
+  {  // refused open -> no recording, the request is gone, holdoff between attempts
     RecorderCore core;
     FakeSink sink;
     sink.acceptOpen = false;
-    feedCore(core, sink, 0, 3.0f, burstFromZero);
-    const auto refused = sink.only('o');
-    CHECK(!refused.empty() && refused.size() <= 3);
-    for (std::size_t i = 1; i < refused.size(); ++i) CHECK(refused[i].at - refused[i - 1].at >= 1000000);
-    CHECK(sink.count('w') == 0 && sink.count('c') == 0);
-    CHECK(core.mode() == M::Armed);
+    feedCore(core, sink, 0, 1.0f, gravity);
+    core.requestStart(300);
+    feedCore(core, sink, 1000000, 0.1f, gravity);
+    CHECK(sink.count('o') == 1 && sink.count('w') == 0 && sink.count('c') == 0);
+    CHECK(core.mode() == M::Armed && !core.startPending());
+    core.requestStart(300);  // inside the 1 s holdoff
+    feedCore(core, sink, 1100000, 0.5f, gravity);
+    CHECK(sink.count('o') == 1 && !core.startPending());
     sink.acceptOpen = true;
-    const std::size_t before = sink.calls.size();
-    feedCore(core, sink, 3000000, 1.5f, burstFromZero);
-    std::size_t nextOpen = before;
-    while (nextOpen < sink.calls.size() && sink.calls[nextOpen].kind != 'o') ++nextOpen;
-    CHECK(nextOpen < sink.calls.size());
-    if (nextOpen < sink.calls.size() && !refused.empty()) {
-      const auto &o = sink.calls[nextOpen];
-      CHECK(o.ok && o.at - refused.back().at >= 1000000 && o.at - refused.back().at <= 1100000);
-    }
-    CHECK(core.mode() == M::Recording && sink.count('w') > 0);
+    core.requestStart(300);
+    feedCore(core, sink, 2100000, 0.2f, gravity);
+    CHECK(sink.count('o') == 2 && core.mode() == M::Recording);
   }
-  {  // USB request during a measurement
+  {  // USB: requests are ignored, a running measurement is closed, then it arms again
     RecorderCore core;
     FakeSink sink;
-    feedCore(core, sink, 0, 1.5f, burstFromZero);
+    feedCore(core, sink, 0, 1.0f, gravity);
+    core.requestStart(300);
+    feedCore(core, sink, 1000000, 1.0f, gravity);
     CHECK(core.mode() == M::Recording);
     core.requestUsb(true);
     core.service(sink);
-    CHECK(sink.count('c') == 1);
-    CHECK(core.mode() == M::Usb);
+    CHECK(sink.count('c') == 1 && core.mode() == M::Usb);
     const std::size_t inUsb = sink.calls.size();
-    feedCore(core, sink, 1500000, 2.0f, burstFromZero);
-    core.requestUsb(true);  // repeated request while already in USB mode
-    core.service(sink);
+    core.requestStart(300);
+    feedCore(core, sink, 2000000, 1.0f, gravity);
+    CHECK(sink.calls.size() == inUsb && !core.startPending());
     core.onGap(sink);  // gap in USB mode keeps USB and touches no sink
-    CHECK(core.mode() == M::Usb);
-    CHECK(sink.calls.size() == inUsb);
+    CHECK(core.mode() == M::Usb && sink.calls.size() == inUsb);
     core.requestUsb(false);
     core.service(sink);
     CHECK(core.mode() == M::Armed);
-    feedCore(core, sink, 3500000, 0.99f, burstFromZero);  // warm-up again
-    CHECK(sink.calls.size() == inUsb);
-    feedCore(core, sink, 4490000, 0.2f, burstFromZero);
+    core.requestStart(300);
+    feedCore(core, sink, 3000000, 0.2f, gravity);
     CHECK(sink.count('o') == 2 && core.mode() == M::Recording);
   }
   {  // gap: close, and the next measurement holds no pre-gap samples
-    TriggerDetector::Config cfg;
-    cfg.warmupUs = 100000;  // shorter than the pre-roll so stale ring entries would be in its window
-    RecorderCore core(cfg);
+    RecorderCore core;
     FakeSink sink;
-    feedCore(core, sink, 0, 1.0f, burstFromZero);
+    feedCore(core, sink, 0, 1.0f, gravity);
+    core.requestStart(300);
+    feedCore(core, sink, 1000000, 0.5f, gravity);
     CHECK(core.mode() == M::Recording);
     core.onGap(sink);
-    CHECK(sink.count('c') == 1);
-    CHECK(core.mode() == M::Armed);
+    CHECK(sink.count('c') == 1 && core.mode() == M::Armed);
     const std::size_t afterGap = sink.calls.size();
-    const uint32_t resumeUs = 1200000;
-    feedCore(core, sink, resumeUs, 1.0f, burstFromZero);
+    const uint32_t resumeUs = 2000000;
+    feedCore(core, sink, resumeUs, 0.5f, gravity);
+    core.requestStart(300);
+    feedCore(core, sink, resumeUs + 500000, 0.5f, gravity);
     std::size_t o = afterGap;
     while (o < sink.calls.size() && sink.calls[o].kind != 'o') ++o;
     CHECK(o < sink.calls.size());
     if (o < sink.calls.size()) {
       const uint32_t trig = sink.calls[o].at;
-      bool firstSeen = false, ok = true;
-      for (std::size_t i = o + 1; i < sink.calls.size(); ++i) {
-        const auto &c = sink.calls[i];
-        if (c.kind != 'w') continue;
-        if (c.relUs < -1000000) ok = false;
-        if (!firstSeen) {
-          firstSeen = true;
-          CHECK(int64_t(trig) + c.relUs >= int64_t(resumeUs));
+      for (std::size_t i = o + 1; i < sink.calls.size(); ++i)
+        if (sink.calls[i].kind == 'w') {
+          CHECK(int64_t(trig) + sink.calls[i].relUs >= int64_t(resumeUs));
+          break;
         }
-      }
-      CHECK(firstSeen && ok);
     }
   }
-  {  // raising the threshold mid-measurement ends it 3 s later
+  {  // the chart value still comes from the high-pass filter
     RecorderCore core;
     FakeSink sink;
     feedCore(core, sink, 0, 2.0f, burstFromZero);
-    CHECK(core.mode() == M::Recording);
-    core.setThresholdDeci(400);
-    CHECK(core.thresholdDeci() == 400);
-    feedCore(core, sink, 2000000, 4.0f, burstFromZero);
-    const auto closes = sink.only('c');
-    CHECK(closes.size() == 1);
-    // The quiet run may already have begun at a sub-threshold sample near the last sine
-    // zero-crossing before 2.0 s (it does at 1.994 s), so Stop lands at ~4.994 s, not 5.0 s.
-    if (closes.size() == 1) CHECK(closes[0].at >= 4980000 && closes[0].at <= 5010000);
-    CHECK(core.mode() == M::Armed);
-  }
-  {  // maximum duration: a never-ending vibration gives one 30 s file, then waits for quiet
-    RecorderCore core(TriggerDetector::Config{}, 1000000, 1000000, 30000000);
-    FakeSink sink;
-    const auto steady = [](float t) {  // vibration 0-40 s, quiet 40-45 s, vibration again
-      return (t < 40.0f || t >= 45.0f) ? burstFromZero(t) : gravity(t);
-    };
-    feedCore(core, sink, 0, 40.0f, steady);
-    const auto opens = sink.only('o'), closes = sink.only('c');
-    CHECK(opens.size() == 1 && closes.size() == 1);
-    if (opens.size() == 1 && closes.size() == 1) {
-      const uint32_t length = closes[0].at - opens[0].at;
-      CHECK(length >= 30000000 && length <= 30004000);
-    }
-    CHECK(core.mode() == M::Armed);  // still vibrating, but no new file
-    for (const auto &w : sink.only('w')) CHECK(w.relUs <= 30000000);
-    feedCore(core, sink, 40000000, 5.0f, steady);
-    CHECK(sink.count('o') == 1);
-    feedCore(core, sink, 45000000, 1.0f, steady);
-    CHECK(sink.count('o') == 2 && core.mode() == M::Recording);  // re-armed after quiet
-  }
-  {  // without a maximum (default) the same vibration keeps one file open
-    RecorderCore core;
-    FakeSink sink;
-    feedCore(core, sink, 0, 40.0f, burstFromZero);
-    CHECK(sink.count('o') == 1 && sink.count('c') == 0 && core.mode() == M::Recording);
+    CHECK(sink.calls.empty() && std::fabs(core.dynamic().x) > 0.1f);
   }
 }
 
+void rangeChecks() {
+  using E = RangeTrigger::Event;
+  constexpr uint16_t kNone = RangeTrigger::kNoReading;
+  const auto feed = [](RangeTrigger &t, std::initializer_list<uint16_t> mm, uint16_t trigger = 300) {
+    int starts = 0;
+    for (const uint16_t v : mm) starts += t.update(v, trigger) == E::Start;
+    return starts;
+  };
+  {  // Three of the last five near and in agreement: an object that stays.
+    RangeTrigger t;
+    CHECK(feed(t, {500, 500, 500, 500, 500}) == 0);
+    CHECK(feed(t, {250, 252}) == 0);
+    CHECK(t.update(248, 300) == E::Start && t.fired());
+  }
+  {  // Scattered wrong readings (near or far) do not start anything, however often they come.
+    RangeTrigger a, b, c;
+    CHECK(feed(a, {500, 30, 500, 500, 30, 500, 500, 500, 30, 500, 500, 30, 500, 500}) == 0);
+    CHECK(feed(b, {30, 30, 500, 500, 500, 30, 30, 500, 500, 500, 30, 30, 500, 500, 500}) == 0);
+    CHECK(feed(c, {kNone, 30, kNone, 30, kNone, 500, 500}) == 0);
+  }
+  {  // Even three near readings in five do not start it when they disagree: a ghost cannot be
+     // told from an object by count alone, but its values scatter.
+    RangeTrigger t;
+    CHECK(feed(t, {500, 30, 500, 180, 500, 90, 500, 290, 40, 500, 210, 500, 120, 60, 500}) == 0);
+  }
+  {  // A real pass seen in only three readings in a row starts it; so does a slowly approaching object.
+    RangeTrigger t, slow;
+    CHECK(feed(t, {500, 500, 250, 240, 230, 500, 500}) == 1);
+    CHECK(feed(slow, {400, 290, 280, 270, 260}) == 1);
+  }
+  {  // Fired: the object has to go away (and be seen going away) before the next start.
+    RangeTrigger t;
+    CHECK(feed(t, {250, 250, 250}) == 1);
+    CHECK(feed(t, {100, 100, 100, 100, 100, 100}) == 0 && t.fired());
+    // 310 is within the hysteresis (not "away"), 320 and beyond is.
+    CHECK(feed(t, {310, 310, 310, 310, 310}) == 0 && t.fired());
+    CHECK(feed(t, {320, 320}) == 0 && t.fired());
+    CHECK(feed(t, {320}) == 0 && !t.fired());
+    CHECK(feed(t, {250, 250, 250}) == 1);
+  }
+  {  // No echo counts as away, and never as an object.
+    RangeTrigger t;
+    CHECK(feed(t, {kNone, kNone, kNone, kNone, kNone, kNone}) == 0);
+    CHECK(feed(t, {250, 250, 250}) == 1);
+    CHECK(feed(t, {kNone, kNone}) == 0 && t.fired());
+    CHECK(feed(t, {kNone}) == 0 && !t.fired());
+  }
+  {  // After a pause in ranging the old readings do not count: two before, one after is not three.
+    RangeTrigger t;
+    CHECK(feed(t, {250, 250}) == 0);
+    t.clearWindow();
+    CHECK(feed(t, {250}) == 0 && !t.fired());
+    CHECK(feed(t, {250, 250}) == 1);
+    t.clearWindow();  // The fired state stays: the object still has to go away first.
+    CHECK(t.fired() && feed(t, {250, 250, 250}) == 0);
+  }
+  {  // The trigger distance may change between readings.
+    RangeTrigger t;
+    CHECK(feed(t, {400, 400, 400}, 300) == 0);
+    CHECK(feed(t, {400, 400, 400}, 500) == 1);
+  }
+  {  // Near the sensor the 20 % tolerance is the 40 mm floor, far away it grows.
+    RangeTrigger near, far;
+    RangeTrigger near45;
+    CHECK(feed(near, {60, 100, 90}, 300) == 1);       // 40 mm apart is allowed ...
+    CHECK(feed(near45, {60, 105, 90}, 300) == 0);     // ... 45 is not
+    CHECK(feed(far, {900, 1000, 1080}, 1200) == 1);   // 180 mm apart, 20 % of 1080 = 216
+  }
+}
+void touchCalChecks() {
+  using namespace touchcal;
+  // The panel reports y 12 px too low and x scaled by 0.95: the fit recovers the inverse.
+  Point measured[kTargets];
+  for (std::size_t i = 0; i < kTargets; ++i) measured[i] = {kTarget[i].x * 0.95f, kTarget[i].y + 12};
+  const TouchCal cal = fit(kTarget, measured, kTargets);
+  CHECK(std::fabs(cal.ax - 1 / 0.95f) < 0.001f && std::fabs(cal.bx) < 0.05f);
+  CHECK(std::fabs(cal.ay - 1) < 0.001f && std::fabs(cal.by + 12) < 0.05f);
+  CHECK(plausible(cal));
+  CHECK(std::fabs(cal.y(measured[3].y) - kTarget[3].y) < 0.05f);
+  // Identity when the measurements carry no information (all taps in one place).
+  Point same[kTargets];
+  for (auto &p : same) p = {100, 100};
+  const TouchCal flat = fit(kTarget, same, kTargets);
+  CHECK(flat.ax == 1 && flat.bx == 0 && flat.ay == 1 && flat.by == 0);
+  CHECK(fit(kTarget, measured, 1).ax == 1);
+  // A tap on the wrong target gives an implausible fit.
+  Point wrong[kTargets];
+  for (std::size_t i = 0; i < kTargets; ++i) wrong[i] = kTarget[kTargets - 1 - i];
+  CHECK(!plausible(fit(kTarget, wrong, kTargets)));
+  CHECK(plausible(TouchCal{}));
+}
+
+void liveSpectrumChecks() {
+  static LiveSpectrum live;  // ~25 KB: off the stack.
+  // 40 Hz, 1.5 m/s2 on Y at 490 Hz (the measured rate of this board), microsecond times.
+  const auto feed = [](LiveSpectrum &l, int n, int from, float hz, int axis) {
+    for (int i = from; i < from + n; ++i) {
+      const float t = i / 490.0f, v = 1.5f * std::sin(2 * 3.14159265f * hz * t);
+      l.add(Accel{axis == 0 ? v : 0.01f, axis == 1 ? v : 0.0f, axis == 2 ? v : 0.0f}, uint32_t(i * 1e6f / 490.0f));
+    }
+  };
+  feed(live, 1000, 0, 40, 1);
+  CHECK(!live.ready());
+  live.compute();
+  CHECK(!live.valid());  // Not until the window is full.
+  feed(live, 100, 1000, 40, 1);
+  CHECK(live.ready());
+  live.compute();
+  CHECK(live.valid() && std::fabs(live.rateHz() - 490.0f) < 0.5f && std::fabs(live.nyquistHz() - 245.0f) < 0.3f);
+  CHECK(std::fabs(live.domHz() - 40.0f) < 0.5f && std::fabs(live.domAmp() - 1.5f) < 0.1f);
+  // The line is in Y's columns, not in X's or Z's; column 40/245*96 = 15.7.
+  const int c = int(40.0f / 245.0f * LiveSpectrum::kCols);
+  float ymax = 0, xmax = 0, zmax = 0;
+  for (int k = c - 1; k <= c + 1; ++k) {
+    ymax = fmaxf(ymax, live.column(1, k));
+    xmax = fmaxf(xmax, live.column(0, k));
+    zmax = fmaxf(zmax, live.column(2, k));
+  }
+  CHECK(ymax > 1.3f && xmax < 0.05f && zmax < 0.05f && live.top() >= ymax);
+  // The window slides: the signal moves to 90 Hz on Z, and after a full window it is all that is seen.
+  feed(live, int(LiveSpectrum::kSize), 1100, 90, 2);
+  live.compute();
+  CHECK(std::fabs(live.domHz() - 90.0f) < 0.5f && live.column(1, c) < 0.05f);
+  // A gap clears it.
+  live.clear();
+  CHECK(!live.ready() && !live.valid());
+  // Silence: no line, the scale floor holds.
+  feed(live, int(LiveSpectrum::kSize), 0, 0, 1);
+  live.compute();
+  CHECK(live.valid() && live.domHz() == 0 && live.top() == 0.05f);
+}
+
+void vl53Checks() {
+  uint8_t b[vl53::kResultBytes] = {};
+  b[0] = uint8_t(11 << 3);
+  b[10] = 0x01;
+  b[11] = 0x2C;  // 300 mm
+  CHECK(vl53::decodeRange(b) == 300);
+  b[0] = uint8_t(4 << 3);  // Phase failure: not a range.
+  CHECK(vl53::decodeRange(b) == RangeTrigger::kNoReading);
+  b[0] = uint8_t(11 << 3 | 0x01);  // Other bits of byte 0 do not matter.
+  CHECK(vl53::decodeRange(b) == 300);
+  b[10] = 0x1F;
+  b[11] = 0xFE;  // 8190: nothing in range.
+  CHECK(vl53::decodeRange(b) == RangeTrigger::kNoReading);
+  uint8_t amb[vl53::kResultBytes] = {};
+  amb[8] = 0x04;
+  amb[9] = 0x80;  // 0x0480 / 128 = 9.0 Mcps: the blind state seen on the device
+  CHECK(std::fabs(vl53::ambientMcps(amb) - 9.0f) < 0.01f && vl53::ambientMcps(amb) > vl53::kBlindAmbientMcps);
+  amb[8] = 0x00;
+  amb[9] = 0x20;  // 0.25 Mcps: a healthy sensor indoors
+  CHECK(std::fabs(vl53::ambientMcps(amb) - 0.25f) < 0.01f && vl53::ambientMcps(amb) < vl53::kBlindAmbientMcps);
+  CHECK(vl53::resultReady(0x04) && !vl53::resultReady(0x00) && !vl53::resultReady(0x18));
+}
+
 void uiChecks() {
-  using namespace thrui;
-  CHECK(stepDeci(20, +1) == 21);
-  CHECK(stepDeci(2, -1) == 2);
-  CHECK(stepDeci(400, +1) == 400);
-  CHECK(stepDeci(50, +1) == 55);
-  CHECK(stepDeci(55, -1) == 50);
-  CHECK(stepDeci(50, -1) == 49);
-  CHECK(stepDeci(200, +1) == 210);
-  CHECK(stepDeci(210, -1) == 200);
-  CHECK(stepDeci(200, -1) == 195);
-  CHECK(chartRangeMs2(20) == 5.0f);
-  CHECK(chartRangeMs2(25) == 5.0f);
-  CHECK(chartRangeMs2(26) == 10.0f);
-  CHECK(chartRangeMs2(400) == 80.0f);
-  CHECK(hit(10, 210) == Button::Minus);
-  CHECK(hit(300, 210) == Button::Plus);
-  CHECK(hit(160, 210) == Button::None);
-  CHECK(hit(10, 100) == Button::None);
+  using namespace rangeui;
+  Settings s;
+  CHECK(s.distanceMm == 300 && s.recordS == 5 && s.preRollMs == 1000 && s.mode == 1);
+  s.distanceMm = 300;
+  CHECK(step(s, Param::Distance, +1).distanceMm == 310);
+  s.distanceMm = 490;
+  CHECK(step(s, Param::Distance, +1).distanceMm == 500);
+  s.distanceMm = 500;
+  CHECK(step(s, Param::Distance, +1).distanceMm == 550);
+  CHECK(step(s, Param::Distance, -1).distanceMm == 490);
+  s.distanceMm = 550;
+  CHECK(step(s, Param::Distance, -1).distanceMm == 500);
+  s.distanceMm = 30;
+  CHECK(step(s, Param::Distance, -1).distanceMm == 30);
+  s.distanceMm = 1200;
+  CHECK(step(s, Param::Distance, +1).distanceMm == 1200);
+  s.recordS = 30;
+  CHECK(step(s, Param::Record, +1).recordS == 30);
+  s.recordS = 1;
+  CHECK(step(s, Param::Record, -1).recordS == 1);
+  CHECK(step(s, Param::Record, +1).recordS == 2);
+  s.preRollMs = 1000;
+  CHECK(step(s, Param::PreRoll, +1).preRollMs == 1000);
+  CHECK(step(s, Param::PreRoll, -1).preRollMs == 900);
+  s.preRollMs = 0;
+  CHECK(step(s, Param::PreRoll, -1).preRollMs == 0);
+  s.mode = 2;
+  CHECK(step(s, Param::Mode, +1).mode == 2 && step(s, Param::Mode, -1).mode == 1);
+  s.mode = 0;
+  CHECK(step(s, Param::Mode, -1).mode == 0);
+  const Settings wild = clamp(Settings{5000, -3, 99999, 7});
+  CHECK(wild.distanceMm == 1200 && wild.recordS == 1 && wild.preRollMs == 1000 && wild.mode == 2);
+  CHECK(budgetUs(0) == 20000 && budgetUs(1) == 33000 && budgetUs(2) == 200000);
+  CHECK(chartRangeMs2(0.5f) == 5.0f && chartRangeMs2(5.0f) == 5.0f && chartRangeMs2(5.1f) == 10.0f);
+  CHECK(chartRangeMs2(100.0f) == 80.0f);
+  // Hit testing: the second row (Record) is at y 78..115.
+  CHECK(hit(10, 90).dir == -1 && hit(10, 90).param == Param::Record);
+  CHECK(hit(300, 90).dir == +1 && hit(300, 90).param == Param::Record);
+  CHECK(hit(160, 90).dir == 0);
+  CHECK(hit(300, 40).param == Param::Distance && hit(300, 40).dir == +1);
+  CHECK(hit(10, 170).param == Param::Mode && hit(10, 170).dir == -1);
+  CHECK(hit(10, 20).dir == 0 && hit(10, 205).dir == 0);
   {
+    const Press minus{Param::Distance, -1}, plus{Param::Distance, +1}, plusRec{Param::Record, +1};
     HoldRepeater h;
-    CHECK(h.update(Button::Minus, 0) == -1);
-    CHECK(h.update(Button::Minus, 100) == 0);
-    CHECK(h.update(Button::Minus, 499) == 0);
-    CHECK(h.update(Button::Minus, 500) == -1);
-    CHECK(h.update(Button::Minus, 550) == 0);
-    CHECK(h.update(Button::Minus, 600) == -1);
-    CHECK(h.update(Button::None, 610) == 0);
-    CHECK(h.update(Button::Minus, 620) == -1);
-    CHECK(h.update(Button::Plus, 700) == +1);
-    CHECK(h.update(Button::Plus, 1200) == +1);
+    CHECK(h.update(minus, 0) == -1);
+    CHECK(h.update(minus, 100) == 0);
+    CHECK(h.update(minus, 499) == 0);
+    CHECK(h.update(minus, 500) == -1);
+    CHECK(h.update(minus, 550) == 0);
+    CHECK(h.update(minus, 600) == -1);
+    CHECK(h.update(Press{}, 610) == 0);
+    CHECK(h.update(minus, 620) == -1);
+    CHECK(h.update(plus, 700) == +1);
+    CHECK(h.update(plus, 1200) == +1);
+    CHECK(h.update(plusRec, 1210) == +1);  // Another row: a step right away.
   }
   {
     UsbOwnership u;
@@ -721,6 +902,27 @@ static void statsChecks() {
   CHECK(std::fabs(st.peaks[1].hz - 20.0f) < 0.3f && std::fabs(st.peaks[1].amp - 1.0f) < 0.1f);
   for (int i = 1; i < st.peakCount; ++i) CHECK(st.peaks[i - 1].amp >= st.peaks[i].amp);
   CHECK(std::fabs(st.binHz - 500.0f / 1024) < 1e-4f && st.fft[100] >= 0);
+  // Per axis: X carries the 50 Hz line, Y the 20 Hz one, Z (constant) nothing.
+  CHECK(st.axisPeakCount[0] == 1 && std::fabs(st.axisPeaks[0][0].hz - 50.0f) < 0.3f &&
+        std::fabs(st.axisPeaks[0][0].amp - 2.0f) < 0.1f);
+  CHECK(st.axisPeakCount[1] == 1 && std::fabs(st.axisPeaks[1][0].hz - 20.0f) < 0.3f &&
+        std::fabs(st.axisPeaks[1][0].amp - 1.0f) < 0.1f);
+  CHECK(st.axisPeakCount[2] == 0);
+  CHECK(st.axisFft[0][100] >= 0 && st.axisFft[0][int(50.0f / st.binHz + 0.5f)] > 1.5f);
+  {  // Rollers on different axes: top rollers 33 Hz on Z, side rollers 47 Hz on X and 12 Hz weak
+     // on Y. A line far below the strongest one (1 %) is left out, the weak real one stays.
+    std::vector<Accel> w;
+    for (int i = 0; i < 3000; ++i) {
+      const float t = i / 500.0f;
+      w.push_back({1.5f * std::sin(2 * 3.14159265f * 47 * t), 0.3f * std::sin(2 * 3.14159265f * 12 * t) +
+                       0.01f * std::sin(2 * 3.14159265f * 90 * t), 3.0f * std::sin(2 * 3.14159265f * 33 * t) + 9.8f});
+    }
+    const MeasStats r = measstats::compute(w.data(), w.size(), 500.0f);
+    CHECK(r.axisPeakCount[0] == 1 && std::fabs(r.axisPeaks[0][0].hz - 47.0f) < 0.3f);
+    CHECK(r.axisPeakCount[1] == 1 && std::fabs(r.axisPeaks[1][0].hz - 12.0f) < 0.3f);
+    CHECK(r.axisPeakCount[2] == 1 && std::fabs(r.axisPeaks[2][0].hz - 33.0f) < 0.3f &&
+          std::fabs(r.axisPeaks[2][0].amp - 3.0f) < 0.25f);
+  }
   {  // Many tones: only the five strongest, in order.
     std::vector<Accel> w;
     for (int i = 0; i < 3000; ++i) {
@@ -811,6 +1013,94 @@ static void peakLogChecks() {
   CHECK(peakchart::labelStep(31, 6) == 10 && peakchart::labelStep(512, 6) == 100);
 }
 
+// Feeds (x, y) points every 10 ms (x < 0: no contact) and returns the last result
+// that had a gesture or a rejection.
+// Feeds (x, y) points stepMs apart (x < 0: no contact) and returns the last result
+// that had a gesture or a rejection.
+static SwipeGuard::Result feedSwipe(SwipeGuard &g, uint32_t &t, std::vector<std::pair<int, int>> path,
+                                    uint32_t stepMs = 10) {
+  for (int i = 0; i < 4; ++i) path.push_back({-1, -1});  // Release.
+  SwipeGuard::Result last;
+  for (const auto &p : path) {
+    TouchSample s;
+    s.down = p.first >= 0;
+    s.x = int16_t(p.first);
+    s.y = int16_t(p.second);
+    const SwipeGuard::Result r = g.update(s, t);
+    if (r.gesture || r.rejected) last = r;
+    t += stepMs;
+  }
+  return last;
+}
+
+static void swipeGuardChecks() {
+  SwipeGuard g;
+  uint32_t t = 1000;
+  // A real swipe left: 200 px over 120 ms.
+  std::vector<std::pair<int, int>> path;
+  for (int i = 0; i <= 12; ++i) path.push_back({260 - i * 17, 120});
+  SwipeGuard::Result r = feedSwipe(g, t, path);
+  CHECK(r.gesture.type == GestureType::SwipeLeft && !r.rejected);
+  // The same swipe seen only every 40 ms (late samples): 68 px steps, still accepted.
+  path.clear();
+  for (int i = 0; i <= 3; ++i) path.push_back({260 - i * 68, 120});
+  r = feedSwipe(g, t, path, 40);
+  CHECK(r.gesture.type == GestureType::SwipeLeft && !r.rejected);
+  // A short swipe of 38 px (above the 35 px minimum).
+  r = feedSwipe(g, t, {{100, 100}, {110, 100}, {120, 101}, {130, 101}, {138, 102}}, 25);
+  CHECK(r.gesture.type == GestureType::SwipeRight && !r.rejected);
+  // A real quick swipe seen on the device: 56 px in 70 ms. Accepted (it was rejected at a 100 ms minimum).
+  r = feedSwipe(g, t, {{173, 101}, {165, 101}, {157, 101}, {149, 101}, {141, 101}, {133, 101}, {125, 101}, {117, 100}});
+  CHECK(r.gesture.type == GestureType::SwipeLeft && !r.rejected && r.contactMs == 70);
+  // 50 ms of contact is too short for a swipe.
+  r = feedSwipe(g, t, {{173, 101}, {160, 101}, {147, 101}, {134, 101}, {121, 101}, {110, 100}});
+  CHECK(!r.gesture && r.rejected);
+  CHECK(SwipeGuard::tapValid(30, 0) && SwipeGuard::tapValid(120, 1) && !SwipeGuard::tapValid(10, 0) &&
+        !SwipeGuard::tapValid(100, 40));
+  // Phantom touch: a point, then a jump to the clamped edge, then gone.
+  r = feedSwipe(g, t, {{60, 120}, {60, 120}, {319, 118}, {319, 118}, {319, 118}});
+  CHECK(!r.gesture && r.rejected && r.maxSpeed > SwipeGuard::kMaxSpeedPxPerMs);
+  // Phantom contact of a single sample pair 10 ms apart: too short.
+  r = feedSwipe(g, t, {{40, 100}, {100, 100}});
+  CHECK(!r.gesture && r.rejected);
+  // A real swipe right after that still works.
+  path.clear();
+  for (int i = 0; i <= 10; ++i) path.push_back({50 + i * 20, 140});
+  r = feedSwipe(g, t, path);
+  CHECK(r.gesture.type == GestureType::SwipeRight && !r.rejected && r.contactMs == 100);
+  // Button presses: a real finger holds still long enough and does not jump.
+  CHECK(!SwipeGuard::pressValid(10, 0) && !SwipeGuard::pressValid(50, 1));
+  CHECK(SwipeGuard::pressValid(60, 0) && SwipeGuard::pressValid(300, 3));
+  CHECK(!SwipeGuard::pressValid(300, 40));
+  using UB = usbui::Button;
+  CHECK(usbui::hit(160, 60) == UB::Usb && usbui::hit(160, 135) == UB::Calibrate && usbui::hit(160, 180) == UB::Clean);
+  CHECK(usbui::hit(160, 100) == UB::None && usbui::hit(5, 60) == UB::None && usbui::hit(160, 205) == UB::None);
+  // The controller drops the finger for two samples mid-swipe: still one swipe, not two taps.
+  r = feedSwipe(g, t, {{260, 120}, {240, 120}, {220, 120}, {200, 120}, {-1, -1}, {-1, -1}, {160, 121}, {140, 121},
+                       {120, 121}, {100, 122}, {80, 122}});
+  CHECK(r.gesture.type == GestureType::SwipeLeft && !r.rejected && r.gesture.dx == -180);
+  // A real lift (four samples without contact) ends it: two separate contacts.
+  {
+    SwipeGuard g2;
+    uint32_t t2 = 5000;
+    int swipesSeen = 0;
+    const std::vector<std::pair<int, int>> path = {{260, 120}, {250, 120}, {240, 120}, {-1, -1}, {-1, -1}, {-1, -1},
+                                                   {-1, -1}, {100, 120}, {100, 120}, {100, 120}};
+    for (const auto &p : path) {
+      TouchSample s;
+      s.down = p.first >= 0;
+      s.x = int16_t(p.first);
+      s.y = int16_t(p.second);
+      swipesSeen += g2.update(s, t2).gesture.type == GestureType::SwipeLeft;
+      t2 += 10;
+    }
+    CHECK(swipesSeen == 0);  // 20 px, then a separate touch: no swipe out of the two together.
+  }
+  // A tap is passed through.
+  r = feedSwipe(g, t, {{100, 100}, {101, 100}, {101, 101}});
+  CHECK(r.gesture.type == GestureType::Tap && !r.rejected);
+}
+
 int main() {
   formatChecks();
   ringChecks();
@@ -823,6 +1113,11 @@ int main() {
   countedClockChecks();
   statsChecks();
   peakLogChecks();
+  swipeGuardChecks();
+  rangeChecks();
+  liveSpectrumChecks();
+  touchCalChecks();
+  vl53Checks();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

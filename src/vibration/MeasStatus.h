@@ -3,7 +3,7 @@
 
 // What the measurement writer reports to the UI; plain data.
 struct MeasStatus {
-  enum class State : uint8_t { NoCard, Idle, Recording, Error, Parked };
+  enum class State : uint8_t { NoCard, Idle, Recording, Error, Parked, Cleaning };
   State state = State::NoCard;
   char message[32] = "";      // Polish, no diacritics: "brak karty", "gotowa", ...
   unsigned number = 0;        // Current or last measurement (M<number>.CSV).

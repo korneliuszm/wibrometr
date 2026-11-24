@@ -21,11 +21,11 @@ constexpr const char *kDirectory = "/MEAS";
 
 struct Header {
   unsigned number = 0;
-  int thresholdDeci = 0; // Trigger threshold in 0.1 m/s2.
+  int triggerMm = 0;     // Distance that started the measurement.
   float sampleRateHz = 0;
   float rangeG = 0;
   float preRollS = 0;
-  float quietS = 0;
+  float recordS = 0;     // Recording time after the trigger.
 };
 
 inline std::size_t clampLen(int n, std::size_t size) {
@@ -61,16 +61,13 @@ constexpr unsigned nextMeasNumber(unsigned highestExisting) {
 }
 
 inline std::size_t formatHeader(char *out, std::size_t size, const Header &h) {
-  const int thr = h.thresholdDeci;
-  const unsigned thrAbs = unsigned(thr < 0 ? -thr : thr);
   return clampLen(std::snprintf(out, size,
                                 "# wibrometr measurement v1\n# device: ESP32-S3-Touch-LCD-2, QMI8658\n"
-                                "# measurement: %u\n# threshold_m_s2: %s%u.%u\n# sample_rate_hz: %.1f\n"
-                                "# range_g: %.0f\n# pre_trigger_s: %.1f\n# quiet_s: %.1f\n"
+                                "# measurement: %u\n# trigger_distance_mm: %d\n# sample_rate_hz: %.1f\n"
+                                "# range_g: %.0f\n# pre_trigger_s: %.1f\n# record_s: %.1f\n"
                                 "# trigger_at: t_ms = 0\n# columns: t_ms,ax_m_s2,ay_m_s2,az_m_s2\n"
                                 "t_ms,ax_m_s2,ay_m_s2,az_m_s2\n",
-                                h.number, thr < 0 ? "-" : "", thrAbs / 10, thrAbs % 10, h.sampleRateHz,
-                                h.rangeG, h.preRollS, h.quietS),
+                                h.number, h.triggerMm, h.sampleRateHz, h.rangeG, h.preRollS, h.recordS),
                   size);
 }
 

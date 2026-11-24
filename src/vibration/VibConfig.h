@@ -24,16 +24,15 @@ constexpr bool kUseFifo = false;          // FIFO path: loses samples, see above
 constexpr uint32_t kFifoReadMs = 5;
 static_assert(kUseFifo || kSampleRateHz <= 500, "polling at 1 kHz needs 500 Hz or less");
 
-constexpr uint32_t kPreRollUs = 1000000;  // Pre-trigger part of each measurement.
-constexpr uint32_t kQuietUs = 3000000;    // This long below the threshold ends a measurement.
-constexpr uint32_t kWarmupUs = 1000000;   // No trigger after start or a data gap (filter settles).
-constexpr uint32_t kMaxRecordUs = 30000000;  // A measurement ends 30 s after its trigger at the latest.
+constexpr uint32_t kMaxRecordUs = 30000000;  // Longest recording time after a trigger (the setting is 1..30 s).
 
 constexpr uint32_t kFrameMs = 50;         // Screen refresh: 20 frames per second.
 constexpr int kBins = 136;                // Chart columns...
 constexpr uint32_t kBinMs = 40;           // ...of 40 ms each: a 5.44 s window.
 
 constexpr int kMaxPeaks = 512;            // Peaks of one session kept for the second screen.
-constexpr int kPages = 3;                 // Screens, switched by a horizontal swipe.
+constexpr int kPageRange = 3;            // Range finder settings.
+constexpr int kPageUsb = 4;              // USB disk mode switch.
+constexpr int kPages = 5;                 // Screens, switched by a horizontal swipe.
 
 } // namespace vib

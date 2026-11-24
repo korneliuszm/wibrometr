@@ -34,6 +34,7 @@ uint16_t sectorSize_ = 512;
 uint32_t lastServiceMs_ = 0;
 bool serviced_ = false;
 bool active_ = false;  // MSC drive started; main loop only.
+bool diskMode_ = false;  // The host may see the card; main loop only.
 
 CardGate gate;  // USB task: enter/leave; main loop: release/grant.
 
@@ -125,15 +126,14 @@ bool begin(UsbOwnership &own, MeasWriter &writer) {
     msc.onRead(onRead);
     msc.onWrite(onWrite);
     msc.onStartStop(onStartStop);
-    msc.mediaPresent(true);
+    msc.mediaPresent(false);  // An empty reader until disk mode is switched on.
     card = msc.begin(sectors_, sectorSize_);
     // Without the drive the host never owns anything: service() stays idle and
     // the recorder keeps the card even while a computer is connected.
-    if (!card) msc.mediaPresent(false);
     active_ = card;
   }
   USB.begin();  // Always: the serial console runs over the same USB port.
-  Serial.printf("USB: %s\n", card ? "dysk z karta SD" : "bez karty, tylko port szeregowy");
+  Serial.printf("USB: %s\n", card ? "karta SD jako dysk (po wlaczeniu na ekranie)" : "bez karty, tylko port szeregowy");
   return card;
 }
 
@@ -141,7 +141,22 @@ void service(uint32_t nowMs) {
   if (!active_ || (serviced_ && nowMs - lastServiceMs_ < 100)) return;
   serviced_ = true;
   lastServiceMs_ = nowMs;
-  own_->setEnumerated(hostPresent());
+  const bool host = hostPresent();
+  // Cable pulled (not merely suspended, e.g. the computer asleep): the next connection starts as serial again.
+  if (!tud_mounted() && diskMode_) setDiskMode(false);
+  own_->setEnumerated(host && diskMode_);
+}
+
+bool hostConnected() { return active_ && hostPresent(); }
+
+bool diskMode() { return diskMode_; }
+
+void setDiskMode(bool on) {
+  if (!active_ || on == diskMode_) return;
+  if (on && !hostPresent()) return;
+  diskMode_ = on;
+  msc.mediaPresent(on);
+  Serial.printf("USB: tryb dysku %s\n", on ? "wlaczony" : "wylaczony");
 }
 
 bool release() { return !active_ || gate.release(); }

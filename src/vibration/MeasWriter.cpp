@@ -36,9 +36,9 @@ void MeasWriter::begin(float sampleRateHz, float rangeG) {
 
 // ---- Sensor task side: never blocks ------------------------------------------
 
-bool MeasWriter::open(int thresholdDeci) {
+bool MeasWriter::open(int triggerMm) {
   if (!queue_ || parkWanted_.load() || !accepting_.load()) return false;
-  const Item it{kOpen, thresholdDeci, 0, 0, 0, 0};
+  const Item it{kOpen, triggerMm, 0, 0, 0, 0};
   if (xQueueSend(queue_, &it, 0) != pdTRUE) return false;
   fileDropped_ = 0;
   fileMissed_ = 0;
@@ -158,7 +158,7 @@ bool MeasWriter::mount() {
   return true;
 }
 
-void MeasWriter::startFile(int thresholdDeci) {
+void MeasWriter::startFile(int triggerMm) {
   if (state_ != State::Idle) return;  // Card not ready: the samples are discarded.
   unsigned number = measfmt::nextMeasNumber(highest_);
   char path[32];
@@ -184,12 +184,12 @@ void MeasWriter::startFile(int thresholdDeci) {
   }
   measfmt::Header h;
   h.number = number;
-  h.thresholdDeci = thresholdDeci;
+  h.triggerMm = triggerMm;
   const float measured = measuredHz_.load();
   h.sampleRateHz = measured > 0 ? measured : sampleRateHz_;  // Measured from the FIFO once known.
   h.rangeG = rangeG_;
-  h.preRollS = float(vib::kPreRollUs) / 1e6f;
-  h.quietS = float(vib::kQuietUs) / 1e6f;
+  h.preRollS = preRollS_;
+  h.recordS = recordS_;
   used_ = measfmt::formatHeader(buffer_, sizeof buffer_, h);
   highest_ = number_ = number;
   ++measurements_;
@@ -206,7 +206,7 @@ void MeasWriter::startFile(int thresholdDeci) {
   file_.flush();
   publishCounters();
   setState(State::Recording, "nagrywanie");
-  Serial.printf("SD: recording %s (threshold %d.%d m/s2)\n", path, thresholdDeci / 10, thresholdDeci % 10);
+  Serial.printf("SD: recording %s (trigger %d mm)\n", path, triggerMm);
 }
 
 // SD.end + SD.begin on the shared bus, without touching numbering or state.
@@ -322,6 +322,28 @@ void MeasWriter::doUnpark() {
   Serial.println("SD: unparked");
 }
 
+// Every number from 1 to the highest one seen is tried: names are Mnnnn.CSV, so there is no need to
+// walk the directory while deleting from it. Anything else in /MEAS (or elsewhere) stays.
+void MeasWriter::doCleanup() {
+  setState(State::Cleaning, "czyszczenie karty");
+  uint32_t removed = 0;
+  char path[32];
+  for (unsigned n = 1; n <= highest_; ++n) {
+    measfmt::measPath(n, path, sizeof path);
+    if (SD.remove(path)) ++removed;
+    if (n % 16 == 0) vTaskDelay(1);  // Let the other tasks run.
+  }
+  Serial.printf("SD: cleanup removed %lu measurement files\n", (unsigned long)removed);
+  highest_ = number_ = 0;
+  measurements_ = 0;
+  samples_ = fileBytes_ = 0;
+  full_ = false;
+  publishCounters();
+  cleanedFiles_ = removed;
+  ++cleanupSeq_;
+  setState(State::Idle, "gotowa");
+}
+
 void MeasWriter::run() {
   mount();
   nextMountMs_ = millis() + kMountRetryMs;
@@ -336,6 +358,10 @@ void MeasWriter::run() {
       vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
+    // Nothing queued either: an open() already accepted (its kOpen not yet processed) must not
+    // wait behind a cleanup, its samples would overflow the queue meanwhile.
+    if (cleanupWanted_.exchange(false) && !file_ && state_ == State::Idle && uxQueueMessagesWaiting(queue_) == 0)
+      doCleanup();
     Item it;
     for (int i = 0; i < kRecordsPerPass && xQueueReceive(queue_, &it, 0) == pdTRUE; ++i) process(it);
     const uint32_t now = millis();

@@ -15,6 +15,11 @@ struct Lock {
 };
 } // namespace
 
+I2cBus::Exclusive::Exclusive() : held_(mutex && xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) == pdTRUE) {}
+I2cBus::Exclusive::~Exclusive() {
+  if (held_) xSemaphoreGive(mutex);
+}
+
 // Room for a whole QMI8658 FIFO (128 samples x 6 bytes) in one read.
 constexpr size_t kWireBuffer = 1024;
 
@@ -27,6 +32,7 @@ void I2cBus::begin() {
 
 void I2cBus::recover() {
   Lock lock;
+  if (!lock.held) return;  // Someone else is on the bus (e.g. an Exclusive block): do not pull it away.
   Wire.end();
   Wire.setBufferSize(kWireBuffer);
   Wire.begin(board::kI2cSda, board::kI2cScl, board::kI2cHz);

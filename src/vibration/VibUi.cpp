@@ -7,24 +7,34 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include "TouchCalibration.h"
 
-// Three screens of the vibration recorder (swipe sideways), 320x240, laid out for this panel
+// Five screens of the vibration recorder (swipe sideways), 320x240, laid out for this panel
 // (proportional FreeSans fonts, not the scaled 6x8 font of the Feather screens):
 //
 //   y0    status bar: state pill (CZUWAM / REC 12.3 / 30 s + progress / USB / ...), card, battery
-//   y36   left 2/3: chart panel, XYZ dynamic acceleration (5.4 s), threshold zones,
-//         bottom row: axis legend, live level against the threshold
+//   y36   left 2/3: chart panel, XYZ dynamic acceleration (5.4 s),
+//         bottom row: axis legend, live level
 //         right 1/3: statistics panel of the last recorded measurement (mean, RMS,
-//         peak, peak-to-peak per axis), its strongest frequency and spectrum
-//   y192  [ - ]   PROG WYZWALANIA  2.0 m/s2   [ + ]   (thrui::kMinus / kPlus)
+//         peak, peak-to-peak per axis), below it the spectrum of the live signal (last ~2 s,
+//         three axes overlaid, strongest line of the XYZ vector)
+//   y196  range finder strip: distance now, bar with the trigger distance in the middle, state
 //
 // Page 2 (peaks of the session): the status bar, then one panel with a bar per
 // recorded measurement (its largest XYZ vector length, dots: largest per axis);
 // both axes scale to what has been recorded since power-up.
 //
-// Page 3 (FFT): the status bar, the spectrum of the last measurement in the left 2/3
-// (frequency axis to Nyquist, amplitude auto-scaled, numbered markers on the
-// strongest lines) and a table of those lines in the right 1/3.
+// Page 3 (FFT): the status bar, the spectra of the last measurement per sensor axis X, Y, Z
+// in the left 2/3 (one below the other, frequency axis to Nyquist, one common
+// amplitude scale, numbered markers on the strongest lines) and a table of the three
+// strongest lines of each axis in the right 1/3.
+//
+// Page 4 (range finder): four rows [ - ] label / value [ + ] (rangeui::rowRect): trigger
+// distance, recording time, pre-roll, measuring mode; the range finder strip below.
+//
+// Page 5: the status bar and three wide buttons: USB disk mode ("WLACZ TRYB DYSKU USB" / "ZAKONCZ TRYB
+// DYSKU"; by default the recorder keeps the card, the computer sees it only in disk mode), touch
+// calibration, and clearing the card of old measurements (asks twice).
 //
 // All text is Polish without diacritics (the GFX fonts have none).
 
@@ -44,7 +54,6 @@ constexpr uint16_t kText = rgb(235, 240, 248);
 constexpr uint16_t kMuted = rgb(130, 142, 165);
 constexpr uint16_t kDim = rgb(80, 90, 112);
 constexpr uint16_t kAmber = rgb(255, 190, 50);
-constexpr uint16_t kQuietBand = rgb(22, 30, 44);  // Between the threshold lines.
 constexpr uint16_t kRed = rgb(240, 64, 72);
 constexpr uint16_t kGreen = rgb(70, 220, 130);
 constexpr uint16_t kBlue = rgb(110, 170, 255);
@@ -120,7 +129,10 @@ Pill statusPill(const VibModel &m) {
     p = {rgb(190, 28, 40), kText, true, true, ""};
     const uint32_t ms = m.sd.recordingMs;
     std::snprintf(p.text, sizeof p.text, "REC  %lu.%lu / %lu s", (unsigned long)(ms / 1000),
-                  (unsigned long)(ms / 100 % 10), (unsigned long)(vib::kMaxRecordUs / 1000000));
+                  (unsigned long)(ms / 100 % 10), (unsigned long)m.range.recordS);
+  } else if (m.sd.state == MeasStatus::State::Cleaning) {
+    p = {rgb(84, 62, 10), kAmber, true, true, ""};
+    std::snprintf(p.text, sizeof p.text, "CZYSZCZENIE");
   } else if (m.sd.state == MeasStatus::State::NoCard) {
     p = {rgb(84, 62, 10), kAmber, false, false, ""};
     std::snprintf(p.text, sizeof p.text, "BRAK KARTY");
@@ -130,6 +142,9 @@ Pill statusPill(const VibModel &m) {
   } else if (!m.sensorLive) {
     p = {rgb(84, 62, 10), kAmber, false, false, ""};
     std::snprintf(p.text, sizeof p.text, "BRAK CZUJNIKA");
+  } else if (m.rangeState == VibModel::RangeState::Missing) {
+    p = {rgb(84, 62, 10), kAmber, false, false, ""};
+    std::snprintf(p.text, sizeof p.text, "BRAK DALMIERZA");
   } else {
     p = {rgb(16, 62, 38), kGreen, true, false, ""};
     std::snprintf(p.text, sizeof p.text, "CZUWAM");
@@ -189,7 +204,7 @@ void drawStatusBar(GFXcanvas16 &c, const VibModel &m) {
   fontText(c, kBold, 6 + pad + dotW, 23, p.color, p.text);
   if (m.mode == RecorderCore::Mode::Recording && m.sd.state == MeasStatus::State::Recording) {
     // Progress to the maximum duration, under the pill.
-    const float frac = fminf(float(m.sd.recordingMs) / (vib::kMaxRecordUs / 1000), 1.0f);
+    const float frac = fminf(float(m.sd.recordingMs) / float(m.range.recordS * 1000), 1.0f);
     c.fillRect(6 + 8, 31, pw - 16, 2, kGrid);
     c.fillRect(6 + 8, 31, int(lroundf(frac * (pw - 16))), 2, kRed);
   }
@@ -248,17 +263,22 @@ void drawChart(GFXcanvas16 &c, const VibModel &m) {
   c.drawRoundRect(kPanelX, kPanelY, kPanelW, kPanelH, 8, recording ? kRed : kPanelEdge);
   if (recording) c.drawRoundRect(kPanelX + 1, kPanelY + 1, kPanelW - 2, kPanelH - 2, 7, kRed);
 
-  const float range = thrui::chartRangeMs2(m.thresholdDeci);
-  const float thr = m.thresholdDeci / 10.0f;
+  float peak = 0;  // Scale: the smallest step that holds everything on the screen.
+  if (m.history)
+    for (std::size_t i = 0; i < m.history->size(); ++i) {
+      const SignalBin b = m.history->at(i);
+      if (!b.valid) continue;
+      for (int ch = 0; ch < 3; ++ch)
+        peak = fmaxf(peak, fmaxf(fabsf(component(b.low, ch)), fabsf(component(b.high, ch))));
+    }
+  const float range = rangeui::chartRangeMs2(peak);
   const auto yPixel = [&](float v) {
     v = fmaxf(-range, fminf(range, v));
     return kPlotY + int(lroundf((range - v) * (kPlotH - 1) / (2 * range)));
   };
   const auto xPixel = [&](int column) { return kPlotX + 1 + column * (kPlotW - 3) / (vib::kBins - 1); };
 
-  // Band below the threshold, grid, zero line, threshold lines.
-  const int yThr = yPixel(thr), yThrNeg = yPixel(-thr);
-  c.fillRect(kPlotX, yThr, kPlotW, yThrNeg - yThr + 1, kQuietBand);
+  // Grid and zero line.
   for (int n = 0; n <= 4; ++n) {
     const int y = kPlotY + n * (kPlotH - 1) / 4;
     if (n != 2) dottedHLine(c, kPlotX, y, kPlotW, kGrid, 3);
@@ -268,8 +288,6 @@ void drawChart(GFXcanvas16 &c, const VibModel &m) {
     for (int y = kPlotY; y < kPlotY + kPlotH; y += 3) c.drawPixel(x, y, kGrid);
   }
   c.drawFastHLine(kPlotX, yPixel(0), kPlotW, kZero);
-  dashedHLine(c, kPlotX, yThr, kPlotW, kAmber);
-  dashedHLine(c, kPlotX, yThrNeg, kPlotW, kAmber);
 
   // Scale, right-aligned in the left margin.
   char label[8];
@@ -318,17 +336,9 @@ void drawChart(GFXcanvas16 &c, const VibModel &m) {
     small(c, x + 11, kRowY + 1, kMuted, axis);
     x += 22;
   }
-  const int barX = x + 4, barW = kPlotX + kPlotW - 32 - barX, barY = kRowY + 1, barH = 8;
-  const float full = 2 * thr;  // Threshold in the middle of the bar.
-  const float frac = fminf(m.level / full, 1.0f);
-  const bool over = m.level >= thr;
-  c.fillRoundRect(barX, barY, barW, barH, 3, kGrid);
-  const int fill = int(lroundf(frac * barW));
-  if (m.sensorLive && fill > 0) c.fillRoundRect(barX, barY, fill < 4 ? 4 : fill, barH, 3, over ? kRed : kGreen);
-  c.fillRect(barX + barW / 2 - 1, barY - 2, 2, barH + 4, kAmber);
   char lv[12];
   std::snprintf(lv, sizeof lv, m.sensorLive ? "%.2f" : "-", m.level);
-  small(c, kPlotX + kPlotW - smallWidth(lv), kRowY + 1, over ? kRed : kText, lv);
+  small(c, kPlotX + kPlotW - smallWidth(lv), kRowY + 1, kText, lv);
 
   // Over the traces: what keeps the recorder from working.
   if (!m.sensorLive) notice(c, kAmber, "BRAK CZUJNIKA");
@@ -350,21 +360,25 @@ void fmt4(char *out, std::size_t size, float v) {
   if (std::strlen(out) > 4) std::snprintf(out, size, "%.0f", v);
 }
 
-void drawSpectrum(GFXcanvas16 &c, const MeasStats &st, int x, int y, int w, int h) {
-  const uint16_t kFft = rgb(190, 150, 255);
+// Live spectrum, the three axes overlaid in their colours (Z drawn last), scaled to the largest
+// column; a marker on the strongest line of the XYZ vector.
+void drawLiveSpectrum(GFXcanvas16 &c, const LiveSpectrum &live, int x, int y, int w, int h) {
   c.drawFastHLine(x, y + h - 1, w, kZero);
-  float top = 0.05f;  // Do not blow up the noise floor of a quiet measurement.
-  for (float v : st.spectrum) top = fmaxf(top, v);
-  constexpr int cols = int(MeasStats::kSpectrumCols);
-  for (int px = 0; px < w; ++px) {
-    const int c0 = px * cols / w, c1 = std::max(c0 + 1, (px + 1) * cols / w);
-    float v = 0;
-    for (int k = c0; k < c1 && k < cols; ++k) v = fmaxf(v, st.spectrum[k]);
-    const int bar = int(lroundf(v / top * (h - 2)));
-    if (bar > 0) c.drawFastVLine(x + px, y + h - 1 - bar, bar, kFft);
+  const float top = live.top();
+  constexpr int cols = LiveSpectrum::kCols;
+  for (int a = 0; a < 3; ++a) {
+    int prevY = -1;
+    for (int px = 0; px < w; ++px) {
+      const int c0 = px * cols / w, c1 = std::max(c0 + 1, (px + 1) * cols / w);
+      float v = 0;
+      for (int k = c0; k < c1 && k < cols; ++k) v = fmaxf(v, live.column(a, k));
+      const int py = y + h - 1 - int(lroundf(fminf(v / top, 1.0f) * (h - 2)));
+      if (prevY >= 0) c.drawLine(x + px - 1, prevY, x + px, py, kAxis[a]);
+      prevY = py;
+    }
   }
-  if (st.domHz > 0) {  // Marker of the strongest line.
-    const int px = int(lroundf(st.domHz / st.nyquistHz * (w - 1)));
+  if (live.domHz() > 0) {
+    const int px = int(lroundf(live.domHz() / live.nyquistHz() * (w - 1)));
     c.fillTriangle(x + px - 2, y, x + px + 2, y, x + px, y + 3, kAmber);
   }
 }
@@ -376,61 +390,62 @@ void drawStats(GFXcanvas16 &c, const VibModel &m) {
   const int x0 = kStatX + 4, right = kStatX + kStatW - 5;
   const MeasStats *st = m.last && m.last->valid ? m.last : nullptr;
 
-  // Title: which measurement, how long.
+  // Top: the last measurement (title and table), or that there is none yet.
   char s[24];
+  constexpr int labelW = 21, pitch = 27;
+  const int hy = kPanelY + 19;
+  int y = hy + 14 + 4 * 10;  // Below the table.
   if (!st) {
     small(c, x0, kPanelY + 6, kMuted, "OSTATNI POMIAR");
     const char *l1 = recording ? "NAGRYWAM" : "BRAK", *l2 = recording ? "..." : "POMIARU";
-    fontText(c, kBold, kStatX + (kStatW - fontWidth(c, kBold, l1)) / 2, kPanelY + 72, recording ? kRed : kMuted, l1);
-    fontText(c, kBold, kStatX + (kStatW - fontWidth(c, kBold, l2)) / 2, kPanelY + 94, recording ? kRed : kMuted, l2);
-    return;
-  }
-  std::snprintf(s, sizeof s, "M%04u", m.lastNumber % 10000);
-  small(c, x0, kPanelY + 6, recording ? kDim : kText, s);
-  std::snprintf(s, sizeof s, "%.1f s", st->durationS);
-  small(c, right - smallWidth(s), kPanelY + 6, recording ? kDim : kMuted, s);
-
-  // Table: a column per axis, a row per statistic.
-  constexpr int labelW = 21, pitch = 27;
-  const int hy = kPanelY + 19;
-  for (int a = 0; a < 3; ++a) {
-    const char axis[2] = {kAxisName[a], 0};
-    small(c, x0 + labelW + a * pitch + 24 - 6 - 6, hy, kAxis[a], axis);
-  }
-  c.drawFastHLine(x0, hy + 10, kStatW - 10, kPanelEdge);
-  struct Row { const char *label; float AxisStats::*field; };
-  const Row rows[] = {{"sr", &AxisStats::mean}, {"RMS", &AxisStats::rms}, {"pik", &AxisStats::peak}, {"p-p", &AxisStats::p2p}};
-  int y = hy + 14;
-  for (const Row &r : rows) {
-    small(c, x0, y, kMuted, r.label);
+    fontText(c, kBold, kStatX + (kStatW - fontWidth(c, kBold, l1)) / 2, kPanelY + 44, recording ? kRed : kMuted, l1);
+    fontText(c, kBold, kStatX + (kStatW - fontWidth(c, kBold, l2)) / 2, kPanelY + 64, recording ? kRed : kMuted, l2);
+  } else {
+    std::snprintf(s, sizeof s, "M%04u", m.lastNumber % 10000);
+    small(c, x0, kPanelY + 6, recording ? kDim : kText, s);
+    std::snprintf(s, sizeof s, "%.1f s", st->durationS);
+    small(c, right - smallWidth(s), kPanelY + 6, recording ? kDim : kMuted, s);
+    // Table: a column per axis, a row per statistic.
     for (int a = 0; a < 3; ++a) {
-      char v[12];
-      fmt4(v, sizeof v, st->axis[a].*(r.field));
-      small(c, x0 + labelW + a * pitch + 24 - smallWidth(v), y, kText, v);
+      const char axis[2] = {kAxisName[a], 0};
+      small(c, x0 + labelW + a * pitch + 24 - 6 - 6, hy, kAxis[a], axis);
     }
-    y += 10;
+    c.drawFastHLine(x0, hy + 10, kStatW - 10, kPanelEdge);
+    struct Row { const char *label; float AxisStats::*field; };
+    const Row rows[] = {{"sr", &AxisStats::mean}, {"RMS", &AxisStats::rms}, {"pik", &AxisStats::peak}, {"p-p", &AxisStats::p2p}};
+    int ry = hy + 14;
+    for (const Row &r : rows) {
+      small(c, x0, ry, kMuted, r.label);
+      for (int a = 0; a < 3; ++a) {
+        char v[12];
+        fmt4(v, sizeof v, st->axis[a].*(r.field));
+        small(c, x0 + labelW + a * pitch + 24 - smallWidth(v), ry, kText, v);
+      }
+      ry += 10;
+    }
   }
   c.drawFastHLine(x0, y + 1, kStatW - 10, kPanelEdge);
 
-  // Strongest frequency and the spectrum.
+  // Bottom: the spectrum of the live signal (the measurement's own spectrum is on page 3).
   y += 5;
-  if (st->hasSpectrum) {
-    char f[12];
-    std::snprintf(f, sizeof f, "%.0f", st->domHz);
-    small(c, x0, y, kMuted, "FFT");
-    const int after = x0 + 24;
-    small(c, after, y, kAmber, f);
-    small(c, after + smallWidth(f) + 3, y, kMuted, "Hz");
-    drawSpectrum(c, *st, x0, y + 13, kStatW - 10, kPanelY + kPanelH - 16 - (y + 13));
-    small(c, x0, kPanelY + kPanelH - 12, kDim, "0");
-    std::snprintf(s, sizeof s, "%.0f Hz", st->nyquistHz);
-    small(c, right - smallWidth(s), kPanelY + kPanelH - 12, kDim, s);
-  } else {
-    small(c, x0, y, kMuted, "FFT: za krotki");
+  const LiveSpectrum *live = m.live && m.live->valid() && m.sensorLive ? m.live : nullptr;
+  small(c, x0, y, kMuted, "FFT");
+  small(c, x0 + 21, y, kGreen, "NA ZYWO");
+  if (!live) {
+    small(c, x0, y + 30, kDim, "zbiera probki...");
+    return;
   }
+  if (live->domHz() > 0) {
+    std::snprintf(s, sizeof s, "%.0fHz", live->domHz());
+    small(c, right - smallWidth(s), y, kAmber, s);
+  }
+  drawLiveSpectrum(c, *live, x0, y + 12, kStatW - 10, kPanelY + kPanelH - 15 - (y + 12));
+  small(c, x0, kPanelY + kPanelH - 12, kDim, "0");
+  std::snprintf(s, sizeof s, "%.0f Hz", live->nyquistHz());
+  small(c, right - smallWidth(s), kPanelY + kPanelH - 12, kDim, s);
 }
 
-// ---- Threshold -------------------------------------------------------------------------
+// ---- Range finder ------------------------------------------------------------------------
 
 void drawButton(GFXcanvas16 &c, const Rect &r, bool pressed, bool plus) {
   const int x = r.x + 4, y = r.y + 2, w = r.w - 8, h = r.h - 4;
@@ -441,19 +456,163 @@ void drawButton(GFXcanvas16 &c, const Rect &r, bool pressed, bool plus) {
   if (plus) c.fillRoundRect(cx - 2, cy - 11, 5, 22, 2, kText);
 }
 
-void drawThreshold(GFXcanvas16 &c, const VibModel &m) {
-  drawButton(c, thrui::kMinus, m.pressed == thrui::Button::Minus, false);
-  drawButton(c, thrui::kPlus, m.pressed == thrui::Button::Plus, true);
-  const int left = thrui::kMinus.x + thrui::kMinus.w, right = thrui::kPlus.x, mid = (left + right) / 2;
-  const char *label = "PROG WYZWALANIA";
-  small(c, mid - smallWidth(label) / 2, thrui::kMinus.y + 2, kMuted, label);
+// Distance now, a bar with the trigger distance in the middle (0 .. 2x the trigger),
+// and what the range finder is doing. Bottom of pages 1 and 4.
+void drawRangeStrip(GFXcanvas16 &c, const VibModel &m) {
+  constexpr int y = 198, h = 36, barX = 132, barW = 176;
+  c.fillRoundRect(kPanelX, y, 312, h, 8, kPanel);
+  c.drawRoundRect(kPanelX, y, 312, h, 8, kPanelEdge);
+  const bool missing = m.rangeState == VibModel::RangeState::Missing;
+  const bool have = !missing && m.rangeState == VibModel::RangeState::Ranging && m.rangeMm != RangeTrigger::kNoReading;
+  small(c, 12, y + 4, kMuted, "DALMIERZ");
   char value[12];
-  std::snprintf(value, sizeof value, "%.1f", m.thresholdDeci / 10.0f);
-  const char *unit = "m/s2";
-  const int vw = fontWidth(c, kBig, value), uw = fontWidth(c, kSmall, unit);
-  const int x = mid - (vw + 6 + uw) / 2, baseline = thrui::kMinus.y + 36;
-  const int after = fontText(c, kBig, x, baseline, kAmber, value);
-  fontText(c, kSmall, after + 6, baseline, kMuted, unit);
+  if (have) std::snprintf(value, sizeof value, "%u", unsigned(m.rangeMm));
+  else std::snprintf(value, sizeof value, "-");
+  const bool near = have && m.rangeMm < m.range.distanceMm;
+  const int after = fontText(c, kBold, 12, y + 31, near ? kRed : kText, value);
+  fontText(c, kSmall, after + 3, y + 31, kMuted, "mm");
+
+  const int by = y + 6, bh = 10;
+  c.fillRoundRect(barX, by, barW, bh, 3, kGrid);
+  if (have) {
+    const float frac = fminf(float(m.rangeMm) / float(2 * m.range.distanceMm), 1.0f);
+    const int fill = int(lroundf(frac * barW));
+    if (fill > 0) c.fillRoundRect(barX, by, fill < 4 ? 4 : fill, bh, 3, near ? kRed : kGreen);
+  }
+  c.fillRect(barX + barW / 2 - 1, by - 2, 2, bh + 4, kAmber);
+  char thr[24];
+  std::snprintf(thr, sizeof thr, "PROG %d mm", m.range.distanceMm);
+  small(c, barX, y + 23, kMuted, thr);
+  const char *state = "CZEKAM";
+  uint16_t color = kMuted;
+  if (missing) {
+    state = "BRAK DALMIERZA";
+    color = kAmber;
+  } else if (m.mode == RecorderCore::Mode::Recording) {
+    state = "NAGRYWAM";
+    color = kRed;
+  } else if (m.mode == RecorderCore::Mode::Usb || m.hostOwns) {
+    state = "USB";
+    color = kBlue;
+  } else if (m.rangeState == VibModel::RangeState::Ranging && !have) {
+    state = "BRAK ECHA";
+  }
+  small(c, barX + barW - smallWidth(state), y + 23, color, state);
+}
+
+// Touch calibration: a cross on the target, the targets done so far dimmed.
+void drawCalibration(GFXcanvas16 &c, const VibModel &m) {
+  const touchcal::Point &t = touchcal::kTarget[m.calibStep];
+  for (int i = 0; i < m.calibStep; ++i) {
+    const touchcal::Point &d = touchcal::kTarget[i];
+    c.drawCircle(int(d.x), int(d.y), 6, kDim);
+  }
+  const int x = int(t.x), y = int(t.y);
+  c.drawFastHLine(x - 18, y, 37, kAmber);
+  c.drawFastVLine(x, y - 18, 37, kAmber);
+  c.drawCircle(x, y, 9, kAmber);
+  c.fillCircle(x, y, 2, kText);
+  char s[40];
+  std::snprintf(s, sizeof s, "KALIBRACJA DOTYKU %d/%d", m.calibStep + 1, int(touchcal::kTargets));
+  const int ty = t.y < 120 ? 150 : 74;
+  fontText(c, kBold, W / 2 - fontWidth(c, kBold, s) / 2, ty, kText, s);
+  const char *hint = "Dotknij srodka krzyza";
+  fontText(c, kSmall, W / 2 - fontWidth(c, kSmall, hint) / 2, ty + 24, kMuted, hint);
+}
+
+// A wide button of the last page.
+void drawWideButton(GFXcanvas16 &c, const Rect &r, const char *label, uint16_t text, uint16_t edge, bool pressed) {
+  c.fillRoundRect(r.x, r.y, r.w, r.h, 10, pressed ? kButtonPressed : kButton);
+  c.drawRoundRect(r.x, r.y, r.w, r.h, 10, pressed ? kAmber : edge);
+  fontText(c, kBold, r.x + (r.w - fontWidth(c, kBold, label)) / 2, r.y + r.h / 2 + 6, text, label);
+}
+
+// Page 5: USB disk mode (default: the recorder keeps the card), touch calibration and clearing
+// the card of old measurements.
+void drawUsbPage(GFXcanvas16 &c, const VibModel &m) {
+  const bool recording = m.mode == RecorderCore::Mode::Recording;
+  using B = usbui::Button;
+  const bool usbOk = m.usbDisk || (m.usbHost && !recording);
+  drawWideButton(c, usbui::kUsbButton, m.usbDisk ? "ZAKONCZ TRYB DYSKU" : "WLACZ TRYB DYSKU USB",
+                 usbOk ? kText : kDim, m.usbDisk && usbOk ? kBlue : kPanelEdge, m.usbButton == B::Usb && usbOk);
+
+  const char *line1, *line2;
+  uint16_t color = kMuted;
+  if (m.usbDisk) {
+    line1 = "Karta jest w komputerze. Rejestracja wstrzymana.";
+    line2 = "";
+    color = kBlue;
+  } else if (!m.usbHost) {
+    line1 = "Kabel USB niepodlaczony.";
+    line2 = "Port szeregowy dziala po podlaczeniu.";
+  } else if (recording) {
+    line1 = "Trwa nagrywanie. Poczekaj na koniec pomiaru.";
+    line2 = "";
+    color = kAmber;
+  } else {
+    line1 = "Rejestrator trzyma karte,";
+    line2 = "komputer widzi port szeregowy.";
+  }
+  small(c, W / 2 - smallWidth(line1) / 2, 90, color, line1);
+  small(c, W / 2 - smallWidth(line2) / 2, 101, color, line2);
+
+  drawWideButton(c, usbui::kCalButton, "KALIBRACJA DOTYKU", kText, kPanelEdge, m.usbButton == B::Calibrate);
+
+  // Clearing: only when idle (not recording, not handed to the computer, card ready, something to remove).
+  const bool cleaning = m.sd.state == MeasStatus::State::Cleaning;
+  const bool cleanOk = !recording && !m.hostOwns && m.mode != RecorderCore::Mode::Usb &&
+                       m.sd.state == MeasStatus::State::Idle && m.sd.measurements > 0;
+  char label[40];
+  uint16_t text = cleanOk ? kText : kDim, edge = kPanelEdge;
+  if (cleaning) {
+    std::snprintf(label, sizeof label, "CZYSZCZENIE KARTY...");
+    text = kAmber;
+  } else if (m.cleanConfirm && cleanOk) {
+    std::snprintf(label, sizeof label, "POTWIERDZ: USUN (%lu)", (unsigned long)m.sd.measurements);
+    text = kText;
+    edge = kRed;
+  } else {
+    std::snprintf(label, sizeof label, "WYCZYSC POMIARY (%lu)", (unsigned long)m.sd.measurements);
+  }
+  drawWideButton(c, usbui::kCleanButton, label, text, edge, m.usbButton == B::Clean && cleanOk);
+  char note[48] = "";
+  uint16_t noteColor = kMuted;
+  if (m.cleanConfirm && cleanOk) {
+    std::snprintf(note, sizeof note, "Dotknij ponownie w ciagu 5 s. Usuwa M*.CSV.");
+    noteColor = kRed;
+  } else if (m.cleanResult >= 0) {
+    std::snprintf(note, sizeof note, "Usunieto %d plikow z karty.", m.cleanResult);
+    noteColor = kGreen;
+  } else if (!cleanOk && !cleaning) {
+    std::snprintf(note, sizeof note, m.sd.measurements == 0 ? "Brak pomiarow na karcie." : "Teraz niedostepne.");
+  }
+  small(c, W / 2 - smallWidth(note) / 2, 210, noteColor, note);
+}
+
+// Page 4: the four settings, one row each.
+void drawRangePage(GFXcanvas16 &c, const VibModel &m) {
+  const struct { const char *label; } rows[rangeui::kParams] = {
+      {"ODLEGLOSC WYZWALANIA"}, {"CZAS REJESTRACJI"}, {"PRE-ROLL"}, {"TRYB POMIARU"}};
+  for (int i = 0; i < rangeui::kParams; ++i) {
+    const rangeui::Param p = rangeui::Param(i);
+    const bool minus = m.rangePress.dir < 0 && m.rangePress.param == p;
+    const bool plus = m.rangePress.dir > 0 && m.rangePress.param == p;
+    drawButton(c, rangeui::minusRect(p), minus, false);
+    drawButton(c, rangeui::plusRect(p), plus, true);
+    const int top = rangeui::rowRect(p).y, mid = W / 2;
+    small(c, mid - smallWidth(rows[i].label) / 2, top + 3, kMuted, rows[i].label);
+    char value[24];
+    switch (p) {
+    case rangeui::Param::Distance: std::snprintf(value, sizeof value, "%d mm", m.range.distanceMm); break;
+    case rangeui::Param::Record: std::snprintf(value, sizeof value, "%d s", m.range.recordS); break;
+    case rangeui::Param::PreRoll: std::snprintf(value, sizeof value, "%d ms", m.range.preRollMs); break;
+    default:
+      std::snprintf(value, sizeof value, "%s %lu ms", rangeui::modeName(m.range.mode),
+                    (unsigned long)(rangeui::budgetUs(m.range.mode) / 1000));
+      break;
+    }
+    fontText(c, kBold, mid - fontWidth(c, kBold, value) / 2, top + 30, kAmber, value);
+  }
 }
 
 // ---- Peaks of the session (page 2) ----------------------------------------------------
@@ -545,10 +704,11 @@ void drawPeaks(GFXcanvas16 &c, const VibModel &m) {
 
 // ---- FFT (page 3) ---------------------------------------------------------------------
 
+// Three spectra one below the other (X, Y, Z of the sensor) on a common amplitude
+// scale, so the axes can be compared; on the right the three strongest lines of each.
 void drawFftPage(GFXcanvas16 &c, const VibModel &m) {
   constexpr int panelY = 36, panelH = 196;
   constexpr int plotW = 200, tableX = 208, tableW = 108;
-  const uint16_t kFft = rgb(190, 150, 255);
   const MeasStats *st = m.last && m.last->valid ? m.last : nullptr;
   const bool ok = st && st->hasSpectrum;
   c.fillRoundRect(kPanelX, panelY, plotW, panelH, 8, kPanel);
@@ -570,76 +730,84 @@ void drawFftPage(GFXcanvas16 &c, const VibModel &m) {
   std::snprintf(s, sizeof s, "M%04u", m.lastNumber % 10000);
   small(c, kPanelX + plotW - 10 - smallWidth(s), panelY + 8, kText, s);
 
-  // Plot: frequency 0..Nyquist, amplitude 0..top.
-  constexpr int px = 40, py = 60, pw = 152, ph = 136;
+  // Plots: frequency 0..Nyquist, amplitude 0..top (the same top for the three).
+  constexpr int px = 34, pw = 160, ph = 42, py0 = 58, pitch = 48;
   constexpr int bins = int(MeasStats::kFftSize / 2) + 1;
   float maxAmp = 0;
-  for (int k = 0; k < bins; ++k) maxAmp = fmaxf(maxAmp, k >= 2 ? st->fft[k] : 0);  // No DC leakage.
+  for (int a = 0; a < 3; ++a)
+    for (int k = 2; k < bins; ++k) maxAmp = fmaxf(maxAmp, st->axisFft[a][k]);  // No DC leakage.
   const float top = peakchart::yRange(maxAmp, 0.05f);
-  const auto yOf = [&](float v) { return py + ph - 1 - int(lroundf(fminf(v, top) / top * (ph - 1))); };
-  for (int q = 0; q <= 4; ++q) {
-    const int y = py + (ph - 1) - q * (ph - 1) / 4;
-    if (q == 0) c.drawFastHLine(px, y, pw, kZero);
-    else dottedHLine(c, px, y, pw, kGrid, 3);
-    if (q % 2 == 0) {
+  const float nyq = st->nyquistHz;
+  for (int a = 0; a < 3; ++a) {
+    const int py = py0 + a * pitch;
+    const auto yOf = [&](float v) { return py + ph - 1 - int(lroundf(fminf(v, top) / top * (ph - 1))); };
+    c.drawFastHLine(px, py + ph - 1, pw, kZero);
+    dottedHLine(c, px, py + (ph - 1) / 2, pw, kGrid, 3);
+    const char axis[2] = {kAxisName[a], 0};
+    fontText(c, kBold, kPanelX + 8, py + ph / 2 + 6, kAxis[a], axis);
+    if (a == 0) {  // Scale of the common amplitude axis.
       char v[12];
-      fmt4(v, sizeof v, top * q / 4);
-      small(c, px - 4 - smallWidth(v), y - 4, kMuted, v);
+      fmt4(v, sizeof v, top);
+      small(c, kPanelX + 4 + 12, py - 1, kMuted, v);
+    }
+    for (int x = 0; x < pw; ++x) {  // Highest bin of each pixel column.
+      // Bins [k0, k1), no overlap with the next column; the last one takes Nyquist too.
+      const int k0 = x * (bins - 1) / pw;
+      const int k1 = x == pw - 1 ? bins : std::max(k0 + 1, (x + 1) * (bins - 1) / pw);
+      float v = 0;
+      for (int k = std::max(k0, 1); k < k1 && k < bins; ++k) v = fmaxf(v, st->axisFft[a][k]);
+      const int y = yOf(v);
+      if (py + ph - 1 - y > 0) c.drawFastVLine(px + x, y, py + ph - 1 - y, kAxis[a]);
+    }
+    for (int i = 0; i < st->axisPeakCount[a]; ++i) {  // Numbered markers on the lines of the table.
+      const SpectrumPeak &p = st->axisPeaks[a][i];
+      const int x = px + int(lroundf(p.hz / nyq * (pw - 1))), y = yOf(p.amp);
+      c.fillTriangle(x - 2, y - 5, x + 2, y - 5, x, y - 1, kAmber);
+      char n[2] = {char('1' + i), 0};
+      small(c, x - 2, std::max(y - 14, py - 4), kAmber, n);
     }
   }
-  const float nyq = st->nyquistHz;
-  const float tick = peakchart::niceCeil(nyq / 6);
+  const int axisY = py0 + 3 * pitch - (pitch - ph);
+  const float tick = peakchart::niceCeil(nyq / 4);
   for (float f = 0; f <= nyq; f += tick) {
     const int x = px + int(lroundf(f / nyq * (pw - 1)));
-    if (f > 0) for (int y = py; y < py + ph; y += 3) c.drawPixel(x, y, kGrid);
+    if (f > 0)
+      for (int a = 0; a < 3; ++a)
+        for (int y = py0 + a * pitch; y < py0 + a * pitch + ph; y += 3) c.drawPixel(x, y, kGrid);
     std::snprintf(s, sizeof s, "%.0f", f);
-    small(c, std::min(x - smallWidth(s) / 2, px + pw - smallWidth(s)), py + ph + 4, kMuted, s);
+    small(c, std::min(x - smallWidth(s) / 2, px + pw - smallWidth(s)), axisY + 4, kMuted, s);
   }
-  small(c, kPanelX + plotW - 10 - 12, py + ph + 14, kDim, "Hz");
-
-  for (int x = 0; x < pw; ++x) {  // Highest bin of each pixel column.
-    // Bins [k0, k1), no overlap with the next column; the last one takes Nyquist too.
-    const int k0 = x * (bins - 1) / pw;
-    const int k1 = x == pw - 1 ? bins : std::max(k0 + 1, (x + 1) * (bins - 1) / pw);
-    float v = 0;
-    for (int k = std::max(k0, 1); k < k1 && k < bins; ++k) v = fmaxf(v, st->fft[k]);
-    const int y = yOf(v);
-    if (py + ph - 1 - y > 0) c.drawFastVLine(px + x, y, py + ph - 1 - y, kFft);
-  }
-  for (int i = 0; i < st->peakCount; ++i) {  // Numbered markers on the lines of the table.
-    const SpectrumPeak &p = st->peaks[i];
-    const int x = px + int(lroundf(p.hz / nyq * (pw - 1))), y = yOf(p.amp);
-    c.fillTriangle(x - 2, y - 5, x + 2, y - 5, x, y - 1, kAmber);
-    char n[2] = {char('1' + i), 0};
-    small(c, x - 2, std::max(y - 15, py - 1), kAmber, n);
-  }
-
-  // Table: number, frequency, amplitude.
-  const int x0 = tableX + 8;
-  small(c, x0, panelY + 24, kDim, "#");
-  small(c, x0 + 18, panelY + 24, kDim, "Hz");
-  small(c, tableX + tableW - 8 - smallWidth("m/s2"), panelY + 24, kDim, "m/s2");
-  c.drawFastHLine(x0, panelY + 34, tableW - 16, kPanelEdge);
-  for (int i = 0; i < int(MeasStats::kPeaks); ++i) {
-    const int base = panelY + 54 + i * 24;
-    if (i >= st->peakCount) {
-      fontText(c, kSmall, x0, base, kDim, "-");
-      continue;
-    }
-    const SpectrumPeak &p = st->peaks[i];
-    char n[2] = {char('1' + i), 0};
-    fontText(c, kBold, x0, base, kAmber, n);
-    std::snprintf(s, sizeof s, p.hz < 99.95f ? "%.1f" : "%.0f", p.hz);
-    fontText(c, kSmall, x0 + 18, base, kText, s);
-    char a[12];
-    fmt4(a, sizeof a, p.amp);
-    fontText(c, kSmall, tableX + tableW - 8 - fontWidth(c, kSmall, a), base, kMuted, a);
-  }
-  c.drawFastHLine(x0, panelY + panelH - 30, tableW - 16, kPanelEdge);
+  small(c, kPanelX + plotW - 10 - 12, axisY + 4 + 10, kDim, "Hz");
   std::snprintf(s, sizeof s, "df %.2f Hz", st->binHz);
-  small(c, x0, panelY + panelH - 24, kDim, s);
-  std::snprintf(s, sizeof s, "fp %.0f Hz", st->rateHz);
-  small(c, x0, panelY + panelH - 13, kDim, s);
+  small(c, kPanelX + 10, axisY + 4 + 10, kDim, s);
+
+  // Table: per axis its three strongest lines: axis, rank, frequency, amplitude.
+  const int x0 = tableX + 8;
+  small(c, x0 + 24, panelY + 22, kDim, "Hz");
+  small(c, tableX + tableW - 6 - smallWidth("m/s2"), panelY + 22, kDim, "m/s2");
+  c.drawFastHLine(x0, panelY + 32, tableW - 16, kPanelEdge);
+  for (int a = 0; a < 3; ++a) {
+    for (int i = 0; i < int(MeasStats::kAxisPeaks); ++i) {
+      const int base = panelY + 48 + (a * 3 + i) * 17 + a * 3;
+      // Built-in 6x8 font, like the other small labels; `base` is the baseline of the row.
+      const int top = base - 8;
+      const char axis[2] = {kAxisName[a], 0};
+      char n[2] = {char('1' + i), 0};
+      small(c, x0, top, kAxis[a], axis);
+      small(c, x0 + 7, top, i < st->axisPeakCount[a] ? kAmber : kDim, n);
+      if (i >= st->axisPeakCount[a]) {
+        small(c, x0 + 24, top, kDim, "-");
+        continue;
+      }
+      const SpectrumPeak &p = st->axisPeaks[a][i];
+      std::snprintf(s, sizeof s, p.hz < 9.95f ? "%.1f" : "%.0f", p.hz);  // Bins are ~0.5 Hz wide.
+      small(c, x0 + 24, top, kText, s);
+      char amp[12];
+      fmt4(amp, sizeof amp, p.amp);
+      small(c, tableX + tableW - 8 - smallWidth(amp), top, kMuted, amp);
+    }
+    if (a < 2) c.drawFastHLine(x0, panelY + 48 + (a * 3 + 2) * 17 + a * 3 + 4, tableW - 16, kGrid);
+  }
 }
 
 } // namespace
@@ -647,15 +815,25 @@ void drawFftPage(GFXcanvas16 &c, const VibModel &m) {
 void drawVibScreen(GFXcanvas16 &c, const VibModel &m) {
   c.fillScreen(kBg);
   c.setTextWrap(false);
+  if (m.calibStep >= 0) {  // Whole screen for the targets (the first one is under the status bar).
+    drawCalibration(c, m);
+    c.setFont(nullptr);
+    return;
+  }
   drawStatusBar(c, m);
-  if (m.page == 2) {
+  if (m.page == 4) {
+    drawUsbPage(c, m);
+  } else if (m.page == 3) {
+    drawRangePage(c, m);
+    drawRangeStrip(c, m);
+  } else if (m.page == 2) {
     drawFftPage(c, m);
   } else if (m.page == 1) {
     drawPeaks(c, m);
   } else {
     drawChart(c, m);
     drawStats(c, m);
-    drawThreshold(c, m);
+    drawRangeStrip(c, m);
   }
   drawPageDots(c, m.page);
   c.setFont(nullptr);

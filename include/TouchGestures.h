@@ -21,6 +21,8 @@ struct Rect {
 struct TouchSample {
   bool down = false;
   int16_t x = 0, y = 0;
+  uint16_t rawX = 0, rawY = 0;  // As the controller reports them (for calibration logs).
+  uint8_t chipGesture = 0;      // The controller's own gesture code (CST816 register 0x01), 0 = none.
 };
 
 enum class GestureType : uint8_t { None, Tap, LongPress, SwipeLeft, SwipeRight, SwipeUp, SwipeDown };
@@ -44,6 +46,12 @@ public:
   static constexpr uint32_t kLongPressMs = 700;
   static constexpr int kReleaseSamples = 2;  // Samples without contact that end a touch.
 
+  // swipeMinPx: minimum travel of a swipe for this detector (kSwipeMinPx by default).
+  // releaseSamples: samples without contact that end a touch (kReleaseSamples by default); a
+  // shorter dropout of the controller in the middle of a gesture is bridged.
+  explicit constexpr GestureDetector(int swipeMinPx = kSwipeMinPx, int releaseSamples = kReleaseSamples)
+      : swipeMinPx_(swipeMinPx), releaseSamples_(releaseSamples) {}
+
   Gesture update(const TouchSample &s, uint32_t nowMs) {
     if (s.down) {
       upCount_ = 0;
@@ -64,15 +72,15 @@ public:
       return {};
     }
     if (!active_) return {};
-    if (++upCount_ < kReleaseSamples) return {};
+    if (++upCount_ < releaseSamples_) return {};
     active_ = false;
     if (longFired_) return {};
     const int dx = lastX_ - startX_, dy = lastY_ - startY_;
     const uint32_t duration = nowMs - startMs_;
     const int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
-    if (adx >= kSwipeMinPx && adx * 2 >= ady * 3 && duration <= kSwipeMaxMs)
+    if (adx >= swipeMinPx_ && adx * 2 >= ady * 3 && duration <= kSwipeMaxMs)
       return make(dx < 0 ? GestureType::SwipeLeft : GestureType::SwipeRight);
-    if (ady >= kSwipeMinPx && ady * 2 >= adx * 3 && duration <= kSwipeMaxMs)
+    if (ady >= swipeMinPx_ && ady * 2 >= adx * 3 && duration <= kSwipeMaxMs)
       return make(dy < 0 ? GestureType::SwipeUp : GestureType::SwipeDown);
     if (moved() <= kTapSlopPx && duration <= kTapMaxMs) return make(GestureType::Tap);
     return {};
@@ -96,6 +104,7 @@ private:
     return g;
   }
 
+  int swipeMinPx_, releaseSamples_;
   bool active_ = false, longFired_ = false;
   int upCount_ = 0;
   uint32_t startMs_ = 0;

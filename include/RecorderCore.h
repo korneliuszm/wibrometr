@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -8,9 +9,9 @@
 #include "TriggerDetector.h"
 
 // Destination of one measurement. open() returns false when a measurement cannot
-// start; none of the calls may block.
+// start; none of the calls may block. triggerMm is the distance that started it.
 struct MeasSink {
-  virtual bool open(int thresholdDeci) = 0;
+  virtual bool open(int triggerMm) = 0;
   virtual void write(int32_t relUs, const Accel &a) = 0;
   virtual void close() = 0;
   // Sensor samples lost while recording (read too late); recorded in the file.
@@ -18,22 +19,31 @@ struct MeasSink {
   virtual ~MeasSink() = default;
 };
 
-// Recording state machine. onSample/service/onGap/dynamic run on the sensor thread;
-// setThresholdDeci, thresholdDeci, requestUsb and mode may be called from any thread.
-// Allocation-free.
+// Recording state machine, started from outside (the range finder, see
+// RangeTrigger.h) and ended by time. onSample/service/onGap/dynamic run on the
+// sensor thread; requestStart, startPending, the setters, requestUsb and mode may be
+// called from any thread. Allocation-free.
 class RecorderCore {
 public:
   enum class Mode : uint8_t { Armed, Recording, Usb };
 
-  // maxUs: a measurement is closed this long after its trigger even if the
-  // vibration goes on (0 = no limit); a new one starts only after the usual quiet
-  // time below the threshold, so a steady vibration does not chain files.
-  explicit RecorderCore(TriggerDetector::Config cfg = {}, uint32_t preRollUs = 1000000,
-                        uint32_t holdoffUs = 1000000, uint32_t maxUs = 0)
-      : det_(cfg), preRollUs_(preRollUs), holdoffUs_(holdoffUs), maxUs_(maxUs) {}
+  static constexpr uint32_t kMaxPreRollUs = 1000000;  // The ring holds 1 s at up to 2 kHz.
 
-  void setThresholdDeci(int deci) { thresholdDeci_.store(deci, std::memory_order_relaxed); }
-  int thresholdDeci() const { return thresholdDeci_.load(std::memory_order_relaxed); }
+  // holdoffUs: after a refused open() the next start is ignored for this long.
+  explicit RecorderCore(TriggerDetector::Config cfg = {}, uint32_t holdoffUs = 1000000)
+      : det_(cfg), holdoffUs_(holdoffUs) {}
+
+  // Recording time after the trigger and the part of the measurement before it.
+  void setRecordUs(uint32_t us) { recordUs_.store(us, std::memory_order_relaxed); }
+  void setPreRollUs(uint32_t us) { preRollUs_.store(us < kMaxPreRollUs ? us : kMaxPreRollUs, std::memory_order_relaxed); }
+  // Start request: taken by the next onSample() while Armed (and dropped otherwise).
+  // startPending() stays true until then, and mode() is already Recording when it
+  // turns false after a successful start.
+  void requestStart(int triggerMm) {
+    triggerMm_.store(triggerMm, std::memory_order_relaxed);
+    startWanted_.store(true, std::memory_order_release);
+  }
+  bool startPending() const { return startWanted_.load(std::memory_order_acquire); }
   // Level request: applied by the next service() on the sensor thread.
   void requestUsb(bool active) { usbWanted_.store(active, std::memory_order_release); }
   Mode mode() const { return mode_.load(std::memory_order_acquire); }
@@ -48,47 +58,45 @@ public:
       setMode(Mode::Usb);
     } else if (!want && m == Mode::Usb) {
       restart(sink);
-      setMode(Mode::Armed);  // detector reset -> warm-up again
+      setMode(Mode::Armed);
     }
   }
 
   void onSample(uint32_t tUs, const Accel &a, MeasSink &sink) {
     service(sink);
-    if (mode() == Mode::Usb) return;
+    if (mode() == Mode::Usb) {
+      startWanted_.store(false, std::memory_order_release);
+      return;
+    }
     ring_.push(tUs, a);
-    const int deci = thresholdDeci();
-    const auto ev = det_.update(tUs, a, deci / 10.0f);
+    det_.update(tUs, a, INFINITY);  // Only the high-passed value for the chart: never triggers.
     if (mode() == Mode::Recording) {
       sink.write(static_cast<int32_t>(tUs - triggerUs_), a);
-      const bool tooLong = maxUs_ && static_cast<uint32_t>(tUs - triggerUs_) >= maxUs_;
-      if (ev == TriggerDetector::Event::Stop || tooLong) {
+      startWanted_.store(false, std::memory_order_release);  // A start request now is moot.
+      if (static_cast<uint32_t>(tUs - triggerUs_) >= activeRecordUs_) {
         sink.close();
         setMode(Mode::Armed);
-        // Cut by the limit: the detector stays in its recording state, and its
-        // Stop (the usual quiet time) re-arms the recorder.
-        if (ev != TriggerDetector::Event::Stop) waitQuiet_ = true;
       }
       return;
     }
-    if (waitQuiet_) {
-      if (ev == TriggerDetector::Event::Stop) waitQuiet_ = false;
-      return;
-    }
-    if (ev != TriggerDetector::Event::Start) return;
+    if (!startWanted_.load(std::memory_order_acquire)) return;
     if (holdoff_ && static_cast<uint32_t>(tUs - holdoffFromUs_) < holdoffUs_) {
-      det_.cancelRecording();  // ignore Start during holdoff; detector keeps filtering
+      startWanted_.store(false, std::memory_order_release);
       return;
     }
     holdoff_ = false;
-    if (!sink.open(deci)) {
-      det_.cancelRecording();
+    const int mm = triggerMm_.load(std::memory_order_relaxed);
+    if (!sink.open(mm)) {
       holdoff_ = true;
       holdoffFromUs_ = tUs;
+      startWanted_.store(false, std::memory_order_release);
       return;
     }
     triggerUs_ = tUs;
+    activeRecordUs_ = recordUs_.load(std::memory_order_relaxed);  // A change now applies to the next one.
     setMode(Mode::Recording);
-    const int32_t from = -static_cast<int32_t>(preRollUs_);
+    startWanted_.store(false, std::memory_order_release);  // After the mode: no gap where both look idle.
+    const int32_t from = -static_cast<int32_t>(preRollUs_.load(std::memory_order_relaxed));
     for (std::size_t i = 0; i < ring_.size(); ++i) {  // oldest first; the trigger sample is last
       const auto e = ring_.at(i);
       const int32_t rel = static_cast<int32_t>(e.tUs - triggerUs_);
@@ -109,16 +117,17 @@ private:
     ring_.clear();
     det_.reset();
     holdoff_ = false;
-    waitQuiet_ = false;
+    startWanted_.store(false, std::memory_order_release);
   }
   void setMode(Mode m) { mode_.store(m, std::memory_order_release); }
 
   TriggerDetector det_;
   SampleRing<2048> ring_;  // 1 s pre-roll at up to 2 kHz.
-  uint32_t preRollUs_, holdoffUs_, maxUs_;
-  uint32_t triggerUs_ = 0, holdoffFromUs_ = 0;
-  bool holdoff_ = false, waitQuiet_ = false;
-  std::atomic<int> thresholdDeci_{20};
-  std::atomic<bool> usbWanted_{false};
+  uint32_t holdoffUs_;
+  uint32_t triggerUs_ = 0, holdoffFromUs_ = 0, activeRecordUs_ = 0;
+  bool holdoff_ = false;
+  std::atomic<uint32_t> recordUs_{5000000}, preRollUs_{kMaxPreRollUs};
+  std::atomic<int> triggerMm_{0};
+  std::atomic<bool> startWanted_{false}, usbWanted_{false};
   std::atomic<Mode> mode_{Mode::Armed};
 };
